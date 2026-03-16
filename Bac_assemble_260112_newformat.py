@@ -81,7 +81,7 @@ from metagenomic_refactor.assembly import (
     Annotate_func,
     asb_func,
 )
-from metagenomic_refactor.annotation import AnnoEle, DrugFinder, VFDR
+from metagenomic_refactor.annotation import AnnoEle, AnnoFun, DrugFinder, VFDR
 from metagenomic_refactor.context import RuntimeContext, set_runtime_context
 from metagenomic_refactor.runner import RunnerConfig, run_pipeline_entry
 from metagenomic_refactor.taxonomy import kk2

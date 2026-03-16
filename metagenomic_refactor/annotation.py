@@ -6,8 +6,22 @@ import subprocess
 
 import pandas as pd
 
-from metagenomic_refactor.assembly import outfun
+from metagenomic_refactor.assembly import outfun, run_genovi_summary, write_gene_summaries
 from metagenomic_refactor.context import get_runtime_context
+
+
+def AnnoFun(Pre, threads):
+    # Compatibility shim: the original standalone AnnoFun implementation is no
+    # longer present in the workspace, so we preserve the workflow entrypoint
+    # and reuse the functional-annotation outputs still generated in the
+    # refactored pipeline.
+    with open("AnnoFun.log", "a") as f1:
+        if os.path.isfile(f"{Pre}_prokka/{Pre}.gbk"):
+            run_genovi_summary(Pre)
+        if os.path.isfile(f"{Pre}_prokka/{Pre}.tsv") and os.path.isfile(f"{Pre}_prokka/{Pre}.txt"):
+            write_gene_summaries(Pre)
+        else:
+            f1.write(f"{Pre}\tmissing prokka outputs for AnnoFun compatibility mode\n")
 
 
 def DrugFinder(Pre, threads):
