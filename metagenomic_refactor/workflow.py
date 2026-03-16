@@ -9,6 +9,7 @@ from metagenomic_refactor.common import format_seconds, is_fastq_input
 from metagenomic_refactor.context import get_runtime_context
 from metagenomic_refactor.qc import QC_func
 from metagenomic_refactor.report import combine_func
+from metagenomic_refactor.typing import level2Spe
 
 
 CALLBACKS = {}
@@ -66,7 +67,7 @@ def get_read_mode(pre):
 def infer_species(pre, llid):
     try:
         if llid != "nolevel":
-            return CALLBACKS["level2Spe"](pre, llid.split(",")[0])
+            return level2Spe(pre, llid.split(",")[0])
     except Exception:
         pass
     return 0
