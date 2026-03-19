@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bac Assemble Portal</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-intro">
+          <p class="eyebrow">Clinical Assembly Console</p>
+          <h1>细菌组装分析工作台</h1>
+          <p class="hero-copy">面向实验室分析人员的提交与调度入口，优先保证参数明确、任务可追踪、批量运行可管理。</p>
+          <div class="hero-actions">
+            <button id="hero-start-button" class="primary-button" type="button">开始提交任务</button>
+            <button id="hero-queue-button" class="ghost-button" type="button">查看任务队列</button>
+          </div>
+        </div>
+        <div class="hero-meta-line">
+          <span>异步分析</span>
+          <span>端口 5055</span>
+          <span>日志尾部回看</span>
+          <span id="current-user-chip">用户加载中</span>
+          <button id="logout-button" class="ghost-button" type="button">退出登录</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <nav class="tab-bar" aria-label="主导航">
+          <button class="tab-button active" type="button" data-tab-target="submission-tab">提交任务</button>
+          <button class="tab-button" type="button" data-tab-target="queue-tab">任务队列</button>
+          <button id="admin-tab-button" class="tab-button hidden" type="button" data-tab-target="admin-tab">后台管理</button>
+        </nav>
+
+        <section id="submission-tab" class="tab-panel active">
+        <section id="submission-panel" class="panel submission-panel">
+          <div class="panel-head">
+            <div>
+              <p class="section-kicker">Task Intake</p>
+              <h2>快速提交样本分析</h2>
+              <p class="field-note">基础参数默认展开，高级参数按需展开，减少录入负担并降低误配风险。</p>
+            </div>
+            <button id="submit-button" class="primary-button" type="submit" form="task-form">启动任务</button>
+          </div>
+
+          <section class="submission-band" aria-label="快速说明">
+            <article>
+              <strong>1. 填输入路径</strong>
+              <p>支持文件或目录，支持相对项目根目录。</p>
+            </article>
+            <article>
+              <strong>2. 指定输出目录</strong>
+              <p>建议每个样本或批次独立目录，方便追踪和复跑。</p>
+            </article>
+            <article>
+              <strong>3. 检查核心参数</strong>
+              <p>线程、输入类型、组装方式和物种信息优先确认。</p>
+            </article>
+          </section>
+
+          <form id="task-form" class="form-grid">
+            <section class="form-section wide">
+              <div class="form-section-head">
+                <div>
+                  <h3>任务身份</h3>
+                  <p class="field-note">先定义样本任务名、输入位置和结果输出位置。</p>
+                </div>
+              </div>
+              <div class="form-row form-row-primary">
+                <label class="wide">
+                  <span>任务名称</span>
+                  <input id="task_name" placeholder="例如：sample_A_nanopore_assembly">
+                </label>
+                <label class="wide">
+                  <span>输入路径</span>
+                  <div class="picker-field">
+                    <input id="input_path" required readonly placeholder="点击右侧按钮选择文件或目录">
+                    <button id="choose-input-path" class="ghost-button" type="button">选择输入</button>
+                  </div>
+                  <small class="field-note">从当前项目工作区中选择输入文件或输入目录。</small>
+                </label>
+                <label class="wide">
+                  <span>输出目录</span>
+                  <div class="picker-field">
+                    <input id="output_dir" required readonly placeholder="点击右侧按钮选择输出目录">
+                    <button id="choose-output-dir" class="ghost-button" type="button">选择目录</button>
+                  </div>
+                  <small class="field-note">从当前项目工作区中选择已有目录，任务会在该目录下输出结果。</small>
+                </label>
+              </div>
+            </section>
+
+            <section class="form-section wide">
+              <div class="form-section-head">
+                <div>
+                  <h3>核心分析参数</h3>
+                  <p class="field-note">这些参数决定输入识别和主要分析路径，默认应优先核对。</p>
+                </div>
+              </div>
+              <div class="form-row">
+                <label>
+                  <span>输入类型</span>
+                  <select id="inputtype">
+                    <option value="fastq">fastq</option>
+                    <option value="fasta">fasta</option>
+                  </select>
+                </label>
+                <label>
+                  <span>线程数</span>
+                  <input id="thread" type="number" min="1" value="10">
+                </label>
+                <label>
+                  <span>组装类型</span>
+                  <select id="asm_type">
+                    <option value="shortasm">短读长无参组装 / shortasm</option>
+                    <option value="longasm">长读长无参组装 / longasm</option>
+                    <option value="shortref">短读长有参组装 / shortref</option>
+                    <option value="longref">长读长有参组装 / longref</option>
+                    <option value="shortlongasm">混合组装 / shortlongasm</option>
+                  </select>
+                </label>
+                <label>
+                  <span>组装方法</span>
+                  <select id="method"></select>
+                </label>
+                <label id="long-type-wrap">
+                  <span>长读长类型</span>
+                  <select id="long_type">
+                    <option value="Nanopore">Nanopore</option>
+                    <option value="PacBio_CLR">PacBio_CLR</option>
+                    <option value="PacBio_CCS">PacBio_CCS</option>
+                  </select>
+                </label>
+                <label>
+                  <span>物种信息</span>
+                  <input id="species" value="False" placeholder="例如：Klebsiella pneumoniae">
+                </label>
+                <div class="inline-note wide" id="asm-type-note"></div>
+              </div>
+            </section>
+
+            <details class="advanced-panel wide">
+              <summary>
+                <span>高级参数</span>
+                <small>过滤、抛光、参考序列、宿主去除、RNA 建库等</small>
+              </summary>
+              <div class="advanced-grid">
+                <label>
+                  <span>最短长度</span>
+                  <input id="minlongfilt" value="500">
+                </label>
+                <label>
+                  <span>最小质量</span>
+                  <input id="Qfilt" value="10">
+                </label>
+                <label>
+                  <span>拆条码试剂盒</span>
+                  <input id="barcodekit" value="none">
+                </label>
+                <label>
+                  <span>基因组大小</span>
+                  <input id="genome_len" value="4m">
+                </label>
+                <label>
+                  <span>抛光次数</span>
+                  <input id="polish_times" value="1">
+                </label>
+                <label>
+                  <span>抛光软件</span>
+                  <input id="polish_soft" value="medaka">
+                </label>
+                <label>
+                  <span>运行节点</span>
+                  <input id="runflow" value="All">
+                </label>
+                <label>
+                  <span>去宿主</span>
+                  <input id="rmhost" value="norm">
+                </label>
+                <label>
+                  <span>过滤阈值</span>
+                  <input id="abun" value="1">
+                </label>
+                <label>
+                  <span>RNA 建库</span>
+                  <input id="rna" value="0">
+                </label>
+                <label>
+                  <span>假流程</span>
+                  <input id="fake_pip" type="number" min="0" value="0">
+                </label>
+                <label class="wide">
+                  <span>参考基因组</span>
+                  <input id="ref" placeholder="可留空">
+                </label>
+                <label class="wide">
+                  <span>注释文件</span>
+                  <input id="gtf" placeholder="可留空">
+                </label>
+              </div>
+            </details>
+          </form>
+        </section>
+        </section>
+
+        <section id="queue-tab" class="tab-panel">
+          <section id="task-queue" class="panel queue-panel">
+            <div class="panel-head">
+              <div>
+                <p class="section-kicker">Queue</p>
+                <h2>任务队列</h2>
+                <p class="field-note">按创建时间倒序展示，适合快速确认最近任务和批量运行情况。</p>
+              </div>
+              <button id="refresh-button" class="ghost-button" type="button">刷新</button>
+            </div>
+            <div id="queue-summary" class="queue-summary" aria-live="polite"></div>
+            <div id="task-list" class="task-list"></div>
+          </section>
+        </section>
+
+        <section id="admin-tab" class="tab-panel">
+          <section id="admin-panel" class="panel detail-panel hidden">
+            <div class="panel-head">
+              <div>
+                <p class="section-kicker">Admin</p>
+                <h2>后台管理</h2>
+                <p class="field-note">管理员可维护脚本路径，并管理门户用户。</p>
+              </div>
+            </div>
+
+            <div class="detail-block">
+              <h3>脚本路径设置</h3>
+              <form id="settings-form" class="admin-form">
+                <label class="wide">
+                  <span>部署基准目录</span>
+                  <div class="picker-field">
+                    <input id="admin_workspace_root" required readonly placeholder="选择部署基准目录">
+                    <button id="choose-workspace-root" class="ghost-button" type="button">选择目录</button>
+                  </div>
+                </label>
+                <label class="wide">
+                  <span>脚本相对路径（相对于部署基准目录）</span>
+                  <div class="picker-field">
+                    <input id="admin_pipeline_script" required readonly placeholder="选择脚本文件">
+                    <button id="choose-pipeline-script" class="ghost-button" type="button">选择脚本</button>
+                  </div>
+                </label>
+                <p class="field-note">先选择部署基准目录，再从该目录中选择脚本文件。保存时系统会自动转换成相对路径。</p>
+                <button class="primary-button" type="submit">保存脚本路径</button>
+              </form>
+            </div>
+
+            <div class="detail-block">
+              <h3>用户信息管理</h3>
+              <form id="user-form" class="admin-form">
+                <label>
+                  <span>用户名</span>
+                  <input id="new_username" required>
+                </label>
+                <label>
+                  <span>显示名</span>
+                  <input id="new_display_name">
+                </label>
+                <label>
+                  <span>密码</span>
+                  <input id="new_password" type="password" required>
+                </label>
+                <label>
+                  <span>角色</span>
+                  <select id="new_role">
+                    <option value="user">普通用户</option>
+                    <option value="admin">管理员</option>
+                  </select>
+                </label>
+                <button class="primary-button" type="submit">新增用户</button>
+              </form>
+              <div id="user-list" class="user-list"></div>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <div id="task-detail-modal" class="browser-modal hidden" aria-hidden="true">
+      <div id="task-detail-backdrop" class="browser-backdrop"></div>
+      <section class="browser-panel detail-modal-panel" role="dialog" aria-modal="true" aria-labelledby="task-detail-title">
+        <div class="panel-head">
+          <div>
+            <p class="section-kicker">Detail</p>
+            <h2 id="task-detail-title">任务详情</h2>
+            <p class="field-note">点击任务队列中的任务后，以弹窗形式查看参数、执行命令和日志。</p>
+          </div>
+          <div class="modal-head-actions">
+            <div id="task-status-chip" class="status-chip">未选择</div>
+            <button id="close-task-detail" class="ghost-button" type="button">关闭</button>
+          </div>
+        </div>
+        <div id="task-detail" class="task-detail empty-state">请选择一个任务。</div>
+      </section>
+    </div>
+
+    <div id="path-browser-modal" class="browser-modal hidden" aria-hidden="true">
+      <div id="path-browser-backdrop" class="browser-backdrop"></div>
+      <section class="browser-panel browser-panel-saveas" role="dialog" aria-modal="true" aria-labelledby="path-browser-title">
+        <div class="panel-head browser-dialog-head">
+          <div>
+            <p class="section-kicker">File Picker</p>
+            <h2 id="path-browser-title">选择路径</h2>
+            <p id="path-browser-subtitle" class="field-note">浏览当前项目工作区。</p>
+          </div>
+          <button id="close-path-browser" class="ghost-button" type="button">关闭</button>
+        </div>
+
+        <div class="browser-shell">
+          <aside class="browser-sidebar">
+            <strong class="browser-sidebar-title">快捷位置</strong>
+            <div class="browser-shortcuts">
+              <button id="browser-shortcut-project" class="browser-shortcut active" type="button">项目根目录</button>
+              <button id="browser-shortcut-home" class="browser-shortcut" type="button">Home</button>
+              <button id="browser-shortcut-desktop" class="browser-shortcut" type="button">Desktop</button>
+              <button id="browser-shortcut-workspace" class="browser-shortcut hidden" type="button">部署基准目录</button>
+            </div>
+            <div class="browser-selection browser-selection-side">
+              <span>当前选中</span>
+              <strong id="browser-selected-name">未选择</strong>
+            </div>
+          </aside>
+
+          <div class="browser-main">
+            <div class="browser-toolbar">
+              <button id="browser-go-up" class="ghost-button" type="button">返回上级</button>
+              <button id="browser-new-folder" class="ghost-button" type="button">新建文件夹</button>
+              <button id="browser-rename" class="ghost-button" type="button">重命名</button>
+            </div>
+
+            <div class="browser-pathbar">
+              <span>位置</span>
+              <div id="browser-breadcrumbs" class="browser-breadcrumbs"></div>
+            </div>
+
+            <div class="browser-location">
+              <span>当前目录</span>
+              <code id="browser-current-path">/</code>
+            </div>
+
+            <div class="browser-list-shell">
+              <div class="browser-list-head">
+                <span>名称</span>
+                <span>类型</span>
+                <span>路径</span>
+              </div>
+              <div id="browser-list" class="browser-list"></div>
+            </div>
+
+            <div class="browser-bottom-bar">
+              <label class="browser-selected-path-wrap">
+                <span>已选路径</span>
+                <input id="browser-selected-path" readonly placeholder="请选择目录或文件">
+              </label>
+              <div class="browser-bottom-actions">
+                <button id="browser-select-current" class="primary-button" type="button">确认选择</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  </body>
+</html>

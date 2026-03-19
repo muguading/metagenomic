@@ -1,0 +1,733 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Genome Vault</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor_leaflet.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Genome Database Console</p>
+          <h1>Genome Vault</h1>
+          <p class="hero-copy">
+            Curate reference genomes, validate FASTA assets, trace every change, and search your pathogen references without leaving the browser.
+          </p>
+        </div>
+        <div class="hero-meta">
+          <div class="user-box">
+            <span id="current-user-chip" class="pill">Loading user...</span>
+            <button id="logout-button" class="ghost-button" type="button">Logout</button>
+          </div>
+          <span class="pill">SQLite-backed</span>
+          <span class="pill">Audit-ready</span>
+          <span class="pill">FASTA validation</span>
+          <p class="database-note">Current database: <code>{{ database_url }}</code></p>
+        </div>
+      </header>
+
+      <main class="workspace-shell">
+        <nav class="tab-bar" aria-label="Primary">
+          <button class="tab-button active" type="button" data-tab-target="genome-tab">Genome Workspace</button>
+          <button class="tab-button" type="button" data-tab-target="database-tab">Database</button>
+          <button class="tab-button" type="button" data-tab-target="monitoring-tab">Monitoring Detail</button>
+          <button class="tab-button" type="button" data-tab-target="account-tab">Account</button>
+          <button class="tab-button" type="button" data-tab-target="audit-tab">Audit</button>
+          <button id="admin-tab-button" class="tab-button hidden" type="button" data-tab-target="users-tab">Users</button>
+        </nav>
+
+        <section id="genome-tab" class="tab-panel active">
+          <div class="workspace-actions">
+            <button id="open-bulk-import-modal" class="ghost-button workspace-import-button" type="button">Batch Import</button>
+            <button id="open-genome-modal" class="fab-button" type="button" aria-label="Add genome">+</button>
+          </div>
+
+          <div class="dashboard-grid">
+            <section class="panel panel-search">
+              <div class="panel-head">
+                <h2>Search & Browse</h2>
+                <div class="panel-inline-actions">
+                  <button id="toggle-search-panel" class="ghost-button" type="button" aria-expanded="false">Open Search</button>
+                  <button id="refresh-button" class="ghost-button" type="button">Refresh</button>
+                </div>
+              </div>
+              <form id="search-form" class="search-grid hidden" aria-hidden="true">
+                <label>
+                  <span>Species</span>
+                  <input id="search_species_name" placeholder="Klebsiella">
+                </label>
+                <label>
+                  <span>TaxID</span>
+                  <input id="search_taxid" type="number" min="1" placeholder="562">
+                </label>
+                <label>
+                  <span>Submitter</span>
+                  <input id="search_submitter" placeholder="alice">
+                </label>
+                <div class="search-custom-wrap wide">
+                  <div class="panel-head meta-head">
+                    <div>
+                      <h3>Custom Filters</h3>
+                      <p class="field-note">Append custom metadata conditions and combine them with AND / OR.</p>
+                    </div>
+                    <button id="add-search-filter" class="ghost-button" type="button">Add Filter</button>
+                  </div>
+                  <div class="search-filter-controls">
+                    <label>
+                      <span>Condition Logic</span>
+                      <select id="search_custom_logic">
+                        <option value="and">AND</option>
+                        <option value="or">OR</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div id="search-filter-list" class="search-filter-list"></div>
+                  <p id="search-filter-empty-state" class="empty-state">No custom filters yet.</p>
+                </div>
+                <div class="search-actions wide">
+                  <button class="primary-button" type="submit">Search</button>
+                </div>
+              </form>
+              <div class="results-meta">
+                <span id="genome-count">0 genomes</span>
+                <div class="pager">
+                  <button id="prev-page" class="ghost-button" type="button">Prev</button>
+                  <span id="page-indicator">Page 1 / 1</span>
+                  <button id="next-page" class="ghost-button" type="button">Next</button>
+                </div>
+              </div>
+              <div id="genome-list" class="genome-list"></div>
+            </section>
+
+            <section class="panel panel-detail">
+              <div class="panel-head">
+                <h2>Genome Detail</h2>
+                <span class="status-chip" id="detail-status">Idle</span>
+              </div>
+              <div id="detail-card" class="detail-card empty-state">
+                Select a genome card to inspect metadata and edit it.
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="database-tab" class="tab-panel">
+          <section class="panel panel-database">
+            <div class="panel-head">
+              <h2>Database</h2>
+              <button id="refresh-database" class="ghost-button" type="button">Refresh</button>
+            </div>
+            <div class="results-meta">
+              <span id="database-count">0 samples</span>
+              <div class="pager">
+                <button id="prev-database-page" class="ghost-button" type="button">Prev</button>
+                <span id="database-page-indicator">Page 1 / 1</span>
+                <button id="next-database-page" class="ghost-button" type="button">Next</button>
+              </div>
+            </div>
+            <div class="table-shell">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Genome ID</th>
+                    <th>Sample</th>
+                    <th>Species</th>
+                    <th>TaxID</th>
+                    <th>Submitter</th>
+                    <th>Length</th>
+                    <th>Submitted</th>
+                  </tr>
+                </thead>
+                <tbody id="database-table-body"></tbody>
+              </table>
+            </div>
+            <p id="database-empty-state" class="empty-state hidden">No samples available.</p>
+          </section>
+        </section>
+
+        <section id="monitoring-tab" class="tab-panel">
+          <section class="panel panel-monitoring">
+            <div class="panel-head monitoring-head">
+              <div>
+                <h2>Monitoring Detail</h2>
+                <p class="field-note">A surveillance-screen overview inspired by molecular monitoring dashboards, plus a customizable analysis canvas below.</p>
+              </div>
+              <div class="panel-inline-actions">
+                <button id="refresh-monitoring" class="ghost-button" type="button">Refresh Data</button>
+                <button id="reset-monitoring-layout" class="ghost-button" type="button">Reset Layout</button>
+                <button id="add-monitoring-widget" class="primary-button" type="button">Add Chart</button>
+              </div>
+            </div>
+            <section class="surveillance-screen">
+              <div class="surveillance-hero">
+                <div>
+                  <p class="eyebrow">Molecular Surveillance Screen</p>
+                  <h3>Pathogen Monitoring Overview</h3>
+                  <p class="field-note">Population-scale spatial, temporal, and sampling patterns derived from the current database scope.</p>
+                </div>
+                <div class="surveillance-scope">
+                  <button id="surveillance-china-button" class="ghost-button active" type="button">China Map</button>
+                  <button id="surveillance-world-button" class="ghost-button" type="button">World Map</button>
+                </div>
+              </div>
+              <div id="surveillance-kpis" class="surveillance-kpis"></div>
+              <div class="surveillance-grid">
+                <section class="surveillance-panel surveillance-panel-map">
+                  <div class="panel-head">
+                    <div>
+                      <h3>Geographic Distribution</h3>
+                      <p id="surveillance-map-caption" class="field-note">Heat distribution across monitored regions.</p>
+                    </div>
+                    <button id="surveillance-map-back" class="ghost-button hidden" type="button">Back</button>
+                  </div>
+                  <div id="surveillance-map" class="surveillance-map"></div>
+                </section>
+                <section class="surveillance-panel">
+                  <div class="panel-head">
+                    <div>
+                      <h3>Collection Timeline</h3>
+                      <p class="field-note">Monthly trend based on collection time, falling back to submit time when needed.</p>
+                    </div>
+                  </div>
+                  <div id="surveillance-timeline" class="surveillance-chart"></div>
+                </section>
+                <section class="surveillance-panel">
+                  <div class="panel-head">
+                    <div>
+                      <h3>Country Distribution</h3>
+                      <p class="field-note">Top countries represented in the current data view.</p>
+                    </div>
+                  </div>
+                  <div id="surveillance-country" class="surveillance-chart"></div>
+                </section>
+                <section class="surveillance-panel">
+                  <div class="panel-head">
+                    <div>
+                      <h3>Sample Type</h3>
+                      <p class="field-note">Sampling material composition.</p>
+                    </div>
+                  </div>
+                  <div id="surveillance-sample-type" class="surveillance-chart"></div>
+                </section>
+                <section class="surveillance-panel">
+                  <div class="panel-head">
+                    <div>
+                      <h3>Sequencing Method</h3>
+                      <p class="field-note">Platform and methodology profile.</p>
+                    </div>
+                  </div>
+                  <div id="surveillance-sequencing" class="surveillance-chart"></div>
+                </section>
+                <section class="surveillance-panel">
+                  <div class="panel-head">
+                    <div>
+                      <h3>Recent Records</h3>
+                      <p class="field-note">Latest collected or submitted samples in the current scope.</p>
+                    </div>
+                  </div>
+                  <div id="surveillance-recent" class="surveillance-table-wrap"></div>
+                </section>
+              </div>
+            </section>
+            <div class="panel-divider"></div>
+            <div class="panel-head">
+              <div>
+                <h3>Custom Analysis Canvas</h3>
+                <p class="field-note">Build up to 10 visual cards from standard fields or custom metadata, then drag and resize them on the screen.</p>
+              </div>
+            </div>
+            <div class="monitoring-builder">
+              <label>
+                <span>Title</span>
+                <input id="monitoring_title" placeholder="e.g. Country Distribution">
+              </label>
+              <label>
+                <span>Chart Type</span>
+                <select id="monitoring_chart_type">
+                  <option value="bar">Bar</option>
+                  <option value="pie">Pie</option>
+                  <option value="line">Line</option>
+                  <option value="radar">Radar</option>
+                  <option value="map">Map</option>
+                </select>
+              </label>
+              <label>
+                <span>Field</span>
+                <select id="monitoring_field"></select>
+              </label>
+              <label id="monitoring_map_scope_wrap" class="hidden">
+                <span>Map Scope</span>
+                <select id="monitoring_map_scope">
+                  <option value="world">World Map</option>
+                  <option value="china">China Map</option>
+                </select>
+              </label>
+              <div class="search-actions">
+                <button id="create-monitoring-widget" class="primary-button" type="button">Create Widget</button>
+              </div>
+            </div>
+            <div class="results-meta">
+              <span id="monitoring-count">0 / 10 widgets</span>
+              <span class="field-note">Drag card header to move, drag corner handle to resize.</span>
+            </div>
+            <div id="monitoring-board" class="monitoring-board"></div>
+            <p id="monitoring-empty-state" class="empty-state">No visual cards yet. Create your first chart above.</p>
+          </section>
+        </section>
+
+        <div id="genome-modal" class="modal-shell hidden" aria-hidden="true">
+            <div class="modal-backdrop" data-close-modal="genome"></div>
+            <section class="panel panel-form modal-panel" role="dialog" aria-modal="true" aria-labelledby="form-title">
+              <div class="panel-head">
+                <h2 id="form-title">Add Genome</h2>
+                <div class="modal-actions">
+                  <button id="reset-form" class="ghost-button" type="button">Reset</button>
+                  <button id="close-genome-modal" class="ghost-button" type="button" aria-label="Close genome editor">Close</button>
+                </div>
+              </div>
+              <div class="subtab-bar">
+                <button class="subtab-button active" type="button" data-form-tab-target="basic-tab">Basic Info</button>
+                <button class="subtab-button" type="button" data-form-tab-target="meta-tab">Custom Meta</button>
+              </div>
+              <form id="genome-form" class="form-grid">
+                <input id="edit-genome-id" type="hidden">
+                <section id="basic-tab" class="form-tab-panel active form-grid wide">
+                  <label>
+                    <span>Genome ID</span>
+                    <input id="genome_id" name="genome_id" required>
+                  </label>
+                  <label>
+                    <span>Sample Name</span>
+                    <input id="sample_name" name="sample_name" required>
+                  </label>
+                  <label>
+                    <span>Species Name</span>
+                    <input id="species_name" name="species_name" required>
+                  </label>
+                  <label>
+                    <span>TaxID</span>
+                    <input id="taxid" name="taxid" type="number" min="1" required>
+                  </label>
+                  <label class="wide">
+                    <span>Genome FASTA Upload</span>
+                    <div id="upload-dropzone" class="upload-dropzone" tabindex="0">
+                      <input id="fasta_file" type="file" accept=".fa,.fasta,.fna,.fas" class="hidden">
+                      <div class="upload-copy">
+                        <strong>Drop FASTA here</strong>
+                        <p>or click to choose a file from your computer</p>
+                      </div>
+                      <button id="select-file-button" class="ghost-button" type="button">Choose FASTA</button>
+                    </div>
+                  </label>
+                  <label class="wide">
+                    <span>Stored Genome FASTA Path</span>
+                    <input id="genome_file_path" name="genome_file_path" required readonly placeholder="Upload a FASTA file to populate this path">
+                    <small id="upload-status" class="field-note">No file uploaded yet.</small>
+                  </label>
+                  <label>
+                    <span>Submitter</span>
+                    <input id="submitter" name="submitter" readonly>
+                  </label>
+                  <label>
+                    <span>Gender</span>
+                    <select id="gender" name="gender">
+                      <option value="">Select Gender</option>
+                      <option value="Male">Male</option>
+                      <option value="Female">Female</option>
+                      <option value="Other">Other</option>
+                      <option value="Unknown">Unknown</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Country</span>
+                    <select id="country" name="country"></select>
+                  </label>
+                  <label>
+                    <span>Collection Time</span>
+                    <input id="collection_time" name="collection_time" type="datetime-local">
+                  </label>
+                  <label>
+                    <span>Sample Type</span>
+                    <input id="sample_type" name="sample_type" placeholder="e.g. Blood, Swab, Soil">
+                  </label>
+                  <label class="wide">
+                    <span>Sequencing Method</span>
+                    <input id="sequencing_method" name="sequencing_method" placeholder="e.g. Illumina, Nanopore, PacBio">
+                  </label>
+                  <div class="wide meta-location-grid">
+                    <label>
+                      <span>Province / 省</span>
+                      <select id="builtin_location_province"></select>
+                    </label>
+                    <label>
+                      <span>City / 市</span>
+                      <select id="builtin_location_city"></select>
+                    </label>
+                    <label>
+                      <span>District / 区县</span>
+                      <select id="builtin_location_district"></select>
+                    </label>
+                    <label>
+                      <span>Location Detail</span>
+                      <input id="builtin_location_detail" placeholder="Street, hospital, station, etc.">
+                    </label>
+                  </div>
+                  <p id="builtin_location_note" class="field-note wide">Location linkage is enabled when country is China.</p>
+                  <label class="wide">
+                    <span>Description</span>
+                    <textarea id="description" name="description" rows="4" placeholder="Short note about assembly quality, strain origin, or intended use."></textarea>
+                  </label>
+                </section>
+
+                <section id="meta-tab" class="form-tab-panel wide">
+                  <div class="panel-head meta-head">
+                    <h3>Custom Metadata</h3>
+                    <button id="add-meta-field" class="ghost-button" type="button">Add Field</button>
+                  </div>
+                  <div id="meta-field-list" class="meta-field-list"></div>
+                  <p id="meta-empty-state" class="empty-state">No custom metadata fields yet.</p>
+                </section>
+                <div class="form-actions wide">
+                  <button id="submit-button" class="primary-button" type="submit">Add Genome</button>
+                  <button id="delete-button" class="danger-button hidden" type="button">Delete Genome</button>
+                </div>
+              </form>
+            </section>
+        </div>
+
+        <div id="bulk-import-modal" class="modal-shell hidden" aria-hidden="true">
+          <div class="modal-backdrop" data-close-modal="bulk-import"></div>
+          <section class="panel modal-panel bulk-import-panel" role="dialog" aria-modal="true" aria-labelledby="bulk-import-title">
+            <div class="panel-head">
+              <div>
+                <h2 id="bulk-import-title">Batch Import Genomes</h2>
+                <p class="field-note">Upload one `xlsx`, `csv`, or `tsv` file. Each row creates one genome record for the current account.</p>
+              </div>
+              <button id="close-bulk-import-modal" class="ghost-button" type="button">Close</button>
+            </div>
+            <div class="bulk-import-grid">
+              <section class="bulk-import-card">
+                <h3>Upload File</h3>
+                <p class="field-note">Required columns are fixed and already included in the demo template.</p>
+                <input id="bulk-import-file" type="file" accept=".xlsx,.csv,.tsv">
+                <div class="form-actions">
+                  <button id="submit-bulk-import" class="primary-button" type="button">Start Import</button>
+                </div>
+                <p id="bulk-import-status" class="field-note">No file selected.</p>
+              </section>
+              <section class="bulk-import-card">
+                <h3>Download Demo</h3>
+                <p class="field-note">Use these sample templates as a starting point, then replace `genome_file_path` with valid FASTA paths on the server.</p>
+                <div class="bulk-import-downloads">
+                  <a class="ghost-button download-link" href="{{ url_for('static', filename='demo/genome_bulk_import_demo.xlsx') }}" download>Demo XLSX</a>
+                  <a class="ghost-button download-link" href="{{ url_for('static', filename='demo/genome_bulk_import_demo.csv') }}" download>Demo CSV</a>
+                  <a class="ghost-button download-link" href="{{ url_for('static', filename='demo/genome_bulk_import_demo.tsv') }}" download>Demo TSV</a>
+                </div>
+              </section>
+            </div>
+            <div class="panel-divider"></div>
+            <div class="panel-head">
+              <h3>Import Result</h3>
+            </div>
+            <div id="bulk-import-result" class="detail-card empty-state">Run a batch import to see row-level results here.</div>
+          </section>
+        </div>
+
+        <section id="account-tab" class="tab-panel">
+          <section class="panel panel-profile">
+            <div class="panel-head">
+              <h2>Account Center</h2>
+              <button id="refresh-profile" class="ghost-button" type="button">Reload</button>
+            </div>
+            <form id="profile-form" class="form-grid">
+              <label>
+                <span>Username</span>
+                <input id="profile_username" required autocomplete="username">
+              </label>
+              <label>
+                <span>Display Name</span>
+                <input id="profile_display_name" autocomplete="name" placeholder="Optional">
+              </label>
+              <label class="wide">
+                <span>Email</span>
+                <input id="profile_email" type="email" autocomplete="email" placeholder="Optional">
+              </label>
+              <div class="form-actions wide">
+                <button class="primary-button" type="submit">Save Profile</button>
+              </div>
+            </form>
+
+            <div class="panel-divider"></div>
+
+            <form id="password-form" class="form-grid">
+              <label>
+                <span>Current Password</span>
+                <input id="current_password" type="password" required autocomplete="current-password">
+              </label>
+              <label>
+                <span>New Password</span>
+                <input id="new_profile_password" type="password" required autocomplete="new-password">
+              </label>
+              <label class="wide">
+                <span>Confirm New Password</span>
+                <input id="confirm_profile_password" type="password" required autocomplete="new-password">
+              </label>
+              <div class="form-actions wide">
+                <button class="primary-button" type="submit">Change Password</button>
+              </div>
+            </form>
+          </section>
+        </section>
+
+        <section id="audit-tab" class="tab-panel">
+          <section class="panel panel-audit">
+            <div class="panel-head">
+              <h2>Audit Trail</h2>
+              <button id="refresh-audit" class="ghost-button" type="button">Reload</button>
+            </div>
+            <form id="audit-form" class="audit-grid">
+              <label>
+                <span>Genome ID</span>
+                <input id="audit_genome_id" placeholder="G001">
+              </label>
+              <label>
+                <span>Operation</span>
+                <input id="audit_operation" placeholder="add_genome">
+              </label>
+              <div class="search-actions">
+                <button class="primary-button" type="submit">Filter Logs</button>
+              </div>
+            </form>
+            <div class="results-meta">
+              <span id="audit-count">0 records</span>
+              <div class="pager">
+                <button id="prev-audit-page" class="ghost-button" type="button">Prev</button>
+                <span id="audit-page-indicator">Page 1 / 1</span>
+                <button id="next-audit-page" class="ghost-button" type="button">Next</button>
+              </div>
+            </div>
+            <div id="audit-list" class="audit-list"></div>
+          </section>
+        </section>
+
+        <section id="users-tab" class="tab-panel">
+          <section id="admin-panel" class="panel panel-admin hidden">
+            <div class="panel-head">
+              <h2>User Management</h2>
+              <button id="refresh-users" class="ghost-button" type="button">Reload Users</button>
+            </div>
+            <form id="user-form" class="audit-grid">
+              <label>
+                <span>Username</span>
+                <input id="new_username" required>
+              </label>
+              <label>
+                <span>Password</span>
+                <input id="new_password" type="password" required>
+              </label>
+              <label>
+                <span>Role</span>
+                <select id="new_role">
+                  <option value="user">user</option>
+                  <option value="admin">admin</option>
+                </select>
+              </label>
+              <div class="search-actions">
+                <button class="primary-button" type="submit">Create User</button>
+              </div>
+            </form>
+            <div id="user-list" class="audit-list"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <template id="genome-card-template">
+      <article class="genome-card">
+        <div class="genome-card-head">
+          <h3></h3>
+          <span class="species-tag"></span>
+        </div>
+        <p class="genome-card-meta"></p>
+        <dl class="mini-stats"></dl>
+        <div class="genome-card-actions">
+          <button class="ghost-button genome-edit-button" type="button">Edit</button>
+        </div>
+      </article>
+    </template>
+
+    <template id="audit-item-template">
+      <article class="audit-item">
+        <div class="audit-topline">
+          <strong class="audit-operation"></strong>
+          <span class="audit-status"></span>
+        </div>
+        <p class="audit-details"></p>
+        <p class="audit-meta"></p>
+      </article>
+    </template>
+
+    <template id="user-item-template">
+      <article class="audit-item">
+        <div class="audit-topline">
+          <strong class="user-name"></strong>
+          <span class="species-tag user-role"></span>
+        </div>
+        <p class="audit-meta user-meta"></p>
+      </article>
+    </template>
+
+    <template id="meta-field-template">
+      <article class="meta-field-item">
+        <div class="meta-field-top">
+          <strong class="meta-field-title">Metadata Field</strong>
+          <div class="meta-field-toolbar">
+            <button class="ghost-button meta-move-up-button" type="button">Up</button>
+            <button class="ghost-button meta-move-down-button" type="button">Down</button>
+            <button class="ghost-button meta-remove-button" type="button">Remove</button>
+          </div>
+        </div>
+        <div class="meta-field-grid">
+          <label>
+            <span>Field Label</span>
+            <input class="meta-label-input" required>
+          </label>
+          <label>
+            <span>Type</span>
+            <select class="meta-type-select">
+              <option value="text">Text</option>
+              <option value="country">Country</option>
+              <option value="select">Select</option>
+              <option value="datetime">DateTime</option>
+              <option value="location">Location</option>
+              <option value="file">File</option>
+            </select>
+          </label>
+          <label class="meta-options-wrap wide hidden">
+            <span>Options</span>
+            <input class="meta-options-input" placeholder="comma,separated,options">
+          </label>
+          <label class="meta-text-wrap wide">
+            <span>Value</span>
+            <input class="meta-value-input" placeholder="Enter metadata value">
+          </label>
+          <label class="meta-country-wrap wide hidden">
+            <span>Country</span>
+            <select class="meta-country-input">
+              <option value="">Select Country</option>
+            </select>
+          </label>
+          <label class="meta-datetime-wrap wide hidden">
+            <span>Date Time</span>
+            <input class="meta-datetime-input" type="datetime-local">
+          </label>
+          <label class="meta-select-wrap wide hidden">
+            <span>Selected Option</span>
+            <select class="meta-select-input"></select>
+          </label>
+          <div class="meta-location-wrap wide hidden">
+            <span>Location</span>
+            <p class="field-note meta-location-note">Select country as China to enable province/city/district linkage.</p>
+            <div class="meta-location-grid">
+              <select class="meta-location-province">
+                <option value="">Province / 省</option>
+              </select>
+              <select class="meta-location-city">
+                <option value="">City / 市</option>
+              </select>
+              <select class="meta-location-district">
+                <option value="">District / 区县</option>
+              </select>
+              <input class="meta-location-detail" placeholder="Detail / 详细地址">
+            </div>
+          </div>
+          <div class="meta-file-wrap wide hidden">
+            <span>File</span>
+            <div class="meta-file-actions">
+              <button class="ghost-button meta-file-upload-button" type="button">Choose File</button>
+              <span class="meta-file-name field-note">No file selected.</span>
+            </div>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <template id="search-filter-template">
+      <article class="search-filter-item">
+        <div class="search-filter-grid">
+          <label>
+            <span>Field</span>
+            <select class="search-filter-field"></select>
+          </label>
+          <label>
+            <span>Operator</span>
+            <select class="search-filter-operator"></select>
+          </label>
+          <label class="search-filter-value-wrap">
+            <span>Value</span>
+            <input class="search-filter-value" placeholder="Enter search value">
+          </label>
+          <div class="search-filter-actions">
+            <button class="ghost-button search-filter-remove-button" type="button">Remove</button>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <template id="monitoring-widget-template">
+      <article class="monitoring-widget">
+        <div class="monitoring-widget-head">
+          <div class="monitoring-widget-title monitoring-widget-drag-handle">
+            <strong class="monitoring-widget-title-text"></strong>
+            <span class="species-tag monitoring-widget-type"></span>
+          </div>
+          <div class="meta-field-toolbar">
+            <button class="ghost-button monitoring-widget-expand" type="button">Enlarge</button>
+            <button class="ghost-button monitoring-widget-toggle" type="button">Collapse</button>
+            <button class="ghost-button monitoring-widget-remove" type="button">Remove</button>
+          </div>
+        </div>
+        <div class="monitoring-widget-controls">
+          <label>
+            <span>Title</span>
+            <input class="monitoring-widget-title-input">
+          </label>
+          <label>
+            <span>Chart</span>
+            <select class="monitoring-widget-chart-select">
+              <option value="bar">Bar</option>
+              <option value="pie">Pie</option>
+              <option value="line">Line</option>
+              <option value="radar">Radar</option>
+              <option value="map">Map</option>
+            </select>
+          </label>
+          <label>
+            <span>Field</span>
+            <select class="monitoring-widget-field-select"></select>
+          </label>
+          <label class="monitoring-widget-map-scope-wrap hidden">
+            <span>Map Scope</span>
+            <select class="monitoring-widget-map-scope-select">
+              <option value="world">World Map</option>
+              <option value="china">China Map</option>
+            </select>
+          </label>
+        </div>
+        <div class="monitoring-widget-map-toolbar hidden">
+          <button class="ghost-button monitoring-widget-map-back" type="button">Back</button>
+          <span class="field-note monitoring-widget-map-level">National</span>
+        </div>
+        <div class="monitoring-widget-chart"></div>
+        <div class="monitoring-widget-resize-handle" aria-hidden="true"></div>
+      </article>
+    </template>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="{{ url_for('static', filename='vendor_leaflet.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  </body>
+</html>

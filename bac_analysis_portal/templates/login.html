@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Portal Login</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body class="login-body">
+    <main class="login-shell">
+      <section class="login-card">
+        <p class="eyebrow">Clinical Assembly Console</p>
+        <h1>登录分析门户</h1>
+        <p class="hero-copy">管理员可管理脚本路径和用户信息，普通用户仅查看并提交自己的任务。</p>
+        <form id="login-form" class="login-form">
+          <label>
+            <span>用户名</span>
+            <input id="login-username" autocomplete="username" required>
+          </label>
+          <label>
+            <span>密码</span>
+            <input id="login-password" type="password" autocomplete="current-password" required>
+          </label>
+          <button class="primary-button" type="submit">登录</button>
+        </form>
+        <div class="login-note">
+          <span>默认管理员</span>
+          <code>admin / admin123</code>
+        </div>
+      </section>
+    </main>
+    <div id="toast" class="toast hidden"></div>
+    <script>
+      const toast = document.getElementById("toast");
+      const showToast = (message, isError = false) => {
+        toast.textContent = message;
+        toast.style.background = isError ? "rgba(143, 51, 47, 0.96)" : "rgba(39, 68, 109, 0.94)";
+        toast.classList.remove("hidden");
+        window.clearTimeout(showToast.timer);
+        showToast.timer = window.setTimeout(() => toast.classList.add("hidden"), 2600);
+      };
+      document.getElementById("login-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const response = await fetch("/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: document.getElementById("login-username").value.trim(),
+            password: document.getElementById("login-password").value,
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          showToast(data.error || "登录失败", true);
+          return;
+        }
+        window.location.href = "/";
+      });
+    </script>
+  </body>
+</html>

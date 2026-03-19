@@ -674,9 +674,9 @@ def map_assembly_reads(finalfa, inf, fq1, fq2, threads, Pre, asmt, long_type, lo
     elif asmt in ["shortasm", "shortref"]:
         subprocess.run(f"bwa index {finalfa}", shell=True)
         if fq2:
-            subprocess.run(f"bwa mem {finalfa} {fq1} {fq2} -t {threads}|samtools sort -o {Pre}_ngs.sorted.bam", shell=True)
+            subprocess.run(f"minimap2 -ax sr {finalfa} {fq1} {fq2} -t {threads}|samtools sort -o {Pre}_ngs.sorted.bam", shell=True)
         else:
-            subprocess.run(f"bwa mem {finalfa} {fq1} -t {threads}|samtools sort -o {Pre}_ngs.sorted.bam", shell=True)
+            subprocess.run(f"minimap2 -ax sr {finalfa} {fq1} -t {threads}|samtools sort -o {Pre}_ngs.sorted.bam", shell=True)
     else:
         if long_type == "Nanopore":
             subprocess.run(f"minimap2 -ax map-ont {finalfa} {inf} -t {threads} |samtools sort -o {Pre}.sorted.bam", shell=True, stdout=logf, stderr=logf)
