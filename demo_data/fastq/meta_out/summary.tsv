@@ -1,3 +1,0 @@
-file	format	type	num_seqs	sum_len	min_len	avg_len	max_len	Q1	Q2	Q3	sum_gap	N50	N50_num	Q20(%)	Q30(%)	AvgQual	GC(%)	sum_n
-Men-IGT_t.R1.fastq.gz	FASTQ	DNA	11220609	1656545093	50	147.6	150	150.0	150.0	150.0	0	150	1	97.36	95.53	24.25	51.54	21847
-Men-IGT_t.R2.fastq.gz	FASTQ	DNA	11220609	1656569625	50	147.6	150	150.0	150.0	150.0	0	150	1	95.63	92.61	21.91	51.58	15071
