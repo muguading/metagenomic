@@ -1,0 +1,47 @@
+-- Alignments between pgm_251 and contig_271
+
+-- BEGIN alignment [ +1 1 - 450 | -1 2378 - 1929 ]
+
+
+1          gtggttaccaaagacggcaacatcatctatccggaccgccaactgatgc
+2378       gtggttaccaaagacggcaacatcatctatccggaccgccaactgatgc
+                                                            
+
+50         ttttcgcgcaagacgtgttgagccgcaatcctaaagccaaagtgatttt
+2329       ttttcgcgcaagacgtgttgagccgcaatcctaaagccaaagtgatttt
+                                                            
+
+99         cgacgtcaaatccacccgtctgctcgccccgtgggttaaagaacacggc
+2280       cgacgtcaaatccacccgtctgctcgccccgtgggttaaagaacacggc
+                                                            
+
+148        ggcgaacctgtgatggaaaaaaccggccacagcttcatcaaatccgcta
+2231       ggcgaacctgtgatggaaaaaaccggccacagcttcatcaaatccgcta
+                                                            
+
+197        tgaaaaaaaccggcgcactcatcgccggcgaaatgagcggacacatctt
+2182       tgaaaaaaaccggcgcactcatcgccggcgaaatgagcggacacatctt
+                                                            
+
+246        cttcaaagaacgctggttcggcttcgacgacggtctgtacgccggcgcg
+2133       cttcaaagaacgctggttcggcttcgacgacggtctgtacgccggcgcg
+                                                            
+
+295        cgcctcttggaaatcctgtctgctttcgacaatccgtccgaagtgttaa
+2084       cgcctcttggaaatcctgtctgctttcgacaatccgtccgaagtgttaa
+                                                            
+
+344        acaacctgccgcaaagcatttccacgcccgaactcaacatcgatctgcc
+2035       acaacctgccgcaaagcatttccacgcccgaactcaacatcgatctgcc
+                                                            
+
+393        cgaaggcggcaacgggcataaagtgattgaagaactcgccgccaaagcc
+1986       cgaaggcggcaacgggcataaagtgattgaagaactcgccgccaaagcc
+                                                            
+
+442        aagttcgaa
+1937       aagttcgaa
+                    
+
+
+--   END alignment [ +1 1 - 450 | -1 2378 - 1929 ]

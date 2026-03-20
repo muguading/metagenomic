@@ -1,0 +1,7 @@
+- "left reads":
+  - "/data/deploy/meta_genome/Script/Blood/fastq_analysis/Men-IGT/Men-IGT.R1.fastq.gz"
+  "number": !!int "1"
+  "orientation": "fr"
+  "right reads":
+  - "/data/deploy/meta_genome/Script/Blood/fastq_analysis/Men-IGT/Men-IGT.R2.fastq.gz"
+  "type": "paired-end"

@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import os
 import subprocess
+from pathlib import Path
 
 import pandas as pd
 
 from metagenomic_refactor.context import get_runtime_context
+
+TAXA_INFO_PATH = "/data/Ref/Meta_anno/taxa_info_20210508.txt"
+ALL_SORT_PATH = "/data/Ref/Meta_anno/All.sort.csv"
+ALL_SPE_PROID_RANK_PATH = "/data/Ref/Meta_anno/AllSpeProid_rank.txt"
+WORMBASE_PATH = "/data/Ref/Meta_anno/wormbase.tsv"
+KRONA_SCRIPT_PATH = "/data/deploy/TB_soft/other_soft/3_kreport2krona.py"
 
 
 def compareid1(level1, level2, rawlist=None):
@@ -121,8 +128,183 @@ def run_bracken_sub(report_path, prefix, krdb, kkf):
     subprocess.run(f"bracken -d {krdb} -o {prefix}_Sub.bracken1.txt -w {prefix}_Sub.bracken2.txt -l {level} -t 10  -i {report_path}", shell=True, stdout=kkf, stderr=kkf)
 
 
+def _read_table_if_exists(path: str | Path, **kwargs) -> pd.DataFrame:
+    path = Path(path)
+    if not path.is_file():
+        return pd.DataFrame()
+    return pd.read_table(path, **kwargs)
+
+
+def _write_empty_table(path: str | Path, columns: list[str]) -> None:
+    pd.DataFrame(columns=columns).to_csv(path, sep="\t", index=False)
+
+
+def _kran_summ(output_species: str, output_subspecies: str, bracken_report: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    sanofile = _read_table_if_exists(TAXA_INFO_PATH)
+    if not sanofile.empty and "taxid" in sanofile.columns:
+        sanofile["taxid"] = pd.to_numeric(sanofile["taxid"], errors="coerce").astype("Int64")
+
+    kran_dic: dict[str, dict] = {}
+    kran_dic1: dict[str, dict] = {}
+    tad = tap = tac = tao = taf = tag = "-"
+
+    with open(bracken_report, "r", encoding="utf-8", errors="ignore") as f:
+        for raw_line in f:
+            line = raw_line.strip().split("\t")
+            if len(line) < 6:
+                continue
+            line[5] = line[5].strip()
+            prop = line[0].strip()
+            snum = line[1].strip()
+            taxid = line[4].strip()
+            level = line[3]
+            if line[5] == "unclassified":
+                continue
+            if level == "D":
+                tad = line[5]
+            elif level == "P":
+                tap = line[5]
+            elif level == "C":
+                tac = line[5]
+            elif level == "O":
+                tao = line[5]
+            elif level == "F":
+                taf = line[5]
+            elif level == "G":
+                tag = line[5]
+            elif level == "S" and int(float(snum)) > 2:
+                kran_dic[line[5]] = {"D": tad, "P": tap, "C": tac, "O": tao, "F": taf, "G": tag, "S": line[5], "比例": prop, "序列数量": snum, "taxid": taxid}
+            elif level in ["S1", "S2", "S3"] and int(float(snum)) > 2:
+                kran_dic1[line[5]] = {"D": tad, "P": tap, "C": tac, "O": tao, "F": taf, "G": tag, "亚种": line[5], "比例": prop, "序列数量": snum, "taxid": taxid}
+
+    species_df = pd.DataFrame(kran_dic).T if kran_dic else pd.DataFrame(columns=["D", "P", "C", "O", "F", "G", "S", "比例", "序列数量", "taxid"])
+    subspecies_df = pd.DataFrame(kran_dic1).T if kran_dic1 else pd.DataFrame(columns=["D", "P", "C", "O", "F", "G", "亚种", "比例", "序列数量", "taxid"])
+
+    if not species_df.empty:
+        species_df["比例"] = pd.to_numeric(species_df["比例"], errors="coerce")
+        species_df["序列数量"] = pd.to_numeric(species_df["序列数量"], errors="coerce")
+        species_df["taxid"] = pd.to_numeric(species_df["taxid"], errors="coerce").astype("Int64")
+        species_df.sort_values("比例", inplace=True, ascending=False)
+        if not sanofile.empty and "taxid" in sanofile.columns:
+            species_df = species_df.merge(sanofile, on="taxid", how="left")
+
+    if not subspecies_df.empty:
+        subspecies_df["比例"] = pd.to_numeric(subspecies_df["比例"], errors="coerce")
+        subspecies_df["序列数量"] = pd.to_numeric(subspecies_df["序列数量"], errors="coerce")
+        subspecies_df["taxid"] = pd.to_numeric(subspecies_df["taxid"], errors="coerce").astype("Int64")
+        subspecies_df.sort_values("比例", inplace=True, ascending=False)
+        if not sanofile.empty and "taxid" in sanofile.columns:
+            subspecies_df = subspecies_df.merge(sanofile, on="taxid", how="left")
+
+    rename_map = {"D": "界", "P": "门", "C": "纲", "O": "目", "F": "科", "G": "属", "S": "种"}
+    species_df.rename(columns=rename_map, inplace=True)
+    subspecies_df.rename(columns=rename_map, inplace=True)
+
+    species_df.to_csv(output_species, sep="\t", index=False)
+    subspecies_df.to_csv(output_subspecies, sep="\t", index=False)
+    return species_df, subspecies_df
+
+
+def _safe_ratio(numerator: float, denominator: float) -> str:
+    if denominator == 0:
+        return "0.0%"
+    return f"{round(numerator / denominator * 100, 2)}%"
+
+
+def _build_summary_outputs(Pre: str) -> None:
+    list_path = Path(f"{Pre}_2.list.txt") if Path(f"{Pre}_2.list.txt").is_file() else Path(f"{Pre}.list.txt")
+    list2_path = Path(f"{Pre}_2.list2.txt") if Path(f"{Pre}_2.list2.txt").is_file() else Path(f"{Pre}.list2.txt")
+    report_path = Path(f"{Pre}_2.report.txt") if Path(f"{Pre}_2.report.txt").is_file() else Path(f"{Pre}.report.txt")
+    if not list_path.is_file() or not report_path.is_file():
+        return
+
+    tmpdb = pd.read_table(list_path)
+    if tmpdb.empty:
+        return
+
+    plantdb = _read_table_if_exists(ALL_SORT_PATH, usecols=["taxonId", "type"])
+    if not plantdb.empty and "taxid" in tmpdb.columns:
+        tmpdb = tmpdb.merge(plantdb, left_on="taxid", right_on="taxonId", how="left").fillna("-")
+        if "taxonId" in tmpdb.columns:
+            tmpdb.drop("taxonId", inplace=True, axis=1)
+    tmpdb.to_csv(f"{Pre}.anno.tsv", sep="\t", index=False)
+
+    rawrpdb1 = pd.read_table(report_path, header=None)
+    rawrpdb1[5] = rawrpdb1[5].astype(str).str.strip()
+    rawrpdb = rawrpdb1.loc[rawrpdb1[5].isin(["unclassified", "root"])]
+
+    ureads = rawrpdb.loc[rawrpdb[5] == "unclassified", 1].tolist()[0] if "unclassified" in rawrpdb[5].tolist() else 0
+    creads = rawrpdb.loc[rawrpdb[5] == "root", 1].tolist()[0] if "root" in rawrpdb[5].tolist() else 0
+
+    Sdb = pd.read_table(list_path)
+    Subdb = pd.read_table(list2_path) if list2_path.is_file() else pd.DataFrame(columns=["序列数量"])
+    Prodb = _read_table_if_exists(ALL_SPE_PROID_RANK_PATH, header=None, names=["Taxid", "Type"])
+    if not Prodb.empty:
+        Prodb = Prodb.loc[Prodb["Type"] == "Species", :]
+        Prodb1 = rawrpdb1.loc[rawrpdb1[5].isin(Prodb["Taxid"].astype(str).tolist()), :]
+    else:
+        Prodb1 = pd.DataFrame()
+    Wormdb = _read_table_if_exists(WORMBASE_PATH)
+    Wormdb1 = rawrpdb1.loc[rawrpdb1[5].isin(Wormdb["taxid"].astype(str).tolist()), :] if not Wormdb.empty and "taxid" in Wormdb.columns else pd.DataFrame()
+
+    summarydict = {}
+    summarydict1 = {}
+    total_reads = ureads + creads
+    summarydict["有效序列"] = rawrpdb[1].sum() if not rawrpdb.empty else total_reads
+    summarydict["未识别序列"] = ureads
+    summarydict["未识别序列比例"] = _safe_ratio(ureads, total_reads)
+    summarydict["可识别序列"] = creads
+    summarydict["可识别序列比例"] = _safe_ratio(creads, total_reads)
+    summarydict["校正识别序列数(种)"] = pd.to_numeric(Sdb.get("序列数量"), errors="coerce").sum() if "序列数量" in Sdb.columns else 0
+    summarydict["校正识别序列数(亚种)"] = pd.to_numeric(Subdb.get("序列数量"), errors="coerce").sum() if "序列数量" in Subdb.columns else 0
+    summarydict["细菌"] = pd.to_numeric(Sdb.loc[Sdb["界"] == "Bacteria", "序列数量"], errors="coerce").sum() if "界" in Sdb.columns else 0
+    summarydict["病毒"] = pd.to_numeric(Sdb.loc[Sdb["界"] == "Viruses", "序列数量"], errors="coerce").sum() if "界" in Sdb.columns else 0
+    summarydict1["细菌"] = Sdb.loc[Sdb["界"] == "Bacteria", :].shape[0] if "界" in Sdb.columns else 0
+    summarydict1["病毒"] = Sdb.loc[Sdb["界"] == "Viruses", :].shape[0] if "界" in Sdb.columns else 0
+
+    fungi_rows = rawrpdb1.loc[rawrpdb1[5] == "Fungi", :]
+    summarydict["真菌"] = fungi_rows[1].sum() if not fungi_rows.empty else 0
+    summarydict1["真菌"] = fungi_rows.shape[0]
+    archaea_rows = rawrpdb1.loc[rawrpdb1[5] == "Archaea", :]
+    summarydict["古菌"] = archaea_rows[1].sum() if not archaea_rows.empty else 0
+    summarydict["原生动物"] = Prodb1[2].sum() if not Prodb1.empty and 2 in Prodb1.columns else 0
+    summarydict["寄生虫"] = Wormdb1[2].sum() if not Wormdb1.empty and 2 in Wormdb1.columns else 0
+    summarydict1["寄生虫"] = Wormdb1.shape[0]
+
+    if Path("summary.tsv").is_file() and Path("R1_Fastqc.tsv").is_file():
+        hostdb = pd.read_table("summary.tsv")
+        hostdb1 = pd.read_table("R1_Fastqc.tsv")
+        try:
+            hostrate = round((hostdb["num_seqs"][0] - hostdb1["总序列数"][1]) / hostdb["num_seqs"][0], 4) * 100
+        except Exception:
+            hostrate = 0
+        summarydict1["宿主"] = hostrate
+
+    pd.DataFrame(summarydict, index=[0]).to_csv("Summary_kraken.csv")
+    pd.DataFrame(summarydict1, index=[0]).to_csv("Summary_kraken1.csv")
+
+
+def _generate_taxonomy_outputs(Pre: str, kkf) -> None:
+    if Path(f"{Pre}.bracken2.txt").is_file():
+        _kran_summ(f"{Pre}.list.txt", f"{Pre}.list2.txt", f"{Pre}.bracken2.txt")
+        if Path(KRONA_SCRIPT_PATH).is_file():
+            subprocess.run(f"{KRONA_SCRIPT_PATH} -r {Pre}.bracken2.txt -o {Pre}.krona.txt", shell=True, stdout=kkf, stderr=kkf)
+            subprocess.run(f"ktImportText {Pre}.krona.txt -o {Pre}.krona.html", shell=True, stdout=kkf, stderr=kkf)
+    if Path(f"{Pre}_2.bracken2.txt").is_file():
+        _kran_summ(f"{Pre}_2.list.txt", f"{Pre}_2.list2.txt", f"{Pre}_2.bracken2.txt")
+        if Path(f"{Pre}_2_Sub.bracken2.txt").is_file():
+            _kran_summ(f"{Pre}_2_sub.list.txt", f"{Pre}_2.list2.txt", f"{Pre}_2_Sub.bracken2.txt")
+        else:
+            _write_empty_table(f"{Pre}_2.list2.txt", ["界", "门", "纲", "目", "科", "属", "亚种", "比例", "序列数量", "taxid"])
+        if Path(KRONA_SCRIPT_PATH).is_file():
+            subprocess.run(f"{KRONA_SCRIPT_PATH} -r {Pre}_2.bracken2.txt -o {Pre}_2.krona.txt", shell=True, stdout=kkf, stderr=kkf)
+            subprocess.run(f"ktImportText {Pre}_2.krona.txt -o {Pre}_2.krona.html", shell=True, stdout=kkf, stderr=kkf)
+    _build_summary_outputs(Pre)
+
+
 def kk2(inf, fq1, fq2, threads, Pre):
-    krdb = get_runtime_context().krdb
+    runtime = get_runtime_context()
+    krdb = runtime.krdb
     with open("kk2.log", "w") as kkf:
         if inf:
             if not os.path.isfile(f"{Pre}.list.txt"):
@@ -160,7 +342,9 @@ def kk2(inf, fq1, fq2, threads, Pre):
         if "ngsSpe" in dir() and "ONTSpe" in dir() and ngsSpe != ONTSpe:
             raise Exception("二三代不是同一菌种测序数据")
 
-        tmpfile = tmpfile[["name", "taxonomy_id", "taxonomy_lvl", "new_est_reads", "fraction_total_reads"]] if "ONTSpe" in dir() else tmpfile2[["name", "taxonomy_id", "taxonomy_lvl", "new_est_reads", "fraction_total_reads"]]
-        tmpfile.rename(columns={"name": "物种", "taxonomy_id": "taxid", "taxonomy_lvl": "水平", "new_est_reads": "序列数量", "fraction_total_reads": "相对丰度"}, inplace=True)
-        tmpfile.to_csv(f"{Pre}.taxonomy_summary.tsv", sep="\t", index=False)
+        taxonomy_df = tmpfile[["name", "taxonomy_id", "taxonomy_lvl", "new_est_reads", "fraction_total_reads"]] if "ONTSpe" in dir() else tmpfile2[["name", "taxonomy_id", "taxonomy_lvl", "new_est_reads", "fraction_total_reads"]]
+        taxonomy_df = taxonomy_df.copy()
+        taxonomy_df.rename(columns={"name": "物种", "taxonomy_id": "taxid", "taxonomy_lvl": "水平", "new_est_reads": "序列数量", "fraction_total_reads": "相对丰度"}, inplace=True)
+        taxonomy_df.to_csv(f"{Pre}.taxonomy_summary.tsv", sep="\t", index=False)
+        _generate_taxonomy_outputs(Pre, kkf)
         open("kk2_ok", "w").write("")

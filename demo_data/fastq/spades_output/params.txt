@@ -1,0 +1,32 @@
+Command line: /home/dell/miniconda3/envs/TB_ONT/bin/spades.py	--pe1-1	/data/deploy/meta_genome/Script/Blood/fastq_analysis/Men-IGT/Men-IGT.R1.fastq.gz	--pe1-2	/data/deploy/meta_genome/Script/Blood/fastq_analysis/Men-IGT/Men-IGT.R2.fastq.gz	-t	20	-o	/data/deploy/meta_genome/Script/Blood/fastq_analysis/Men-IGT/spades_output	--cov-cutoff	8	--isolate	
+
+System information:
+  SPAdes version: 3.15.5
+  Python version: 3.8.12
+  OS: Linux-5.15.0-139-generic-x86_64-with-glibc2.10
+
+Output dir: /data/deploy/meta_genome/Script/Blood/fastq_analysis/Men-IGT/spades_output
+Mode: ONLY assembling (without read error correction)
+Debug mode is turned OFF
+
+Dataset parameters:
+  Isolate mode
+  Reads:
+    Library number: 1, library type: paired-end
+      orientation: fr
+      left reads: ['/data/deploy/meta_genome/Script/Blood/fastq_analysis/Men-IGT/Men-IGT.R1.fastq.gz']
+      right reads: ['/data/deploy/meta_genome/Script/Blood/fastq_analysis/Men-IGT/Men-IGT.R2.fastq.gz']
+      interlaced reads: not specified
+      single reads: not specified
+      merged reads: not specified
+Assembly parameters:
+  k: automatic selection based on read length
+  Repeat resolution is enabled
+  Mismatch careful mode is turned OFF
+  MismatchCorrector will be SKIPPED
+  Coverage cutoff is turned ON and threshold is 8.000000
+Other parameters:
+  Dir for temp files: /data/deploy/meta_genome/Script/Blood/fastq_analysis/Men-IGT/spades_output/tmp
+  Threads: 20
+  Memory limit (in Gb): 250
+

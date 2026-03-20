@@ -1,0 +1,51 @@
+-- Alignments between gdh_30 and contig_7
+
+-- BEGIN alignment [ +1 1 - 501 | +1 3999 - 4499 ]
+
+
+1          atgttcgagccgctgtggaacaataaatacatcgaaagcgtgcagttga
+3999       atgttcgagccgctgtggaacaataaatacatcgaaagcgtgcagttga
+                                                            
+
+50         ccatcgccgaacagctcggtgtggaagagcgcggcgagttttacgacat
+4048       ccatcgccgaacagctcggtgtggaagagcgcggcgagttttacgacat
+                                                            
+
+99         taccggcgcgttgcgcgatatggtgcaaaaccatttgatgcagatgctg
+4097       taccggcgcgttgcgcgatatggtgcaaaaccatttgatgcagatgctg
+                                                            
+
+148        tgcatgactgcgatggaagcccccgccagcttggatgccgatgcggtgc
+4146       tgcatgactgcgatggaagcccccgccagcttggatgccgatgcggtgc
+                                                            
+
+197        gcgatgaaaaagtcaaagtcatcaagtcattgaagccgctgaccgtcga
+4195       gcgatgaaaaagtcaaagtcatcaagtcattgaagccgctgaccgtcga
+                                                            
+
+246        gtctgtcaatgaaaacgtcgtgcgcggacaatataccgccgccaaaggc
+4244       gtctgtcaatgaaaacgtcgtgcgcggacaatataccgccgccaaaggc
+                                                            
+
+295        atgaacggctatcttgaagaaatcaacgttccgcaagacagctttaccg
+4293       atgaacggctatcttgaagaaatcaacgttccgcaagacagctttaccg
+                                                            
+
+344        aaacctacgtcgccattaaagccgaaatcgaaaacgaacgctggaaggg
+4342       aaacctacgtcgccattaaagccgaaatcgaaaacgaacgctggaaggg
+                                                            
+
+393        cgttcccttctacctgcgtaccggcaagcgcatggcgggcaaagtggcg
+4391       cgttcccttctacctgcgtaccggcaagcgcatggcgggcaaagtggcg
+                                                            
+
+442        gaaatcgttttgaacttcaaagatttgaacagccatatttttgaaggca
+4440       gaaatcgttttgaacttcaaagatttgaacagccatatttttgaaggca
+                                                            
+
+491        gccgcaccgcg
+4489       gccgcaccgcg
+                      
+
+
+--   END alignment [ +1 1 - 501 | +1 3999 - 4499 ]

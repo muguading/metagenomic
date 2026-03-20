@@ -1,0 +1,53 @@
+Detecting adapter sequence for read1...
+>Illumina TruSeq Adapter Read 1
+AGATCGGAAGAGCACACGTCTGAACTCCAGTCA
+
+Detecting adapter sequence for read2...
+>Illumina TruSeq Adapter Read 2
+AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT
+
+Read1 before filtering:
+total reads: 11231441
+total bases: 1684716150
+Q20 bases: 1640334181(97.3656%)
+Q30 bases: 1609758131(95.5507%)
+Q40 bases: 661256036(39.2503%)
+
+Read2 before filtering:
+total reads: 11231441
+total bases: 1684716150
+Q20 bases: 1611451693(95.6512%)
+Q30 bases: 1560666037(92.6367%)
+Q40 bases: 539317719(32.0124%)
+
+Read1 after filtering:
+total reads: 11220609
+total bases: 1656545093
+Q20 bases: 1612730503(97.3551%)
+Q30 bases: 1582484635(95.5292%)
+Q40 bases: 649203112(39.1902%)
+
+Read2 after filtering:
+total reads: 11220609
+total bases: 1656569625
+Q20 bases: 1584242740(95.6339%)
+Q30 bases: 1534084216(92.6061%)
+Q40 bases: 528446689(31.9001%)
+
+Filtering result:
+reads passed filter: 22441218
+reads failed due to low quality: 0
+reads failed due to too many N: 15028
+reads failed due to too short: 6636
+reads with adapter trimmed: 2331815
+bases trimmed due to adapters: 53807960
+
+Duplication rate: 40.927%
+
+Insert size peak (evaluated by paired-end reads): 165
+
+JSON report: Men-IGT.fastp2.json
+HTML report: fastp.html
+
+fastp --in1 Men-IGT_sub.R1.fastq --out1 Men-IGT_t.R1.fastq.gz --in2 Men-IGT_sub.R2.fastq --out2 Men-IGT_t.R2.fastq.gz --thread 20 --length_required=50 --n_base_limit=6 --compression=6 --detect_adapter_for_pe --json Men-IGT.fastp2.json 
+fastp v1.0.1, time used: 120 seconds

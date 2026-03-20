@@ -1,0 +1,44 @@
+LOCUS       contig_675              1021 bp    DNA     linear   UNK 16-MAR-2026
+DEFINITION  Genus species strain strain.
+ACCESSION   contig_675
+VERSION     contig_675
+KEYWORDS    .
+SOURCE      Genus species
+  ORGANISM  Genus species Unclassified.
+            .
+COMMENT     Annotated using prokka 1.14.6 from
+            https://github.com/tseemann/prokka.
+FEATURES             Location/Qualifiers
+     source          1..1021
+                     /organism="Genus species"
+                     /mol_type="genomic DNA"
+                     /strain="strain"
+     gene            complement(289..417)
+                     /locus_tag="LCEDHOCC_02088"
+     CDS             complement(289..417)
+                     /locus_tag="LCEDHOCC_02088"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="hypothetical protein"
+                     /translation="MFGVVVGCYIGFNSPFRFFRRYSCDLLLFFVITNGDIGSVNA"
+ORIGIN
+        1 tatcaaatca atgtgcagaa ccacaccgat ttgaaaggcg gtttgattac ttccacccaa
+       61 aaatcggaag acgatggcaa aaacacattc tcaacgggta cgctcacctt tgaagaccta
+      121 gcgaatcacg ccgaatataa gggtgaagcg attggtttgg gtgtttcagg cagcgttgcg
+      181 ggcgataatc caaatcaaaa cagccgtatt tataccgtta atcaaagcgg tatgagtagc
+      241 acaatgggct atggcaaaga cagcgacaaa caatacgcca caacccattc aggcattaac
+      301 actgccaata tcaccattcg tgataacgaa aaacaacagc aaatcacagg aatatcggcg
+      361 gaagaagcga aacgggctgt taaagccgat gtaacaaccg acaactacgc cgaacattca
+      421 ggcagcctga aaaacaattt cgataaagac aaagtgcaat cagagattga tttgcaggtt
+      481 aaggttacac aggagtttga tagtaatcgc aaagccttgc gtgcagaaat caacaaagca
+      541 gcagatgaaa aaagacaaaa agccgaagat ataagaagag aaaattatat tgacggcaaa
+      601 aacggttata acaccgcaga atctttggct ttggataagt ctgccgacaa attggaaaaa
+      661 gtcgcttttt acactgattt ggcattaggt ggattgtatg gaattggcga tagcacggct
+      721 ttaacttatg taacaggtag tgcagtggct aatccagcca ttcgagcggg tacaagacca
+      781 agacagtttt ggtttgagaa atgtgacggc gatagtttgt attgttctaa tagaaattat
+      841 gacgatacgg cggatagaaa aatttatgat aaaaacgggc aagaaattga cactaaagat
+      901 ccaaattaca ctggaatggt tgagattggt gataaacggc aaatctctga tttaaatgag
+      961 attgaaccta acaaagtaac tggaagcatc gttactacaa atgacggtat attgaaccca
+     1021 c
+//

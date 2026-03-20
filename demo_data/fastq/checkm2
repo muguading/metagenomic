@@ -1,0 +1,12 @@
+[03/16/2026 07:25:04 PM] INFO: Running CheckM2 version 1.1.0
+[03/16/2026 07:25:04 PM] INFO: Custom database path provided for predict run. Checking database at /data1/shanghai_pip/meta_genome/uniref100.KO.1.dmnd...
+[03/16/2026 07:25:13 PM] INFO: Running quality prediction workflow with 20 threads.
+[03/16/2026 07:25:13 PM] INFO: Calling genes in 1 bins with 20 threads:
+    Finished processing 1 of 1 (100.00%) bins.
+[03/16/2026 07:25:21 PM] INFO: Calculating metadata for 1 bins with 20 threads:
+    Finished processing 1 of 1 (100.00%) bin metadata.
+[03/16/2026 07:25:22 PM] INFO: Annotating input genomes with DIAMOND using 20 threads
+[03/16/2026 07:25:44 PM] INFO: Processing DIAMOND output
+[03/16/2026 07:25:44 PM] INFO: Predicting completeness and contamination using ML models.
+[03/16/2026 07:25:49 PM] INFO: Parsing all results and constructing final output table.
+[03/16/2026 07:25:49 PM] INFO: CheckM2 finished successfully.

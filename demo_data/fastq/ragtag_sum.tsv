@@ -1,0 +1,2 @@
+file	format	type	num_seqs	sum_len	min_len	avg_len	max_len	Q1	Q2	Q3	sum_gap	N50	N50_num	Q20(%)	Q30(%)	AvgQual	GC(%)	sum_n
+Men-IGT.final.fasta	FASTA	DNA	684	1961175	1001	2867.2	18127	1404.0	2002.0	3449.0	0	3645	157	0.00	0.00	0.00	51.60	0

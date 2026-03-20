@@ -1,0 +1,82 @@
+contig_103	1	846	fHbp	+	Neisseria meningitidis 053442
+contig_119	1	2435	lbpA	-	Neisseria meningitidis 053442
+contig_119	2500	4428	lbpB	-	Neisseria meningitidis 053442
+contig_131	2647	3283	siaD_synD	-	Neisseria meningitidis 053442
+contig_131	3370	4149	siaC_synC	-	Neisseria meningitidis 053442
+contig_135	618	1142	nspA	-	Neisseria meningitidis
+contig_136	2867	3910	pilT	+	Neisseria meningitidis 053442
+contig_146	832	1650	opc	+	Neisseria meningitidis 053442
+contig_159	561	3645	pilC	-	Neisseria meningitidis M0579
+contig_166	302	3544	iga	-	Neisseria meningitidis
+contig_169	1631	3145	katA	+	Neisseria meningitidis 053442
+contig_178	1722	3413	pilQ	-	Neisseria meningitidis M01-240355
+contig_179	1	927	hpuA	+	Neisseria meningitidis
+contig_179	968	3400	hpuB	+	Neisseria meningitidis
+contig_180	59	973	mntC	-	Neisseria meningitidis 053442
+contig_180	1050	1925	mntB	-	Neisseria meningitidis 053442
+contig_180	1961	2686	mntA	-	Neisseria meningitidis 053442
+contig_191	601	1146	pilP	-	Neisseria meningitidis 053442
+contig_191	1164	1811	pilO	-	Neisseria meningitidis 053442
+contig_191	1812	2411	pilN	-	Neisseria meningitidis 053442
+contig_191	2414	3205	pilM	-	Neisseria meningitidis 053442
+contig_20	6848	7671	fHbp	-	Neisseria meningitidis 053442
+contig_246	379	1860	htpB	-	Neisseria meningitidis
+contig_258	913	2481	msrA_B(pilB	-	Neisseria meningitidis
+contig_265	1687	2330	siaD_synD	-	Neisseria meningitidis
+contig_282	1	704	siaA_synA	-	Neisseria meningitidis
+contig_282	839	2014	ctrA	+	Neisseria meningitidis
+contig_284	320	1162	lgtE	-	Neisseria meningitidis
+contig_284	1311	2138	lgtB	-	Neisseria meningitidis
+contig_3	1275	2036	pilW	-	Neisseria meningitidis 053442
+contig_309	1	642	pilH	+	Neisseria meningitidis
+contig_309	666	1277	pilI	+	Neisseria meningitidis
+contig_309	1672	2215	pilJ	+	Neisseria meningitidis
+contig_311	1447	2212	rfaC	-	Neisseria meningitidis 053442
+contig_325	740	1972	pilG	+	Neisseria meningitidis
+contig_330	1529	1972	luxS	-	Neisseria meningitidis 053442
+contig_331	81	524	luxS	+	Neisseria meningitidis 053442
+contig_342	1422	2002	ctrD	+	Neisseria meningitidis MC58
+contig_356	1	1950	mtrD	-	Neisseria meningitidis
+contig_36	2387	3913	farB	-	Neisseria meningitidis 053442
+contig_36	3937	5091	farA	-	Neisseria meningitidis 053442
+contig_370	1	631	pilH	+	Neisseria meningitidis 053442
+contig_370	663	1271	pilI	+	Neisseria meningitidis 053442
+contig_378	273	1436	porA	-	Neisseria meningitidis
+contig_399	19	405	pilS	-	Neisseria meningitidis 053442
+contig_399	637	886	pilS	-	Neisseria meningitidis 053442
+contig_40	187	1860	recN	-	Neisseria meningitidis M01-240355
+contig_419	61	726	opa	+	Neisseria meningitidis 053442
+contig_424	449	1447	porB	+	Neisseria meningitidis 053442
+contig_449	1	1592	tbpB	-	Neisseria meningitidis 053442
+contig_459	175	1553	mtrE	+	Neisseria meningitidis
+contig_463	780	1533	opa	-	Neisseria meningitidis
+contig_469	698	1525	mtrC	-	Neisseria meningitidis
+contig_48	3677	4936	kdtA_waaA	+	Neisseria meningitidis alpha14
+contig_487	931	1471	opa	-	Neisseria meningitidis 053442
+contig_489	707	1084	pilS	-	Neisseria meningitidis 053442
+contig_489	1125	1467	pilS	-	Neisseria meningitidis 053442
+contig_491	878	1460	lgtA	+	Neisseria meningitidis
+contig_51	36	896	pilD	+	Neisseria meningitidis 053442
+contig_51	1817	3493	pilF	-	Neisseria meningitidis 053442
+contig_521	1	539	flmH	-	Neisseria meningitidis
+contig_523	348	1034	siaB_synB	-	Neisseria meningitidis
+contig_558	1	641	pilT2	-	Neisseria meningitidis
+contig_582	82	1204	hlyB	-	Neisseria meningitidis
+contig_585	1	647	rfaK	-	Neisseria meningitidis 053442
+contig_585	648	1196	lgtF	-	Neisseria meningitidis 053442
+contig_591	1	238	pilS	-	Neisseria meningitidis 053442
+contig_591	536	1009	pilS	-	Neisseria meningitidis 053442
+contig_61	2044	3536	lpt6	+	Neisseria meningitidis 053442
+contig_631	189	1115	lipB	+	Neisseria meningitidis
+contig_680	1	183	pilZ	+	Neisseria meningitidis 053442
+contig_77	300	1295	fbpA	+	Neisseria meningitidis 053442
+contig_77	1363	2880	fbpB	+	Neisseria meningitidis 053442
+contig_77	2901	3959	fbpC	+	Neisseria meningitidis 053442
+contig_82	221	1135	mntC	-	Neisseria meningitidis
+contig_82	1212	2087	mntB	-	Neisseria meningitidis
+contig_82	2122	2847	mntA	-	Neisseria meningitidis
+contig_86	284	2411	lbpB	+	Neisseria meningitidis
+contig_86	2458	5289	lbpA	+	Neisseria meningitidis
+contig_9	21	670	tufA	+	Neisseria meningitidis 053442
+contig_95	1	2684	tbpA	-	Neisseria meningitidis 053442
+contig_95	2771	4921	tbpB	-	Neisseria meningitidis 053442

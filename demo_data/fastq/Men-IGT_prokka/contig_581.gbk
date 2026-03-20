@@ -1,0 +1,76 @@
+LOCUS       contig_581              1205 bp    DNA     linear   UNK 16-MAR-2026
+DEFINITION  Genus species strain strain.
+ACCESSION   contig_581
+VERSION     contig_581
+KEYWORDS    .
+SOURCE      Genus species
+  ORGANISM  Genus species Unclassified.
+            .
+COMMENT     Annotated using prokka 1.14.6 from
+            https://github.com/tseemann/prokka.
+FEATURES             Location/Qualifiers
+     source          1..1205
+                     /organism="Genus species"
+                     /mol_type="genomic DNA"
+                     /strain="strain"
+     gene            10..450
+                     /locus_tag="LCEDHOCC_01952"
+     CDS             10..450
+                     /locus_tag="LCEDHOCC_01952"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="hypothetical protein"
+                     /translation="MKLHRDSVYSLLATSGCNCQVHEAAYVNIDGKYYISLSCEPEVGE
+                     VKTGILLIEDESRNLRLSWVGSARELDRKDSVYKRALSALSRKLGRCKDRLHTAVQPFL
+                     LELVPEKGRFSVGDEEVWISRNDLVRALYPVGYSMRQAMLQI"
+     gene            complement(577..1071)
+                     /gene="folK"
+                     /locus_tag="LCEDHOCC_01953"
+     CDS             complement(577..1071)
+                     /gene="folK"
+                     /locus_tag="LCEDHOCC_01953"
+                     /EC_number="2.7.6.3"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /inference="similar to AA sequence:UniProtKB:P43777"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="2-amino-4-hydroxy-6-
+                     hydroxymethyldihydropteridine pyrophosphokinase"
+                     /db_xref="COG:COG0801"
+                     /translation="MNNRHFAVIALGSNLENPAQQVRAALDTLSSHPDIRLEQASSLYM
+                     TAPVGYDNQPDFVNAVCTVSTTLDGIALLAELNRIEADFGRERSFRNAPRTLDLDIIDF
+                     DGISSDDPRLTLPHPCAHERSFVIRPLAEILPDFVLGKHGKVAELSKRLGNQGIRLLPD
+                     K"
+     gene            complement(1081..1197)
+                     /locus_tag="LCEDHOCC_01954"
+     CDS             complement(1081..1197)
+                     /locus_tag="LCEDHOCC_01954"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="hypothetical protein"
+                     /translation="MMMMRARPRSTKFYTVYLLAMCCVACIVYLAKTKVLPF"
+ORIGIN
+        1 cttgatattt tgaaactgca tcgggattct gtttattcgc tgcttgccac ttccggctgc
+       61 aactgtcagg tgcatgaggc ggcgtatgtc aacatcgacg gcaaatatta tatttcgctt
+      121 tcatgcgagc cagaggtagg ggaagtcaaa acaggcattt tgctgattga ggatgaaagc
+      181 cgcaaccttc gtttgagctg ggtcggcagt gcgcgggaac ttgaccgcaa ggatagtgtc
+      241 tataagcgtg ccctgtccgc cttgtccaga aagctggggc ggtgtaagga caggctgcat
+      301 acggcggttc aaccgttttt gttggagctg gtgccggaga aaggcagatt ttctgtcggc
+      361 gatgaagaag tttggatttc tcgaaacgat ttagtgaggg ctttatatcc tgtcggatac
+      421 agtatgcggc aggcaatgtt gcagatttaa agttttggta gtggtttgtg ttccttttgc
+      481 gccccttttc caaggggcga tttttttgca cgcgtgttgg cggcaaagga aaaatgccgt
+      541 ctgaaaccgg cattcagacg gcatccgcgt gcggaattac ttatccggta aaagacggat
+      601 gccttgattg cccagccgtt ttgacaattc ggcaaccttt ccgtgtttgc ctaaaacaaa
+      661 atcagggagg atttctgcca aagggcgtat gacgaaactg cgttcgtgcg cgcacggatg
+      721 cggcagggtg agtcgggggt cgtcgctgga gatgccgtca aagtcgataa tgtccaaatc
+      781 caatgtgcgc ggcgcgttgc ggaagctgcg ttcgcgtccg aaatcggctt cgatacggtt
+      841 gagttcggca agcagggcaa tgccgtccag agtggtggaa acggtgcaga cggcattgac
+      901 gaaatcgggc tgattgtcgt aaccgacggg ggcggtcata tacagtgagg aagcctgttc
+      961 aagccggatg tcaggatggg acgacagcgt gtccaatgcg gcgcgtacct gttgggcagg
+     1021 gttttcaaga ttactgccca gggcgatgac ggcaaaatgt ctgttgttca taacggtgtt
+     1081 tcagaaaggc aggactttgg ttttggcaag gtaaacgatg caggcgacgc aacacatggc
+     1141 gagcaggtaa acggtgtaga acttggtcga acgcggacgg gcgcgcatca tcatcatacc
+     1201 caatg
+//

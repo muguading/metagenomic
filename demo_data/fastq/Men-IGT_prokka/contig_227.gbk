@@ -1,0 +1,94 @@
+LOCUS       contig_227              2818 bp    DNA     linear   UNK 16-MAR-2026
+DEFINITION  Genus species strain strain.
+ACCESSION   contig_227
+VERSION     contig_227
+KEYWORDS    .
+SOURCE      Genus species
+  ORGANISM  Genus species Unclassified.
+            .
+COMMENT     Annotated using prokka 1.14.6 from
+            https://github.com/tseemann/prokka.
+FEATURES             Location/Qualifiers
+     source          1..2818
+                     /organism="Genus species"
+                     /mol_type="genomic DNA"
+                     /strain="strain"
+     gene            94..966
+                     /gene="purA"
+                     /locus_tag="LCEDHOCC_01227"
+     CDS             94..966
+                     /gene="purA"
+                     /locus_tag="LCEDHOCC_01227"
+                     /EC_number="6.3.4.4"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /inference="similar to AA sequence:UniProtKB:Q8ZIV7"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="Adenylosuccinate synthetase"
+                     /db_xref="COG:COG0104"
+                     /translation="MARRAIRAADLLHPEKLREKLDAVLAYYNVQLQHLHNAEPVKAED
+                     VMAVIEKVAPRIAPMITDVSRVLNEKNKNGEKLLFEGAQGALLDIDYGTYPFVTSSNCL
+                     AGAASAGAGVGPQMLDYVLGIVKAYTTRVGSGPFPTELFDEVGAGLAERGHEFGSVTGR
+                     ARRCGWFDAAALKRSIQINGISGMCITKLDVMDGVETINICVGYELPDGGKTDILPCGS
+                     DAVETCKPIYETMEGWKESTFGIKNYEELPDNAKAYLKRIEEVCGAPVAIVSTGPDREE
+                     TIVLHHPFA"
+     gene            2355..2747
+                     /locus_tag="LCEDHOCC_01228"
+     CDS             2355..2747
+                     /locus_tag="LCEDHOCC_01228"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="hypothetical protein"
+                     /translation="MAKSFNQAASELTDIFPNISLTGFDGVNYPVTVNCPMHGNVRYST
+                     FNALIKSKYGCPECAKMSKTQTPPNVGKPLLILDTTTNETLTFPSVTAAGAALGVHFQQ
+                     INHRLKGRTSPDNLISNRYKVLGYDR"
+ORIGIN
+        1 cacatcgcgc tcgaccaagc ccgcgaagca tcgcgcggca aaggcaaaat cggcacgacc
+       61 ggccgcggca tcggccctgc ctacgaagac aaagtggcac gccgcgccat tcgcgccgcc
+      121 gatttgctgc atcctgaaaa actgcgtgaa aaactggatg ccgtccttgc ctattacaat
+      181 gtccaactgc aacatctgca caatgccgag ccggttaaag cggaagacgt gatggcggtt
+      241 atcgaaaaag tcgcgccgcg cattgcgccg atgattaccg acgtgtcccg cgtgttgaac
+      301 gagaaaaaca aaaacggcga aaaactgctg tttgaaggcg cgcaaggtgc gttgttggac
+      361 atcgactacg gcacttatcc cttcgttacc tcgtccaact gtctggcggg agccgcttcc
+      421 gcaggcgcgg gcgtaggtcc tcaaatgctg gattatgttt tgggcatcgt caaagcctat
+      481 accacgcgcg tcggttcagg cccgttcccg accgaattgt tcgacgaagt aggcgcaggt
+      541 ttggcggaac gcggacacga attcggctcg gtaaccggcc gcgcacgccg ctgcggctgg
+      601 tttgatgccg ccgccctgaa acgctccatc caaatcaacg gcatttccgg tatgtgcatt
+      661 accaaactcg atgtaatgga cggcgttgaa accatcaata tctgcgtcgg ctacgaattg
+      721 cccgacggcg gcaaaaccga tatcctgcct tgcggttcgg atgcggtgga aacctgcaaa
+      781 ccgatttacg aaacaatgga gggttggaaa gaatcgactt tcggcatcaa aaattatgag
+      841 gaactgcccg ataatgccaa agcatatttg aaacggattg aagaagtctg cggcgcgccg
+      901 gtcgccatcg tctccaccgg ccccgaccgc gaagaaacga ttgtgctgca tcatccgttc
+      961 gcataaggtt ttgcagtaaa attgccgtct gaagccctaa tccgccgttg gtcataaata
+     1021 gtagggtatc aacatttcgg gctacaatgg tacgtcagcc aatgccaaga cgtgccagcc
+     1081 tgattggttg atgtgtgtac tattgcatag gcggttaagc catgcaggag atgaaagtgt
+     1141 atatttcgcg caaagcccat tagccgcaag cgaggggcgg ggtgcgcgag agagaggggg
+     1201 gcaggtgcta agtcattggt tatctcctta ctatctatct aactacgggt gcattatgcg
+     1261 cctatgcctg ttgtttgtca aacactatac agttaaaatg tgtaaagatt tagtaaggac
+     1321 atataccctt ttctttacat ttagctccat cggataccag tgcgttcaga gaaaatttga
+     1381 aaatttctat attttggttg tataatgctt tcattttaga aaggtctata atgccaaaat
+     1441 cactctcgct acaagatgtt cagttaaggt tttccagtaa atttcctgat aagacggttt
+     1501 tgaagttcac taaaaactac gaaccggtaa caatccaatg ccctttgcat gggtcggttg
+     1561 tttacgggaa tctacaagct gccatgaaat cctcaacagg atgtcctgaa tgtactcgaa
+     1621 atcccgaaaa gccctctcca aacgccgttg ccattaggtt ggaggacaca gagacagggg
+     1681 aaatctacga gtttgcaagt acactggctg ccagtaaatt tatcggttgc tccaacagca
+     1741 ctttagctgt acgtttaagc ggacgcactc cgtttgaccg attgattagg tatcgttata
+     1801 ggttggtaaa gtaagttcac aaccactatg gcacttacat ttactcaagc agtttctaag
+     1861 ctaacctcta aatttccaca tttgaatctt gtggagttca atggcgttcg ttacccgacg
+     1921 gtaatcgtct gtcctataca cgggagggtt acttgctcta cattcaaaag tatgttggac
+     1981 tctaaaagtg ggtgtccaaa atgtgcatct tatggtgtca attcccacaa aattccagaa
+     2041 gatacaatag ataaattatc taaaaataca gtattggagg atactgtaac tggcgaaaca
+     2101 cttacattcc cctcaagagc atctgctgca aggtcattgg gtataaaccc agcagctatc
+     2161 actgaccgta taaaaggtcg ggttcacaca gagactttac ttgcagggag gtataaggtt
+     2221 cacatctgca ctaaatgacg tatacacttt ttaacagtgt atacccctcg ccactatcag
+     2281 gtgcttctcg aaaaatttga catttttata aatttgctat taaatccatt tgacaatcaa
+     2341 ttttggagtc tcaaatggcc aaatctttca accaagcagc ttctgaactt actgatatat
+     2401 tccctaatat ctctctaacc ggctttgacg gtgtgaatta cccagtaacc gttaattgtc
+     2461 ctatgcacgg gaacgttcgt tattcgacat ttaatgccct tataaagtca aagtacgggt
+     2521 gtcctgagtg tgctaagatg tcaaaaaccc aaacacctcc aaatgtaggg aagcccctcc
+     2581 tcatcctcga cacaacgacc aacgaaacac tcacgttccc aagcgttact gccgcaggtg
+     2641 ctgctttagg tgtacatttc caacaaatca atcacaggct caagggtcga acgtcgcccg
+     2701 acaaccttat ttcaaacagg tacaaagtgc ttgggtacga taggtaaggt tcacaacacc
+     2761 ctaaatccta cgaaccaagc tcgacggacg ttcaaatccc ggttagagtt aatttatg
+//

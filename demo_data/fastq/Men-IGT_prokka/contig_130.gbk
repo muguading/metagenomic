@@ -1,0 +1,166 @@
+LOCUS       contig_130              4166 bp    DNA     linear   UNK 16-MAR-2026
+DEFINITION  Genus species strain strain.
+ACCESSION   contig_130
+VERSION     contig_130
+KEYWORDS    .
+SOURCE      Genus species
+  ORGANISM  Genus species Unclassified.
+            .
+COMMENT     Annotated using prokka 1.14.6 from
+            https://github.com/tseemann/prokka.
+FEATURES             Location/Qualifiers
+     source          1..4166
+                     /organism="Genus species"
+                     /mol_type="genomic DNA"
+                     /strain="strain"
+     gene            313..1752
+                     /gene="cas9"
+                     /locus_tag="LCEDHOCC_00899"
+     CDS             313..1752
+                     /gene="cas9"
+                     /locus_tag="LCEDHOCC_00899"
+                     /EC_number="3.1.-.-"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /inference="similar to AA sequence:UniProtKB:A1IQ68"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="CRISPR-associated endonuclease Cas9"
+                     /translation="MLVLGSENQNKGNQTPYEYFNGKDNSREWQEFKARVETSRFPRSK
+                     KQRILLQKFDEEGFKERNLNDTRYVNRFLCQFVADHMLLTGKGKRRVFASNGQITNLLR
+                     GFWGLRKVRAENDRHHALDAVVVACSTVAMQQKITRFVRYKEMNAFDGKTIDKETGEVL
+                     HQKTHFPQPWEFFAQEVMIRVFGKPDGKPEFEEADTPEKLRTLLAEKLSSRPEAVHEYV
+                     TPLFVSRAPNRKMSGQGHMETVKSAKRLDEGVSVLRVPLTQLKLKDLEKMVNREREPKL
+                     YEALKARLEAHKDDPAKAFAEPFYKYDKAGNRTQQVKAVRVEQVQKTGVWVRNHNGIAD
+                     NATMVRVDVFEKGDKYYLVPIYSWQVAKGILPDRAVVQGKDEEDWQLIDDSFNFKFSLH
+                     PNDLVEVITKKARMFGYFASCHRGTGNINIRIHDLDHKIGKNGILEGIGVKTALSFQKY
+                     QIDELGKEIRPCRLKKRPPVR"
+     gene            1819..2268
+                     /gene="cas1_1"
+                     /locus_tag="LCEDHOCC_00900"
+     CDS             1819..2268
+                     /gene="cas1_1"
+                     /locus_tag="LCEDHOCC_00900"
+                     /EC_number="3.1.-.-"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /inference="similar to AA sequence:UniProtKB:G3ECR2"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="CRISPR-associated endonuclease Cas1"
+                     /translation="MTWRSLLIQNGGKLSLQRRQLLIQQNGESHTVPLEDIAVIIIENR
+                     ETLITAPLLSALAEHGATLLTCDEQFLPCGQWLPYAQYHRQLKILKLQLNISEPLKKQF
+                     WQHIVRQKILNQAFVADETGNDLAAKRLRTLASEVRSGDTGNREA"
+     gene            2344..2733
+                     /gene="cas1_2"
+                     /locus_tag="LCEDHOCC_00901"
+     CDS             2344..2733
+                     /gene="cas1_2"
+                     /locus_tag="LCEDHOCC_00901"
+                     /EC_number="3.1.-.-"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /inference="protein motif:HAMAP:MF_01470"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="CRISPR-associated endonuclease Cas1"
+                     /translation="MNYTYAVLRAAVARALTLYGWLPALGLFHRSELNPFNLADDFIEP
+                     LRPLADLTVIHLYEQGRLKTELTLGIKQHLIKILYYQTSIERQHFSTLAAIDKMVSSFQ
+                     AGVTDKNAKQLKLPEILPLKAYQYE"
+     gene            2744..3052
+                     /gene="cas2"
+                     /locus_tag="LCEDHOCC_00902"
+     CDS             2744..3052
+                     /gene="cas2"
+                     /locus_tag="LCEDHOCC_00902"
+                     /EC_number="3.1.-.-"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /inference="similar to AA sequence:UniProtKB:G3ECR3"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="CRISPR-associated endoribonuclease Cas2"
+                     /translation="MRIIVFFDLPVITAAKRKAANQFRQFLLKDGYQMLQLSVYSRIVK
+                     GRDSLQKHHNRLCANLPQEGSIRCLEITEKQYAAMKLLLGELKTQEKKVNSDQLLLF"
+     repeat_region   3116..3745
+                     /note="CRISPR with 10 repeat units"
+                     /rpt_family="CRISPR"
+                     /rpt_type=direct
+                     /rpt_unit_seq="attgtagcactgcgaaaggagaaagggagctacaac"
+     gene            complement(3903..4007)
+                     /locus_tag="LCEDHOCC_00903"
+     CDS             complement(3903..4007)
+                     /locus_tag="LCEDHOCC_00903"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="hypothetical protein"
+                     /translation="MLKFLMRGKKLLLSVEVNHKFILAVALLLSQCSS"
+ORIGIN
+        1 cgtatccata ttgaaacggc aagggaagta ggaaaatcgt ttaaagaccg caaagaaatc
+       61 gaaaaacgcc aagaagaaaa ccgtaaagac cgtgaaaaag ccgccaccaa attccgagag
+      121 tatttcccca attttgtcgg cgaacccaaa tccaaagata ttctgaaact gcgcctgtac
+      181 gagcaacaac acggcaaatg cctgtattcg ggcaaagaaa tcaacttagg ccgtctgaac
+      241 gaaaaaggct atgtcgaaat cgaccatgcc ctgccgttct cgcgcacatg ggacgacagt
+      301 ttcaacaata aagtgctggt attgggcagc gaaaaccaaa acaaaggcaa tcaaacccct
+      361 tacgaatact tcaacggcaa agacaacagc cgcgaatggc aggaatttaa agcgcgtgtc
+      421 gaaaccagcc gtttcccacg cagtaaaaaa caacggattc tgctgcaaaa attcgatgaa
+      481 gagggcttta aagaacgcaa tctgaacgat acgcgctacg tcaaccgttt cctgtgccaa
+      541 ttcgttgccg accatatgct gctgacaggt aaagggaaaa gacgtgtctt tgcctcaaac
+      601 ggacaaatta ccaatctgtt gcgcggcttt tggggattac gcaaagtgcg tgcggaaaac
+      661 gaccgccatc acgccttgga cgccgtcgtc gttgcctgct cgaccgttgc catgcagcag
+      721 aaaattaccc gttttgtacg ctataaagag atgaacgcgt ttgacggtaa aaccatagac
+      781 aaagaaacag gagaagtgct gcatcaaaaa acacacttcc cacaaccttg ggaatttttc
+      841 gcacaagaag tcatgattcg cgtcttcggc aaaccggacg gcaaacccga attcgaagaa
+      901 gccgataccc cagaaaaact gcgcacgttg cttgccgaaa aattatcatc tcgccccgaa
+      961 gccgtacacg aatacgttac gccactgttt gtttcacgcg cgcccaatcg gaagatgagc
+     1021 gggcaagggc atatggagac cgtcaaatcc gccaaacgac tggacgaagg cgtcagcgtg
+     1081 ttgcgcgtac cgttaacaca gttaaaactg aaagacttgg aaaaaatggt caatcgggag
+     1141 cgcgaaccta agctatacga agcactgaaa gcacggctgg aagcacataa agacgatcct
+     1201 gccaaagcct ttgccgagcc gttttacaaa tacgataaag caggcaaccg cacccaacag
+     1261 gtaaaagccg tacgcgtaga gcaagtacag aaaaccggcg tatgggtgcg caaccataac
+     1321 ggtattgccg acaacgcaac catggtgcgc gtagatgtgt ttgagaaagg cgacaagtat
+     1381 tatctggtac cgatttacag ttggcaggta gcgaaaggga ttttgccgga tagggctgtt
+     1441 gtacaaggaa aagatgaaga agattggcaa cttattgatg atagtttcaa ctttaaattc
+     1501 tcattacacc ctaatgattt agtcgaggtt ataacaaaaa aagctagaat gtttggttac
+     1561 tttgccagct gccatcgagg cacaggtaat atcaatatac gcattcatga tcttgatcat
+     1621 aaaattggca aaaatggaat actggaaggt atcggcgtca aaaccgccct ttcattccaa
+     1681 aaataccaaa ttgacgaact gggcaaagaa atcagaccat gccgtctgaa aaaacgcccg
+     1741 cctgtccgtt aaattaatct atccctgttt caggcggcct gaagcaggga ttttttatat
+     1801 aaaaataagg ggaaaaacat gacttggcgc agcctgctta ttcaaaacgg cggcaaacta
+     1861 tccttgcaac gccggcaact gctgattcaa caaaacggcg agtcccacac cgtaccatta
+     1921 gaggacatcg ccgttatcat catcgaaaac cgcgaaaccc tgattaccgc tccacttctg
+     1981 tcagccttag ccgaacatgg cgcaacctta ctgacatgtg acgagcagtt cctgccctgc
+     2041 ggacaatggc tgccttatgc ccaatatcac cgccaactta aaatcctcaa actgcagctg
+     2101 aatataagcg aacccttaaa aaagcaattc tggcaacata tcgtccgcca aaaaatcctg
+     2161 aatcaagcct ttgtcgcaga cgaaaccggc aatgatcttg cagccaaacg gctgcgcact
+     2221 ttggcatctg aagtccgctc tggcgataca ggaaaccgcg aagcgtaagc cgccgccctc
+     2281 tacttccaag ccctctttgg cgaaaaattt acccgtaatg acaacaacgc cgtcaatgcc
+     2341 gcattgaact acacctacgc cgtgctccga gccgcagttg cacgcgccct gaccttatac
+     2401 ggttggttac ctgcattagg cttgtttcat agaagtgaac tcaatccatt taatctcgcc
+     2461 gatgacttta tcgaaccctt acgcccattg gccgacctga ccgtgataca tttgtacgaa
+     2521 caaggccgtc tgaaaactga actgacgctc ggcatcaaac aacacctcat caaaatcctc
+     2581 tactatcaaa ccagcatcga acggcaacat ttcagcacct tggctgccat cgacaaaatg
+     2641 gtttcgtcat ttcaagccgg cgtaactgat aaaaacgcca aacaactgaa actgcctgaa
+     2701 atcctaccat tgaaagcata ccaatatgag tgaggccaaa tttatgagga ttatcgtctt
+     2761 cttcgaccta ccggttatca cggcggcaaa gcgcaaagcc gccaatcaat tccgccagtt
+     2821 tttattaaaa gacggatacc aaatgctgca actttccgta tacagccgta tcgtcaaagg
+     2881 ccgcgattcg ttgcaaaaac accacaatag actatgtgca aaccttccgc aagaaggctc
+     2941 aatccgctgt ttggagataa cagaaaagca atatgccgcc atgaaactgc tgttgggcga
+     3001 gctgaaaacc caagaaaaaa aggtcaattc agaccaatta ttgttatttt aagcccattt
+     3061 tttcataaca aataaaacgg gaaaccctta tgaaataagg atttcccgtc gaagtattgt
+     3121 agcactgcga aaggagaaag ggagctacaa cgatgtatag acggcggaaa atcagattgc
+     3181 aattgtagca ctgcgaaagg agaaagggag ctacaacaca ccttgaacgc aaggcaatcg
+     3241 gaatgaaatt gtagcactgc gaaaggagaa agggagctac aacagtaaac gataagctcc
+     3301 attgcgtgtg cgaattgtag cactgcgaaa tgagaaaggg agctacaact taacaaacca
+     3361 ccccgtgtag gtgcgtggca ttgtagcact gcgaaatgag aaagggagct acaacaaaga
+     3421 aagcgagctt gtaaaaaggc agaagattgt agcactgcga aatgagaaag ggagctacaa
+     3481 ccaacgcctt gcgtaaagtg tttacgcgca tattgtagca ctgcgaaatg agaaagggag
+     3541 ctacaactcg tgcaggattc ggttttccac ctcccaaatt gtagcactgc gaaatgagaa
+     3601 agggagctac aactcggtca ggtcatagac ggctttgttg tcgattgtag cactgcgaaa
+     3661 tgagaatggg agctacaaca ctcaaattca gtctgtcaac ccgttccgca ttgtagcact
+     3721 gcgaaatgag aatgggcgct acaaccagcc gttgcgataa gcgaacgtgc gttaaagtca
+     3781 ttgagacaca gtgcaattat ggcaagaaag gcgacagata ttgtgtcaca gatttgaaat
+     3841 aagaaaaaac cgcccactca cagagtaggc ggaaaacttg cgtttttttg attgtggtcg
+     3901 ggttagctac tgcattgact taacagcaaa gcaaccgcta aaatgaactt gtggttcact
+     3961 tcaacggaca gcagcaactt tttcccacgc ataaggaatt taagcatttt agcttctcct
+     4021 agtgaagtta atcacacagg cgagagccga acaaaaatcc ccgttgcagc ggggattttt
+     4081 gctgttccct gtttgatgat taaactaaaa tcttgcaaaa tgagaccttt gcaaaattcc
+     4141 ccaaaatccc ctaaattccc accaag
+//

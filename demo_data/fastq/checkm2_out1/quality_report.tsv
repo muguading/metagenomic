@@ -1,0 +1,6 @@
+Name	Completeness	Contamination	Completeness_Model_Used	Translation_Table_Used	Coding_Density	Contig_N50	Average_Gene_Length	Genome_Size	GC_Content	Total_Coding_Sequences	Total_Contigs	Max_Contig_Length	Additional_Notes
+Men-IGT.NM	81.95	10.12	Neural Network (Specific Model)	11	0.844	3690	247.51358695652175	1938696	0.52	2208	669	18127	None
+Men-IGT.NMfilter80	81.96	2.89	Neural Network (Specific Model)	11	0.841	3896	245.05369127516778	1820432	0.51	2086	616	18127	None
+Men-IGT.NMfilter85	82.04	4.91	Neural Network (Specific Model)	11	0.841	3879	245.06499051233396	1838996	0.51	2108	623	18127	None
+Men-IGT.NMfilter90	82.15	5.56	Neural Network (Specific Model)	11	0.841	3819	244.92655367231637	1852146	0.51	2124	629	18127	None
+Men-IGT.NMfilter95	82.08	8.0	Neural Network (Specific Model)	11	0.844	3803	246.18360805860806	1908748	0.52	2184	655	18127	None

@@ -1,0 +1,22 @@
+界	门	纲	目	科	属	种	比例	序列数量	taxid	taxname	class	中文名	致病性	可能引起的疾病	危害程度等级
+Bacteria	Proteobacteria	Betaproteobacteria	Neisseriales	Neisseriaceae	Neisseria	Neisseria meningitidis	97.84	19816903	487	 Neisseria meningitidis	S	脑膜炎奈瑟菌	条件致病	侵袭性脑膜炎球菌病（IMD）	第三类
+Bacteria	Proteobacteria	Betaproteobacteria	Neisseriales	Neisseriaceae	Neisseria	Neisseria gonorrhoeae	1.54	311999	485	 Neisseria gonorrhoeae	S	淋病奈瑟菌	致病	淋病	第三类
+Bacteria	Proteobacteria	Betaproteobacteria	Neisseriales	Neisseriaceae	Neisseria	Neisseria lactamica	0.34	68385	486	 Neisseria lactamica	S	乳糖奈瑟菌	条件致病	脑膜炎、菌血症	-
+Bacteria	Proteobacteria	Betaproteobacteria	Neisseriales	Neisseriaceae	Neisseria	Neisseria elongata	0.18	35600	495	 Neisseria elongata	S	长奈瑟菌	条件致病	心内膜炎	-
+Bacteria	Proteobacteria	Betaproteobacteria	Neisseriales	Neisseriaceae	Neisseria	Neisseria sp. oral taxon 014	0.07	13813	641148	Neisseria sp. oral taxon 014	S	-	-	-	-
+Bacteria	Proteobacteria	Betaproteobacteria	Neisseriales	Neisseriaceae	Candidatus Kinetoplastibacterium	Candidatus Kinetoplastibacterium galatii	0.01	1390	994695	  Candidatus Kinetoplastibacterium galatii	S	-	-	-	-
+Bacteria	Proteobacteria	Gammaproteobacteria	Pasteurellales	Pasteurellaceae	Haemophilus	Haemophilus influenzae	0.01	2178	727	 Haemophilus influenzae	S	流感嗜血杆菌（未分型菌株）	致病	急性结膜炎、急性中耳炎、急性上颌窦炎、慢性支气管炎急性发作及肺炎	第三类
+Bacteria	Proteobacteria	Gammaproteobacteria	Pasteurellales	Pasteurellaceae	Aggregatibacter	Aggregatibacter actinomycetemcomitans	0.01	1196	714	 Aggregatibacter actinomycetemcomitans	S	伴放线凝聚杆菌	条件致病	青少年及成人牙周病	第三类
+Bacteria	Firmicutes	Clostridia	Clostridiales	Peptostreptococcaceae	Filifactor	Filifactor alocis	0.0	519	143361	Filifactor alocis	S	龈沟产线菌	条件致病	重度牙源性感染、牙周疾病	-
+Eukaryota	Ascomycota	Leotiomycetes	Helotiales	Sclerotiniaceae	Sclerotinia	Sclerotinia sclerotiorum	0.0	10	5180	Sclerotinia sclerotiorum	S	-	-	-	-
+Eukaryota	Ascomycota	Sordariomycetes	Magnaporthales	Magnaporthaceae	Gaeumannomyces	Gaeumannomyces tritici	0.0	14	36779	  Gaeumannomyces tritici	S	-	-	-	-
+Eukaryota	Ascomycota	Saccharomycetes	Saccharomycetales	Debaryomycetaceae	Candida	Candida albicans	0.0	60	5476	 Candida albicans	S	白色念珠菌	致病	念珠菌病、严重伪膜性口腔念珠菌病	第三类
+Eukaryota	Apicomplexa	Conoidasida	Eucoccidiorida	Sarcocystidae	Toxoplasma	Toxoplasma gondii	0.0	175	5811	Toxoplasma gondii	S	刚地弓形虫	致病	皮肤利什曼病	-
+Bacteria	Bacteroidetes	Bacteroidia	Bacteroidales	Prevotellaceae	Prevotella	Prevotella intermedia	0.0	271	28131	  Prevotella intermedia	S	中间普雷沃菌	条件致病	人咬伤感染、慢性和侵袭性牙周炎、坏疽性口咽	第三类
+Bacteria	Proteobacteria	Gammaproteobacteria	Pasteurellales	Pasteurellaceae	Pasteurella	Pasteurella multocida	0.0	125	747	 Pasteurella multocida	S	多杀巴斯德菌	条件致病	呼吸道感染、全身性感染	第三类
+Bacteria	Proteobacteria	Deltaproteobacteria	Desulfobacterales	Desulfobacteraceae	Desulfobacter	Desulfobacter postgatei	0.0	33	2293	Desulfobacter postgatei	S	-	-	-	-
+Bacteria	Proteobacteria	Gammaproteobacteria	Vibrionales	Vibrionaceae	Photobacterium	Photobacterium damselae	0.0	24	38293	 Photobacterium damselae	S	美人鱼发光杆菌	致病	软组织感染（蜂窝织炎和坏死性筋膜炎）和菌血症	第三类
+Bacteria	Proteobacteria	Gammaproteobacteria	Enterobacterales	Enterobacteriaceae	Salmonella	Salmonella enterica	0.0	903	28901	 Salmonella enterica	S	肠沙门菌	致病	-	第三类
+Bacteria	Proteobacteria	Betaproteobacteria	Neisseriales	Neisseriaceae	Simonsiella	Simonsiella muelleri	0.0	265	72	 Simonsiella muelleri	S	米氏西蒙斯菌	非致病	-	-
+Bacteria	Proteobacteria	Betaproteobacteria	Neisseriales	Neisseriaceae	Snodgrassella	Snodgrassella alvi	0.0	285	1196083	 Snodgrassella alvi	S	-	-	-	-
+Eukaryota	Ascomycota	Eurotiomycetes	Chaetothyriales	Herpotrichiellaceae	Cladophialophora	Cladophialophora psammophila	0.0	14	1182553	Cladophialophora psammophila	S	-	-	-	-

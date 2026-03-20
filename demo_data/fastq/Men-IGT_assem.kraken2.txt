@@ -1,0 +1,38 @@
+100.00	684	0	R	1	root
+100.00	684	0	R1	131567	  cellular organisms
+100.00	684	0	D	2	    Bacteria
+100.00	684	0	P	1224	      Proteobacteria
+ 99.85	683	0	C	28216	        Betaproteobacteria
+ 99.85	683	0	O	206351	          Neisseriales
+ 99.85	683	0	F	481	            Neisseriaceae
+ 99.42	680	6	G	482	              Neisseria
+ 97.81	669	324	S	487	                Neisseria meningitidis
+ 45.61	312	3	S1	135720	                  Neisseria meningitidis serogroup C
+ 43.57	298	298	S2	374833	                    Neisseria meningitidis 053442
+  1.46	10	10	S2	604162	                    Neisseria meningitidis 8013
+  0.15	1	1	S2	272831	                    Neisseria meningitidis FAM18
+  1.61	11	11	S1	662598	                  Neisseria meningitidis alpha14
+  1.61	11	11	S1	935588	                  Neisseria meningitidis M01-240355
+  0.44	3	0	S1	491	                  Neisseria meningitidis serogroup B
+  0.15	1	1	S2	122586	                    Neisseria meningitidis MC58
+  0.15	1	1	S2	630588	                    Neisseria meningitidis alpha710
+  0.15	1	1	S2	909420	                    Neisseria meningitidis H44/76
+  0.44	3	3	S1	935590	                  Neisseria meningitidis M0579
+  0.29	2	2	S1	1386087	                  Neisseria meningitidis LNP21362
+  0.15	1	0	S1	65699	                  Neisseria meningitidis serogroup A
+  0.15	1	1	S2	122587	                    Neisseria meningitidis Z2491
+  0.15	1	1	S1	935591	                  Neisseria meningitidis M01-240149
+  0.15	1	1	S1	942513	                  Neisseria meningitidis WUE 2594
+  0.44	3	3	S	486	                Neisseria lactamica
+  0.15	1	1	S	489	                Neisseria polysaccharea
+  0.15	1	1	S	483	                Neisseria cinerea
+  0.29	2	0	G	538	              Eikenella
+  0.29	2	2	S	539	                Eikenella corrodens
+  0.15	1	0	G	71	              Simonsiella
+  0.15	1	0	S	72	                Simonsiella muelleri
+  0.15	1	1	S1	641147	                  Simonsiella muelleri ATCC 29453
+  0.15	1	0	C	1236	        Gammaproteobacteria
+  0.15	1	0	O	91347	          Enterobacterales
+  0.15	1	0	F	1903409	            Erwiniaceae
+  0.15	1	0	G	53335	              Pantoea
+  0.15	1	1	S	553	                Pantoea ananatis

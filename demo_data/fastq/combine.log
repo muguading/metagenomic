@@ -1,0 +1,84 @@
+
+
+processing file: bacgenome.Rmd
+output file: bacgenome.knit.md
+
+[WARNING] This document format requires a nonempty <title> element.
+  Defaulting to 'bacgenome.knit' as the title.
+  To specify a title, use 'title' in metadata or --metadata title="...".
+
+Output created: Men-IGT_bacgenome.html
+
+[1] "/data/deploy/meta_genome/Script/Blood/fastq_analysis/Men-IGT"
+
+  |                                                          
+  |                                                    |   0%
+  |                                                          
+  |..                                                  |   3%                  
+  |                                                          
+  |...                                                 |   6% (setup)          
+  |                                                          
+  |.....                                               |   9%                  
+  |                                                          
+  |......                                              |  12% (filt summary)   
+  |                                                          
+  |........                                            |  15%                  
+  |                                                          
+  |.........                                           |  18% (qc)             
+  |                                                          
+  |...........                                         |  21%                  
+  |                                                          
+  |.............                                       |  24% (qc_ngs)         
+  |                                                          
+  |..............                                      |  27%                  
+  |                                                          
+  |................                                    |  30% (single_Spetable)
+  |                                                          
+  |.................                                   |  33%                  
+  |                                                          
+  |...................                                 |  36% (assmble)        
+  |                                                          
+  |....................                                |  39%                  
+  |                                                          
+  |......................                              |  42% (checkm)         
+  |                                                          
+  |........................                            |  45%                  
+  |                                                          
+  |.........................                           |  48% (assmble_cir)    
+  |                                                          
+  |...........................                         |  52%                  
+  |                                                          
+  |............................                        |  55% (vfdrsum)        
+  |                                                          
+  |..............................                      |  58%                  
+  |                                                          
+  |................................                    |  61% (vfdb)           
+  |                                                          
+  |.................................                   |  64%                  
+  |                                                          
+  |...................................                 |  67% (card)           
+  |                                                          
+  |....................................                |  70%                  
+  |                                                          
+  |......................................              |  73% (rgi)            
+  |                                                          
+  |.......................................             |  76%                  
+  |                                                          
+  |.........................................           |  79% (mlst)           
+  |                                                          
+  |...........................................         |  82%                  
+  |                                                          
+  |............................................        |  85% (scheme)         
+  |                                                          
+  |..............................................      |  88%                  
+  |                                                          
+  |...............................................     |  91% (serotype)       
+  |                                                          
+  |.................................................   |  94%                  
+  |                                                          
+  |..................................................  |  97% (serovf)         
+  |                                                          
+  |....................................................| 100%                  
+                                                                                                            
+/home/dell/miniconda3/envs/report_env/bin/pandoc +RTS -K512m -RTS bacgenome.knit.md --to html4 --from markdown+autolink_bare_uris+tex_math_single_backslash --output Men-IGT_bacgenome.html --lua-filter /home/dell/miniconda3/envs/report_env/lib/R/library/rmarkdown/rmarkdown/lua/pagebreak.lua --lua-filter /home/dell/miniconda3/envs/report_env/lib/R/library/rmarkdown/rmarkdown/lua/latex-div.lua --self-contained --variable bs3=TRUE --section-divs --table-of-contents --toc-depth 3 --variable toc_float=1 --variable toc_selectors=h1,h2,h3 --variable toc_collapsed=1 --variable toc_smooth_scroll=1 --variable toc_print=1 --template /home/dell/miniconda3/envs/report_env/lib/R/library/rmarkdown/rmd/h/default.html --highlight-style pygments --number-sections --id-prefix section- --variable theme=bootstrap --mathjax --variable 'mathjax-url=https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML' --include-in-header /tmp/RtmpEZADtm/rmarkdown-str30451e7541fbcf.html 
+

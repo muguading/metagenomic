@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ task.name or task.id }} - 分析结果</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='report.css') }}">
+  </head>
+  <body>
+    <div class="report-shell" data-report-endpoint="{{ url_for('task_report_data', task_id=task.id) }}" data-export-endpoint="{{ url_for('export_table') }}" data-task-name="{{ task.name or task.id }}">
+      <header class="report-topbar">
+        <button class="report-back" type="button" onclick="window.location.href='/?tab=queue'">返回任务列表</button>
+        <div class="report-title-block">
+          <p class="report-kicker">Laboratory Report</p>
+          <h1>细菌组装分析结果</h1>
+          <p class="report-subtitle">本报告按分析流程整理样本质控、组装、物种、耐药毒力及分型结果，供结果判读与存档使用。</p>
+        </div>
+        <div class="report-topbar-actions">
+          <div class="report-export-toolbar">
+            <button class="report-export-button" type="button" data-report-export-format="html">导出 HTML</button>
+            <button class="report-export-button" type="button" data-report-export-format="word">导出 Word</button>
+            <button class="report-export-button" type="button" data-report-export-format="pdf">导出 PDF</button>
+          </div>
+          <div class="report-status">{{ task.status or "未知" }}</div>
+        </div>
+      </header>
+
+      <main class="report-layout">
+        <aside class="report-sidebar">
+          <div class="sidebar-card">
+            <span class="sidebar-label">当前任务</span>
+            <strong id="report-task-name">{{ task.name or task.id }}</strong>
+            <span id="report-task-meta">{{ task.id }}</span>
+          </div>
+          <nav class="report-nav" aria-label="分析结果目录">
+            <div class="report-nav-group">
+              <a class="report-nav-link" href="#section-overview">1. 数据概览</a>
+            </div>
+            <div class="report-nav-group has-children" data-nav-group>
+              <button class="report-nav-link report-nav-toggle" type="button" data-nav-toggle data-nav-section="section-raw-qc" aria-expanded="false" aria-controls="nav-group-qc">
+                <span>2. 原始数据质控</span>
+              </button>
+              <div class="report-subnav" id="nav-group-qc" hidden>
+                <a class="report-nav-link subnav-link" href="#section-fastp">2.1 fastp 结果可视化</a>
+              </div>
+            </div>
+            <div class="report-nav-group has-children" data-nav-group>
+              <button class="report-nav-link report-nav-toggle" type="button" data-nav-toggle data-nav-section="section-species" aria-expanded="false" aria-controls="nav-group-species">
+                <span>3. 物种鉴定</span>
+              </button>
+              <div class="report-subnav" id="nav-group-species" hidden>
+                <a class="report-nav-link subnav-link" href="#section-species-identification">3.1 序列物种鉴定</a>
+                <a class="report-nav-link subnav-link" href="#section-assembly-species-identification">3.2 组装物种鉴定</a>
+                <a class="report-nav-link subnav-link" href="#section-taxonomy-abundance">3.3 物种丰度堆积图</a>
+              </div>
+            </div>
+            <div class="report-nav-group has-children" data-nav-group>
+              <button class="report-nav-link report-nav-toggle" type="button" data-nav-toggle data-nav-section="section-assembly" aria-expanded="false" aria-controls="nav-group-assembly">
+                <span>4. 基因组组装</span>
+              </button>
+              <div class="report-subnav" id="nav-group-assembly" hidden>
+                <a class="report-nav-link subnav-link" href="#section-assembly-summary">4.1 组装后信息统计</a>
+                <a class="report-nav-link subnav-link" href="#section-contig-annotation">4.2 Contig 注释结果</a>
+                <a class="report-nav-link subnav-link" href="#section-checkm">4.3 CheckM 统计结果</a>
+                <a class="report-nav-link subnav-link" href="#section-gene-annotation">4.4 基因注释统计</a>
+              </div>
+            </div>
+            <div class="report-nav-group has-children" data-nav-group>
+              <button class="report-nav-link report-nav-toggle" type="button" data-nav-toggle data-nav-section="section-rv" aria-expanded="false" aria-controls="nav-group-rv">
+                <span>5. 耐药与毒力分析</span>
+              </button>
+              <div class="report-subnav" id="nav-group-rv" hidden>
+                <a class="report-nav-link subnav-link" href="#section-rv-summary">5.1 耐药毒力结果汇总</a>
+                <a class="report-nav-link subnav-link" href="#section-virulence">5.2 毒力元件</a>
+                <a class="report-nav-link subnav-link" href="#section-resistance">5.3 耐药元件</a>
+              </div>
+            </div>
+            <div class="report-nav-group">
+              <a class="report-nav-link" href="#section-mlst">6. MLST 分析结果</a>
+            </div>
+            <div class="report-nav-group">
+              <a class="report-nav-link" href="#section-serotype">7. 血清型鉴定</a>
+            </div>
+            <div class="report-nav-group">
+              <a class="report-nav-link" href="#section-priority-serotype">8. 关注毒力血清型</a>
+            </div>
+          </nav>
+        </aside>
+
+        <div class="report-content">
+          <section class="report-intro-card">
+            <div class="report-intro-main">
+              <p class="report-kicker">样本信息</p>
+              <h2 id="report-sample-title">{{ task.name or task.id }}</h2>
+              <p id="report-sample-copy">记录本次分析任务的归属信息、输入输出路径及组装参数。</p>
+            </div>
+            <dl class="report-meta-grid">
+              <div><dt>任务归属</dt><dd id="meta-owner">{{ task.owner or "-" }}</dd></div>
+              <div><dt>用户组</dt><dd id="meta-group">{{ task.owner_group or "-" }}</dd></div>
+              <div><dt>组装方式</dt><dd id="meta-asm-type">{{ task.params.asm_type or "-" }}</dd></div>
+              <div><dt>组装软件</dt><dd id="meta-method">{{ task.params.method or "-" }}</dd></div>
+              <div><dt>输入路径</dt><dd id="meta-input">{{ task.params.input_path or "-" }}</dd></div>
+              <div><dt>输出目录</dt><dd id="meta-output">{{ task.params.output_dir or "-" }}</dd></div>
+            </dl>
+          </section>
+
+          <section class="report-summary-strip" aria-label="报告首页摘要">
+            <div class="summary-strip-head">
+              <div>
+                <p class="report-kicker">Executive Summary</p>
+                <h2>报告首页摘要</h2>
+              </div>
+              <p>首屏概述测序质量、组装判读、物种预估及重点关注方向，便于快速判读。</p>
+            </div>
+            <div id="report-summary-grid" class="report-summary-grid"></div>
+          </section>
+
+          <section id="section-overview" class="report-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 1</p>
+              <h2>数据概览</h2>
+              <p>概述测序规模、组装情况、质量指标及物种预估结果。</p>
+            </div>
+            <div id="overview-metrics" class="metric-grid"></div>
+          </section>
+
+          <section id="section-raw-qc" class="report-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 2</p>
+              <h2>原始数据质控</h2>
+              <p>分别记录左右端原始测序数据的基础质量指标及质量曲线。</p>
+            </div>
+            <div class="two-column">
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>左端测序数据</h3>
+                  <span class="card-tag">测序结果</span>
+                </div>
+                <div id="raw-qc-left" class="empty-box">
+                  <p>记录左端原始测序数据的质控摘要与质量曲线。</p>
+                </div>
+              </article>
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>右端测序数据</h3>
+                  <span class="card-tag">测序结果</span>
+                </div>
+                <div id="raw-qc-right" class="empty-box">
+                  <p>记录右端原始测序数据的质控摘要与质量曲线。</p>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section id="section-fastp" class="report-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 2.1</p>
+              <h2>fastp 结果可视化</h2>
+              <p>记录 fastp 质控统计、插入片段分布及接头处理结果。</p>
+            </div>
+            <div class="two-column">
+              <article class="result-card chart-card">
+                <div class="card-head">
+                  <h3>fastp 图形结果</h3>
+                  <span class="card-tag">图形结果</span>
+                </div>
+                <div class="report-tabs" role="tablist" aria-label="fastp 结果切换">
+                  <button class="report-tab-button active" type="button" data-report-tab="insert-size">插入片段长度</button>
+                  <button class="report-tab-button" type="button" data-report-tab="base-content">碱基分布</button>
+                  <button class="report-tab-button" type="button" data-report-tab="adapter">接头情况</button>
+                </div>
+                <div id="fastp-tab-insert-size" class="report-tab-panel active" data-report-panel="insert-size"></div>
+                <div id="fastp-tab-base-content" class="report-tab-panel" data-report-panel="base-content"></div>
+                <div id="fastp-tab-adapter" class="report-tab-panel" data-report-panel="adapter"></div>
+              </article>
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>质控摘要</h3>
+                  <span class="card-tag">统计摘要</span>
+                </div>
+                <div id="fastp-summary" class="empty-box">
+                  <p>记录 fastp 过滤结果、重复率及接头处理统计。</p>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section id="section-species" class="report-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 3</p>
+              <h2>物种鉴定</h2>
+              <p>记录样本物种鉴定结果及分类层级统计。</p>
+            </div>
+            <div class="two-column taxonomy-summary-grid">
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>序列致病性汇总</h3>
+                  <span class="card-tag">判读摘要</span>
+                </div>
+                <div id="taxonomy-risk-summary" class="empty-box">
+                  <p>汇总 3.1 序列物种鉴定结果中的致病性与危害程度等级。</p>
+                </div>
+              </article>
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>危害程度等级分布</h3>
+                  <span class="card-tag">风险分布</span>
+                </div>
+                <div id="taxonomy-hazard-chart" class="empty-box">
+                  <p>显示不同危害程度等级对应的序列数量与相对占比。</p>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section id="section-species-identification" class="report-section compact-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 3.1</p>
+              <h2>序列物种鉴定</h2>
+            </div>
+            <article class="result-card taxonomy-card">
+              <div class="card-head">
+                <h3>分类层级汇总</h3>
+                <span class="card-tag">分类统计</span>
+              </div>
+              <div class="report-tabs" role="tablist" aria-label="物种层级切换">
+                <button class="report-tab-button active" type="button" data-taxonomy-tab="species">种</button>
+                <button class="report-tab-button" type="button" data-taxonomy-tab="subspecies">亚种</button>
+              </div>
+              <div class="taxonomy-block">
+                <span class="mini-chart-title">分类明细</span>
+                <div id="taxonomy-source-table" class="report-table-card"></div>
+              </div>
+              <div class="taxonomy-block">
+                <span class="mini-chart-title">层级统计</span>
+                <div id="taxonomy-rank-tags" class="taxonomy-rank-tags"></div>
+                <div id="taxonomy-summary-table" class="report-table-card"></div>
+              </div>
+            </article>
+          </section>
+
+          <section id="section-assembly-species-identification" class="report-section compact-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 3.2</p>
+              <h2>组装物种鉴定</h2>
+            </div>
+            <div id="assembly-species-table" class="report-table-card"></div>
+          </section>
+
+          <section id="section-taxonomy-abundance" class="report-section compact-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 3.3</p>
+              <h2>物种丰度堆积图</h2>
+            </div>
+            <article class="result-card abundance-card">
+              <div class="card-head">
+                <h3>分类水平前十丰度</h3>
+                <div class="abundance-controls">
+                  <label class="abundance-topn-control">
+                    <span>Top</span>
+                    <select id="taxonomy-abundance-topn">
+                      <option value="5">5</option>
+                      <option value="10" selected>10</option>
+                      <option value="15">15</option>
+                      <option value="20">20</option>
+                    </select>
+                  </label>
+                  <span class="card-tag" id="taxonomy-abundance-tag">Top 10 + Other</span>
+                </div>
+              </div>
+              <div id="taxonomy-abundance-chart" class="empty-box">
+                <p>记录各分类水平中相对丰度排名前十的分类单元，其余归并为 Other。</p>
+              </div>
+            </article>
+          </section>
+
+          <section id="section-assembly" class="report-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 4</p>
+              <h2>基因组组装</h2>
+              <p>记录组装统计、Contig 注释、CheckM 评估及基因注释结果。</p>
+            </div>
+          </section>
+
+          <section id="section-assembly-summary" class="report-section compact-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 4.1</p>
+              <h2>组装后信息统计</h2>
+            </div>
+            <div id="assembly-summary-table" class="report-table-card"></div>
+            <article class="result-card coverage-card">
+              <div class="card-head">
+                <div class="card-title-stack">
+                  <span class="section-chip">主图</span>
+                  <h3>基因组覆盖度</h3>
+                </div>
+                <span class="card-tag">深度分布</span>
+              </div>
+              <div id="assembly-coverage-chart" class="empty-box">
+                <p>记录基因组位置对应的测序深度分布。</p>
+              </div>
+            </article>
+          </section>
+
+          <section id="section-contig-annotation" class="report-section compact-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 4.2</p>
+              <h2>各个 Contig 注释结果</h2>
+            </div>
+            <div id="contig-annotation-table" class="report-table-card"></div>
+            <article class="result-card coverage-card">
+              <div class="card-head">
+                <div class="card-title-stack">
+                  <span class="section-chip">关系主图</span>
+                  <h3>基因组/质粒与平均深度关系图</h3>
+                </div>
+                <span class="card-tag">关系图</span>
+              </div>
+              <div id="contig-depth-relationship-chart" class="empty-box">
+                <p>展示不同序列类型与平均深度的对应关系。</p>
+              </div>
+            </article>
+            <article class="result-card coverage-card">
+              <div class="card-head">
+                <div class="card-title-stack">
+                  <span class="section-chip">补充散点图</span>
+                  <h3>Contig长度与平均测序深度散点图</h3>
+                </div>
+                <span class="card-tag">散点图</span>
+              </div>
+              <div id="contig-length-depth-scatter-chart" class="empty-box">
+                <p>展示不同 Contig 长度与平均测序深度的对应关系。</p>
+              </div>
+            </article>
+          </section>
+
+          <section id="section-checkm" class="report-section compact-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 4.3</p>
+              <h2>CheckM 统计结果</h2>
+            </div>
+            <div id="checkm-table" class="report-table-card"></div>
+          </section>
+
+          <section id="section-gene-annotation" class="report-section compact-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 4.4</p>
+              <h2>基因注释统计</h2>
+            </div>
+            <div id="gene-annotation-summary-table" class="report-table-card"></div>
+            <article class="result-card coverage-card">
+              <div class="card-head">
+                <div class="card-title-stack">
+                  <span class="section-chip">主图</span>
+                  <h3>基因长度与数量分布</h3>
+                </div>
+                <span class="card-tag">长度分布</span>
+              </div>
+              <div id="gene-length-distribution-chart" class="empty-box">
+                <p>记录不同基因长度区间对应的基因数量。</p>
+              </div>
+            </article>
+          </section>
+
+          <section id="section-rv" class="report-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 5</p>
+              <h2>耐药与毒力分析</h2>
+              <p>记录耐药与毒力相关结果，并列出元件级明细。</p>
+            </div>
+            <div class="two-column rv-summary-grid">
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>耐药摘要</h3>
+                  <span class="card-tag">判读摘要</span>
+                </div>
+                <div id="resistance-summary-panel" class="empty-box">
+                  <p>汇总耐药元件数量、主要药物类别及分布情况。</p>
+                </div>
+              </article>
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>毒力摘要</h3>
+                  <span class="card-tag">判读摘要</span>
+                </div>
+                <div id="virulence-summary-panel" class="empty-box">
+                  <p>汇总毒力元件数量、主要 VF 分类及分布情况。</p>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section id="section-rv-summary" class="report-section compact-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 5.1</p>
+              <h2>耐药毒力结果汇总</h2>
+            </div>
+            <div id="rv-summary-table" class="report-table-card"></div>
+          </section>
+
+          <section id="section-virulence" class="report-section compact-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 5.2</p>
+              <h2>毒力元件</h2>
+            </div>
+            <div id="virulence-table" class="report-table-card"></div>
+            <article class="result-card coverage-card">
+              <div class="card-head">
+                <div class="card-title-stack">
+                  <span class="section-chip">关系主图</span>
+                  <h3>VF 分类与毒力基因关系图</h3>
+                </div>
+                <span class="card-tag">关系图</span>
+              </div>
+              <div id="virulence-relationship-chart" class="empty-box">
+                <p>展示 VF 分类与毒力基因的对应关系。</p>
+              </div>
+            </article>
+          </section>
+
+          <section id="section-resistance" class="report-section compact-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 5.3</p>
+              <h2>耐药元件</h2>
+            </div>
+            <div id="resistance-table" class="report-table-card"></div>
+            <article class="result-card coverage-card">
+              <div class="card-head">
+                <div class="card-title-stack">
+                  <span class="section-chip">关系主图</span>
+                  <h3>耐药药物与耐药基因关系图</h3>
+                </div>
+                <span class="card-tag">关系图</span>
+              </div>
+              <div id="resistance-relationship-chart" class="empty-box">
+                <p>展示耐药药物与耐药基因的对应关系。</p>
+              </div>
+            </article>
+          </section>
+
+          <section id="section-mlst" class="report-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 6</p>
+              <h2>MLST 分析结果</h2>
+              <p>记录 MLST 分型结果及各 host gene 比对信息。</p>
+            </div>
+            <div id="mlst-table" class="report-table-card"></div>
+            <article class="result-card coverage-card">
+              <div class="card-head">
+                <h3>Host Gene 比对详情</h3>
+                <span class="card-tag">明细查看</span>
+              </div>
+              <div id="mlst-gene-show" class="gene-show-box empty-box">
+                <p>显示所选 host gene 的序列比对详情。</p>
+              </div>
+            </article>
+          </section>
+
+          <section id="section-serotype" class="report-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 7</p>
+              <h2>血清型鉴定</h2>
+              <p>记录血清型鉴定结果及相关位点信息。</p>
+            </div>
+            <div id="serotype-table" class="report-table-card"></div>
+          </section>
+
+          <section id="section-priority-serotype" class="report-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 8</p>
+              <h2>关注毒力血清型</h2>
+              <p>记录重点关注毒力血清型结果。</p>
+            </div>
+            <div id="priority-serotype-table" class="report-table-card"></div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='report_runtime.js') }}" defer></script>
+  </body>
+</html>

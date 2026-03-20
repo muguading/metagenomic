@@ -1,0 +1,685 @@
+序列名称	序列长度	平均深度	是否成环	基因组/质粒	质粒分型	物种名称	毒力基因数量	毒力基因	耐药基因数量	耐药基因
+contig_1	18127	1233.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_2	16601	1094.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_3	16140	1076.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	1	pilW	0	-
+contig_4	14764	1273.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_5	14726	1086.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_6	12713	1235.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_7	12445	1447.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_8	12298	1198.0	-	unclassified.unclassified	-	Neisseria meningitidis M0579	0	-	0	-
+contig_9	11927	1552.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	1	tufA	0	-
+contig_10	11376	1033.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_11	10968	1056.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_12	10781	1351.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_13	9737	950.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_14	9140	1132.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_15	9078	1220.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_16	9021	1094.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_17	8960	1075.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_18	8812	1159.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_19	8727	1721.0	-	plasmid.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_20	8515	907.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	1	fHbp	0	-
+contig_21	8353	689.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_22	8223	1113.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_23	8175	1006.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_24	7939	1664.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_25	7495	1304.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_26	7484	1112.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_27	7429	987.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_28	7424	1189.0	-	chromosome.unclassified	-	Neisseria meningitidis 8013	0	-	0	-
+contig_29	7372	365.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_30	7356	1052.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_31	7182	1061.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_32	7173	1135.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_33	7160	1112.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_34	7088	1123.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_35	6993	961.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_36	6973	1196.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	2	farB,farA	2	farB,farA
+contig_37	6899	776.0	-	chromosome.unclassified	-	Neisseria meningitidis FAM18	0	-	0	-
+contig_38	6883	1092.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_39	6846	1291.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_40	6675	1151.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis M01-240355	1	recN	0	-
+contig_41	6655	1263.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_42	6615	1119.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_43	6583	1284.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_44	6574	1130.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_45	6512	1263.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_46	6469	1041.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_47	6421	1024.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_48	6397	1438.0	-	chromosome.unclassified	-	Neisseria meningitidis alpha14	1	kdtA_waaA	0	-
+contig_49	6385	916.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_50	6384	1078.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_51	6357	1165.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	2	pilD,pilF	0	-
+contig_52	6331	948.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_53	6321	1167.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_54	6305	1108.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_55	6279	1271.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_56	6248	829.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_57	6239	1410.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_58	6187	964.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_59	6165	1068.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_60	6155	1126.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_61	6152	1103.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	1	lpt6	0	-
+contig_62	6148	1188.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_63	6121	1245.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_64	6068	916.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_65	6014	1031.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_66	5991	1101.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_67	5962	1007.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_68	5912	924.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_69	5882	1356.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_70	5832	1008.0	-	plasmid.Firmicutes	-	Neisseria meningitidis 053442	0	-	0	-
+contig_71	5823	1049.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_72	5801	1013.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_73	5712	916.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_74	5684	585.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 8013	0	-	0	-
+contig_75	5681	2018.0	-	unclassified.unclassified	-	Neisseria meningitidis alpha14	0	-	0	-
+contig_76	5670	1390.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_77	5665	1260.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	3	fbpA,fbpB,fbpC	0	-
+contig_78	5652	1563.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_79	5651	1233.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_80	5623	1408.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_81	5578	2621.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_82	5563	952.0	-	plasmid.unclassified	-	Neisseria meningitidis	3	mntC,mntB,mntA	0	-
+contig_83	5556	865.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_84	5555	1213.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_85	5471	830.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_86	5469	889.0	-	chromosome.unclassified	-	Neisseria meningitidis	2	lbpB,lbpA	0	-
+contig_87	5433	839.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_88	5416	1109.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_89	5341	1770.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_90	5317	984.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_91	5263	1069.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_92	5246	1156.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_93	5211	1073.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_94	5207	1331.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_95	5170	1068.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	2	tbpA,tbpB	0	-
+contig_96	5155	1092.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_97	5139	1208.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_98	5139	1098.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_99	5080	1097.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_100	5061	1140.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_101	5042	1191.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_102	4949	1041.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_103	4901	413.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	1	fHbp	0	-
+contig_104	4838	1073.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_106	4781	1169.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_105	4781	1310.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_107	4773	1186.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_108	4765	1194.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_109	4751	1235.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_110	4629	1042.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_111	4604	1267.0	-	unclassified.Firmicutes	-	Neisseria meningitidis 053442	0	-	0	-
+contig_112	4595	1230.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_113	4571	8318.0	-	plasmid.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_114	4564	1150.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_115	4519	1993.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_116	4440	999.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_117	4436	803.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_118	4430	1182.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_119	4428	348.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	2	lbpA,lbpB	0	-
+contig_120	4405	1172.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_121	4398	1130.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_122	4382	1098.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_123	4351	1326.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_124	4323	1290.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_125	4312	1205.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_126	4208	989.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_127	4186	274.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_128	4180	1112.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_129	4170	1137.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_130	4166	939.0	-	plasmid.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_131	4149	529.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	2	siaD_synD,siaC_synC	0	-
+contig_132	4129	1191.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_133	4103	781.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_134	4098	1307.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_135	4086	1449.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	1	nspA	0	-
+contig_136	4080	1210.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	1	pilT	0	-
+contig_137	4058	924.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_138	4056	997.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_139	4033	1126.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_140	4031	648.0	-	unclassified.unclassified	-	Neisseria meningitidis LNP21362	0	-	0	-
+contig_141	4020	1232.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_142	4004	1132.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_143	3915	1250.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_144	3903	1021.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_145	3898	1231.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_146	3896	1278.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	1	opc	0	-
+contig_147	3879	1090.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_148	3819	665.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_149	3816	688.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_150	3810	742.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis M0579	0	-	0	-
+contig_151	3807	931.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_152	3803	788.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_153	3783	468.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_154	3774	949.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_155	3752	1120.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_156	3690	966.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_157	3678	1247.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_158	3662	1177.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_159	3645	1868.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis M0579	1	pilC	0	-
+contig_160	3624	748.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis alpha14	0	-	0	-
+contig_161	3594	1238.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_162	3585	821.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_163	3572	30.0	-	plasmid.Firmicutes	-	Neisseria meningitidis	0	-	0	-
+contig_164	3569	921.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_165	3567	1129.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_166	3544	936.0	-	chromosome.unclassified	-	Neisseria meningitidis	1	iga	0	-
+contig_167	3518	1241.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_168	3488	1071.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_169	3477	1210.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	1	katA	0	-
+contig_170	3470	5706.0	-	chromosome.unclassified	-	Neisseria meningitidis serogroup C	0	-	0	-
+contig_171	3451	1184.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_172	3447	880.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_174	3445	1171.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_173	3445	987.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_175	3436	1131.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_176	3430	876.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 8013	0	-	0	-
+contig_177	3417	730.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_178	3413	1476.0	-	chromosome.unclassified	-	Neisseria meningitidis M01-240355	1	pilQ	0	-
+contig_179	3413	35.0	-	unclassified.unclassified	-	Neisseria meningitidis	2	hpuA,hpuB	0	-
+contig_180	3409	427.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	3	mntC,mntB,mntA	0	-
+contig_181	3408	1248.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis M01-240355	0	-	0	-
+contig_182	3395	1087.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_183	3381	950.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_184	3376	1170.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_185	3372	411.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_186	3361	1151.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_187	3354	1087.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_188	3346	429.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_189	3287	451.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_190	3271	1426.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_191	3205	1051.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis 053442	4	pilP,pilO,pilN,pilM	0	-
+contig_192	3202	1172.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_193	3197	1024.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_194	3196	1317.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_195	3166	1130.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_196	3134	1141.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_197	3103	982.0	-	chromosome.Bacteroidetes	-	Neisseria meningitidis	0	-	0	-
+contig_198	3092	425.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_199	3087	1143.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_200	3061	1256.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_201	3039	1085.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_202	3038	1299.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_203	3031	904.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_204	3025	1342.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_205	3017	1010.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_206	2994	1159.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_207	2983	1081.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_208	2954	1189.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_209	2949	1067.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_210	2947	1280.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_211	2924	1162.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_212	2921	991.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_213	2907	1080.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_214	2903	1051.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_215	2900	1083.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_216	2898	1214.0	-	plasmid.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_217	2891	897.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_218	2887	1007.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_219	2887	872.0	-	unclassified.unclassified	-	Neisseria meningitidis M01-240355	0	-	0	-
+contig_220	2881	729.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_221	2867	358.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_222	2856	1332.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_223	2845	768.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_224	2843	1048.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_225	2838	718.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_226	2834	1050.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_227	2818	1117.0	-	plasmid.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_228	2801	1230.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_229	2787	1056.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_230	2772	1200.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_231	2768	411.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_232	2766	1092.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_233	2747	1243.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_234	2746	1337.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_235	2741	971.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_236	2718	1006.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_237	2717	988.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_238	2711	435.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_239	2710	600.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_240	2700	1277.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis M01-240355	0	-	0	-
+contig_241	2695	729.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_242	2694	1184.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_243	2676	738.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_244	2659	2390.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_245	2658	1077.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_246	2655	1225.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	1	htpB	0	-
+contig_248	2649	966.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_247	2649	954.0	-	chromosome.unclassified	-	Neisseria meningitidis 8013	0	-	0	-
+contig_249	2645	935.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_250	2639	1016.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_251	2637	1017.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_252	2619	1306.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_253	2615	1212.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_254	2607	1153.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_255	2606	1132.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_256	2601	1050.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_257	2596	1266.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_259	2592	1229.0	-	unclassified.unclassified	-	Neisseria meningitidis alpha14	0	-	0	-
+contig_258	2592	1210.0	-	unclassified.unclassified	-	Neisseria meningitidis	1	msrA_B(pilB	0	-
+contig_260	2589	714.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_261	2582	868.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_262	2581	1073.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis M01-240355	0	-	0	-
+contig_263	2573	1463.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	1	mtrA
+contig_264	2519	30.0	-	chromosome.Proteobacteria	-	Neisseria lactamica	0	-	0	-
+contig_265	2490	526.0	-	plasmid.Spirochaetes	-	Neisseria meningitidis	1	siaD_synD	0	-
+contig_266	2484	1220.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_267	2454	1067.0	-	unclassified.unclassified	-	Neisseria meningitidis alpha14	0	-	0	-
+contig_268	2452	796.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_270	2449	1155.0	-	chromosome.unclassified	-	Neisseria meningitidis 8013	0	-	0	-
+contig_269	2449	1090.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_271	2432	778.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_272	2431	1151.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_273	2429	728.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_274	2423	1552.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_275	2402	1134.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_276	2400	1275.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_277	2393	1153.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_278	2388	1245.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_279	2387	1563.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_280	2379	1243.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_281	2377	1069.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_282	2375	1131.0	-	chromosome.unclassified	-	Neisseria meningitidis	2	siaA_synA,ctrA	0	-
+contig_283	2370	11.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_284	2363	1062.0	-	unclassified.unclassified	-	Neisseria meningitidis	2	lgtE,lgtB	0	-
+contig_285	2361	654.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_286	2361	657.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_287	2358	1099.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_288	2355	1130.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_289	2345	1408.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_290	2334	1011.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_291	2334	1163.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_292	2322	1368.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_293	2311	1700.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 8013	0	-	0	-
+contig_294	2310	1155.0	-	unclassified.Bacteroidetes	-	Neisseria meningitidis 053442	0	-	0	-
+contig_295	2286	1049.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_296	2284	661.0	-	unclassified.unclassified	-	Neisseria meningitidis 8013	0	-	0	-
+contig_297	2279	1037.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_298	2256	921.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_299	2251	507.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_300	2238	1030.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_301	2236	454.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_302	2234	1212.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_303	2233	1014.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_305	2228	1345.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_304	2228	1234.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_306	2227	530.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_307	2219	1468.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_308	2219	1475.0	-	chromosome.unclassified	-	Neisseria meningitidis M01-240355	0	-	0	-
+contig_309	2215	874.0	-	chromosome.unclassified	-	Neisseria meningitidis	3	pilH,pilI,pilJ	0	-
+contig_310	2213	810.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_311	2212	1034.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	1	rfaC	0	-
+contig_312	2194	702.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_313	2187	792.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_314	2186	1279.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_315	2182	967.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_316	2181	1222.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_317	2176	1296.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_318	2170	1258.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_319	2156	937.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_320	2144	992.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_321	2142	1240.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_322	2127	978.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_323	2125	2717.0	-	chromosome.unclassified	-	Eikenella corrodens	0	-	0	-
+contig_324	2105	1457.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_325	2087	976.0	-	chromosome.unclassified	-	Neisseria meningitidis	1	pilG	0	-
+contig_326	2061	707.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis LNP21362	0	-	0	-
+contig_327	2057	987.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_328	2057	1309.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_329	2053	1146.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_330	2052	618.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	1	luxS	0	-
+contig_331	2052	370.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	1	luxS	0	-
+contig_333	2049	800.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_332	2049	1295.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_334	2049	890.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_335	2039	289.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_336	2036	1615.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_337	2034	1255.0	-	unclassified.unclassified	-	Neisseria	0	-	0	-
+contig_338	2023	972.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_339	2019	618.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_340	2012	1205.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_341	2011	882.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_342	2002	671.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis MC58	1	ctrD	1	ErmC
+contig_343	2002	11.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_345	1992	795.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_344	1992	921.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_346	1989	1960.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_347	1985	1212.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_348	1978	1250.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_349	1976	1079.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_350	1976	1198.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_351	1971	571.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_352	1960	1198.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_353	1959	1229.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_354	1958	2312.0	-	plasmid.unclassified	-	Neisseria meningitidis serogroup C	0	-	0	-
+contig_355	1953	19.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_356	1950	1091.0	-	chromosome.unclassified	-	Neisseria meningitidis	1	mtrD	1	mtrD
+contig_357	1941	16.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_358	1936	989.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_359	1936	841.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_360	1934	1168.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_361	1933	13.0	-	unclassified.Bacteroidetes	-	Eikenella corrodens	0	-	0	-
+contig_362	1929	1062.0	-	plasmid.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_363	1923	1229.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_364	1918	429.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_365	1898	962.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_366	1896	992.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_367	1896	511.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_368	1880	1173.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_369	1879	1159.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_370	1870	451.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	2	pilH,pilI	0	-
+contig_371	1868	1308.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_372	1864	953.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_373	1864	907.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_374	1862	1059.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_375	1848	1160.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_376	1845	1424.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_377	1844	1606.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis M01-240355	0	-	0	-
+contig_378	1832	947.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	1	porA	0	-
+contig_379	1831	392.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_380	1828	1273.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_381	1823	275.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_382	1822	775.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_383	1819	1270.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_384	1815	1211.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_385	1813	1201.0	-	chromosome.Spirochaetes	-	Neisseria meningitidis	0	-	0	-
+contig_386	1808	1140.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_387	1806	1350.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_388	1801	1181.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_389	1798	955.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_390	1794	18.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_391	1790	1239.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_392	1783	838.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_394	1778	807.0	-	chromosome.Proteobacteria	-	Neisseria lactamica	0	-	0	-
+contig_393	1778	1093.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_395	1777	1126.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_396	1772	1182.0	-	plasmid.unclassified	-	Neisseria meningitidis 8013	0	-	0	-
+contig_397	1770	1234.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_398	1763	5745.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_399	1762	1204.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	2	pilS,pilS	0	-
+contig_401	1756	534.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_400	1756	771.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_402	1755	1360.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_403	1748	1212.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_404	1742	979.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_407	1739	405.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_405	1739	1210.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_406	1739	801.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_408	1738	1249.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_409	1734	1388.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_410	1717	2012.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_411	1717	1135.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_412	1713	1234.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_413	1703	1192.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_414	1701	1099.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_415	1700	1018.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_416	1696	933.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_417	1695	927.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_418	1692	1139.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_419	1691	1186.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	1	opa	0	-
+contig_420	1688	1213.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_421	1685	33.0	-	plasmid.Proteobacteria	-	Pantoea ananatis	0	-	0	-
+contig_422	1684	1137.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_423	1682	1114.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_424	1681	935.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	1	porB	0	-
+contig_425	1673	1101.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_427	1669	967.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_426	1669	1200.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_428	1663	1195.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_429	1662	1084.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_430	1661	898.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_431	1658	452.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_432	1657	864.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_433	1655	362.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_434	1654	1258.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_435	1653	1234.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_436	1651	1095.0	-	chromosome.Bacteroidetes	-	Neisseria meningitidis	0	-	0	-
+contig_437	1650	1368.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_438	1645	1517.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_439	1633	671.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_440	1632	1212.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_441	1629	1177.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_443	1622	1078.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_442	1622	957.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_444	1621	1133.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_445	1609	1093.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_446	1606	1150.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_447	1605	1183.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_448	1602	1375.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_449	1592	336.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	1	tbpB	0	-
+contig_450	1590	1041.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_451	1585	1110.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_452	1569	956.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_453	1565	1073.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_454	1564	1157.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_455	1559	1075.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_456	1557	752.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_457	1555	399.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_458	1554	720.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_459	1553	1315.0	-	chromosome.unclassified	-	Neisseria meningitidis	1	mtrE	1	mtrE
+contig_460	1543	1410.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_461	1541	13.0	-	plasmid.unclassified	-	Neisseria meningitidis M01-240149	0	-	0	-
+contig_462	1537	990.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_463	1533	1673.0	-	unclassified.unclassified	-	Neisseria meningitidis	1	opa	0	-
+contig_464	1529	1212.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_466	1527	919.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_465	1527	1221.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_467	1526	1220.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_468	1525	1176.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_469	1525	1364.0	-	chromosome.unclassified	-	Neisseria meningitidis	1	mtrC	1	mtrC
+contig_470	1521	498.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_471	1517	1153.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_472	1508	1067.0	-	chromosome.Spirochaetes	-	Neisseria meningitidis	0	-	0	-
+contig_473	1504	1861.0	-	unclassified.Bacteroidetes	-	Neisseria meningitidis	0	-	0	-
+contig_474	1502	894.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_475	1499	1058.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_476	1498	48.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_477	1496	1072.0	-	chromosome.unclassified	-	Neisseria meningitidis M01-240355	0	-	0	-
+contig_478	1494	1175.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_479	1492	11.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_480	1489	984.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_481	1487	1007.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_483	1484	1091.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_484	1484	1527.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_482	1484	1414.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_485	1482	1108.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_486	1480	962.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_487	1471	1905.0	-	plasmid.unclassified	-	Neisseria meningitidis 053442	1	opa	0	-
+contig_488	1469	369.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_489	1467	1082.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	2	pilS,pilS	0	-
+contig_490	1466	1280.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_491	1460	1219.0	-	chromosome.unclassified	-	Neisseria meningitidis	1	lgtA	0	-
+contig_492	1459	1213.0	-	chromosome.unclassified	-	Neisseria meningitidis H44/76	0	-	0	-
+contig_493	1454	1241.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_494	1453	1463.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_496	1452	62.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_495	1452	26.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_497	1451	592.0	-	unclassified.unclassified	-	Neisseria meningitidis 8013	0	-	0	-
+contig_498	1447	1362.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_499	1443	877.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_500	1442	1205.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_501	1440	810.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_502	1439	1210.0	-	plasmid.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_503	1437	15.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_504	1435	1139.0	-	unclassified.unclassified	-	Neisseria meningitidis alpha14	0	-	0	-
+contig_505	1435	976.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_506	1426	1042.0	-	unclassified.Bacteroidetes	-	Neisseria meningitidis	0	-	0	-
+contig_507	1423	1149.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_508	1422	982.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_509	1421	624.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_510	1418	1110.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_512	1408	801.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_511	1408	1047.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_513	1405	984.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_514	1403	856.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_515	1395	1244.0	-	unclassified.Bacteroidetes	-	Neisseria meningitidis 053442	0	-	0	-
+contig_516	1394	1115.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_517	1391	1427.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_518	1385	957.0	-	chromosome.unclassified	-	Neisseria meningitidis M01-240355	0	-	0	-
+contig_519	1379	868.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_520	1372	1189.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_521	1371	1211.0	-	unclassified.unclassified	-	Neisseria meningitidis	1	flmH	0	-
+contig_522	1368	346.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_523	1367	1276.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	1	siaB_synB	0	-
+contig_524	1365	1268.0	-	unclassified.unclassified	-	Neisseria meningitidis alpha14	0	-	0	-
+contig_525	1365	525.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_527	1364	18.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_526	1364	894.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_528	1363	866.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_529	1361	994.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_530	1359	1090.0	-	chromosome.unclassified	-	Neisseria	0	-	0	-
+contig_531	1347	1223.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_532	1346	1410.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_533	1344	1351.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_534	1340	1054.0	-	chromosome.unclassified	-	Neisseria	0	-	0	-
+contig_535	1337	884.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_536	1336	688.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_537	1331	1292.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_538	1330	1009.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_539	1325	1259.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_540	1321	807.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_541	1317	953.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_542	1313	2257.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_543	1312	388.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_544	1311	1146.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_545	1310	865.0	-	plasmid.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_546	1309	1128.0	-	unclassified.Firmicutes	-	Neisseria meningitidis	0	-	0	-
+contig_548	1304	1240.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_547	1304	1535.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_549	1304	26.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_550	1297	911.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_551	1296	998.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_552	1291	124.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_553	1290	880.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_554	1283	1052.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_555	1278	1226.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_556	1276	1389.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_557	1269	987.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_558	1266	1193.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	1	pilT2	0	-
+contig_559	1264	1157.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_560	1263	1241.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_561	1260	1240.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_562	1250	358.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_563	1247	1021.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_564	1245	1021.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_565	1243	1154.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_566	1241	995.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_567	1241	29.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_568	1237	1336.0	-	unclassified.unclassified	-	Neisseria meningitidis 8013	0	-	0	-
+contig_569	1236	875.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_570	1234	1454.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_571	1224	610.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_572	1223	25.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_573	1220	1213.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_574	1219	940.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_575	1216	20.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis alpha14	0	-	0	-
+contig_576	1215	934.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_577	1210	1036.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_578	1209	16.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_579	1209	11.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_580	1205	1393.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_581	1205	1330.0	-	plasmid.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_583	1204	1195.0	-	chromosome.Bacteroidetes	-	Neisseria meningitidis	0	-	0	-
+contig_582	1204	1298.0	-	unclassified.unclassified	-	Neisseria meningitidis	1	hlyB	0	-
+contig_584	1198	1096.0	-	chromosome.unclassified	-	Neisseria meningitidis Z2491	0	-	0	-
+contig_586	1196	22.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_585	1196	957.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	2	rfaK,lgtF	0	-
+contig_587	1194	1019.0	-	plasmid.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_588	1192	1030.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_589	1190	1227.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_591	1190	757.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	2	pilS,pilS	0	-
+contig_590	1190	782.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_592	1187	1163.0	-	unclassified.Bacteroidetes	-	Neisseria meningitidis	0	-	0	-
+contig_593	1185	1201.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_594	1185	306.0	-	unclassified.unclassified	-	Neisseria meningitidis alpha14	0	-	0	-
+contig_595	1182	382.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_596	1176	2721.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_597	1176	1186.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_598	1173	49.0	-	chromosome.unclassified	-	Simonsiella muelleri ATCC 29453	0	-	0	-
+contig_599	1171	1105.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_600	1171	1232.0	-	unclassified.unclassified	-	Neisseria meningitidis alpha14	0	-	0	-
+contig_601	1168	519.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_602	1167	1065.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_603	1166	1151.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_604	1164	1114.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_605	1163	1060.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_606	1161	1052.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_607	1159	1025.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_608	1158	969.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_609	1157	1355.0	-	unclassified.unclassified	-	Neisseria meningitidis M01-240355	0	-	0	-
+contig_610	1157	823.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_611	1153	86.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_612	1147	996.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_613	1145	27.0	-	unclassified.Proteobacteria	-	Neisseria	0	-	0	-
+contig_614	1142	919.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_615	1138	1194.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_616	1137	8.0	-	unclassified.unclassified	-	Neisseria lactamica	0	-	0	-
+contig_617	1135	1094.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_618	1134	942.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_619	1133	800.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_620	1133	374.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_621	1127	885.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_622	1125	3450.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_623	1125	926.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_624	1123	1077.0	-	chromosome.unclassified	-	Neisseria meningitidis serogroup C	0	-	0	-
+contig_625	1122	847.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_626	1121	932.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_627	1119	283.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_628	1118	1016.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_630	1116	11.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_629	1116	1136.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_631	1115	1515.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	1	lipB	0	-
+contig_632	1114	1862.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_633	1114	1010.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_634	1114	1096.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_635	1104	932.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_636	1103	1377.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_637	1102	1329.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_638	1098	10.0	-	plasmid.Proteobacteria	-	Neisseria cinerea	0	-	0	-
+contig_639	1093	864.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_640	1092	1081.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_642	1091	1288.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_641	1091	926.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_644	1090	795.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_645	1090	250.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_643	1090	870.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_646	1083	1009.0	-	unclassified.unclassified	-	Neisseria	0	-	0	-
+contig_647	1081	1314.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_648	1079	1181.0	-	unclassified.Bacteroidetes	-	Neisseria meningitidis	0	-	0	-
+contig_649	1077	1256.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_650	1073	39.0	-	chromosome.unclassified	-	Neisseria meningitidis alpha710	0	-	0	-
+contig_653	1071	922.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_651	1071	787.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_652	1071	860.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_654	1068	1041.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis	0	-	1	macB
+contig_655	1067	1101.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_656	1064	1193.0	-	chromosome.unclassified	-	Neisseria meningitidis WUE 2594	0	-	0	-
+contig_657	1061	1116.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_658	1059	1204.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_659	1058	633.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_660	1058	407.0	-	chromosome.Proteobacteria	-	Neisseria meningitidis alpha14	0	-	0	-
+contig_661	1056	1209.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_662	1055	1057.0	-	unclassified.unclassified	-	Neisseria	0	-	0	-
+contig_663	1055	940.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_664	1054	298.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_665	1050	1144.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_666	1046	1208.0	-	plasmid.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_668	1040	224.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis 053442	0	-	0	-
+contig_667	1040	864.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_669	1038	690.0	-	unclassified.Spirochaetes	-	Neisseria meningitidis 053442	0	-	0	-
+contig_670	1032	1176.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_671	1027	175.0	-	plasmid.Firmicutes	-	Neisseria meningitidis	0	-	0	-
+contig_673	1024	802.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_672	1024	943.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_674	1022	1010.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_676	1021	820.0	-	unclassified.Proteobacteria	-	Neisseria meningitidis	0	-	0	-
+contig_675	1021	1071.0	-	plasmid.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_678	1019	944.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_677	1019	1284.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_679	1017	1102.0	-	chromosome.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_681	1015	667.0	-	chromosome.Proteobacteria	-	Neisseria polysaccharea	0	-	0	-
+contig_680	1015	1389.0	-	chromosome.unclassified	-	Neisseria meningitidis 053442	1	pilZ	0	-
+contig_682	1014	1095.0	-	unclassified.unclassified	-	Neisseria meningitidis 053442	0	-	0	-
+contig_683	1011	1124.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-
+contig_684	1001	1107.0	-	unclassified.unclassified	-	Neisseria meningitidis	0	-	0	-

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -72,7 +73,25 @@ class AnalysisTaskManager:
             raise KeyError(f"Task not found: {task_id}")
         return self._serialize_task(task, include_log=True, log_lines=log_lines)
 
-    def create_task(self, payload: dict[str, Any], *, owner: str, pipeline_script: str) -> dict[str, Any]:
+    def delete_task(self, task_id: str, *, owner: str | None = None) -> None:
+        task_dir = self.task_root / task_id
+        task_file = task_dir / "task.json"
+        if not task_file.is_file():
+            raise KeyError(f"Task not found: {task_id}")
+        task = read_json(task_file)
+        if owner and task.get("owner") != owner:
+            raise KeyError(f"Task not found: {task_id}")
+        shutil.rmtree(task_dir)
+
+    def create_task(
+        self,
+        payload: dict[str, Any],
+        *,
+        owner: str,
+        owner_group: str = "",
+        pipeline_script: str,
+        pipeline_python: str | None = None,
+    ) -> dict[str, Any]:
         pipeline_script_path = Path(pipeline_script).expanduser()
         pipeline_script_path = (
             (self.project_root / pipeline_script_path).resolve()
@@ -89,11 +108,13 @@ class AnalysisTaskManager:
         log_file = task_dir / "pipeline.log"
 
         params = self._normalize_payload(payload)
-        command = self._build_command(params, pipeline_script_path)
+        pipeline_python_executable = self._resolve_runtime_python(pipeline_python)
+        command = self._build_command(params, pipeline_script_path, pipeline_python_executable)
         task = {
             "id": task_id,
             "name": params["task_name"],
             "owner": owner,
+            "owner_group": owner_group,
             "status": "QUEUED",
             "created_at": utc_now_iso(),
             "started_at": None,
@@ -106,6 +127,7 @@ class AnalysisTaskManager:
             "project_root": str(self.project_root),
             "log_path": str(log_file),
             "pipeline_script": str(pipeline_script_path),
+            "pipeline_python": pipeline_python_executable,
         }
         write_json(task_file, task)
 
@@ -117,6 +139,71 @@ class AnalysisTaskManager:
             start_new_session=True,
         )
         task["runner_pid"] = runner.pid
+        write_json(task_file, task)
+        return self.get_task(task_id, owner=owner)
+
+    def create_demo_task(self, *, owner: str, owner_group: str = "") -> dict[str, Any]:
+        demo_input = (self.project_root / "demo_data" / "fastq").resolve()
+        if not demo_input.exists():
+            raise ValidationError(f"Demo 数据不存在: {demo_input}")
+
+        task_id = datetime.now().strftime("%Y%m%d%H%M%S") + "_" + uuid4().hex[:8]
+        task_dir = self.task_root / task_id
+        task_dir.mkdir(parents=True, exist_ok=False)
+        task_file = task_dir / "task.json"
+        log_file = task_dir / "pipeline.log"
+        output_dir = task_dir / "demo_output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        params = {
+            "task_name": "demo_fastq",
+            "input_path": str(demo_input),
+            "inputtype": "fastq",
+            "output_dir": str(output_dir),
+            "thread": 10,
+            "minlongfilt": "500",
+            "Qfilt": "10",
+            "barcodekit": "none",
+            "method": "spades",
+            "long_type": "Nanopore",
+            "ref": "noref",
+            "gtf": "nogtf",
+            "genome_len": "4m",
+            "asm_type": "shortasm",
+            "polish_times": "1",
+            "polish_soft": "medaka",
+            "species": "False",
+            "rmhost": "norm",
+            "runflow": "All",
+            "abun": "1",
+            "rna": "0",
+            "fake_pip": 1,
+        }
+        finished_at = utc_now_iso()
+        task = {
+            "id": task_id,
+            "name": "demo_fastq",
+            "owner": owner,
+            "owner_group": owner_group,
+            "status": "SUCCEEDED",
+            "created_at": finished_at,
+            "started_at": finished_at,
+            "finished_at": finished_at,
+            "exit_code": 0,
+            "runner_pid": None,
+            "pipeline_pid": None,
+            "params": params,
+            "command": ["demo_task", str(demo_input)],
+            "project_root": str(self.project_root),
+            "log_path": str(log_file),
+            "pipeline_script": "demo_data/fastq",
+        }
+        log_file.write_text(
+            f"[{finished_at}] Demo 任务已生成\n"
+            f"[{finished_at}] 输入目录: {demo_input}\n"
+            f"[{finished_at}] 状态: SUCCEEDED\n",
+            encoding="utf-8",
+        )
         write_json(task_file, task)
         return self.get_task(task_id, owner=owner)
 
@@ -152,9 +239,9 @@ class AnalysisTaskManager:
             "fake_pip": self._clean_int(payload.get("fake_pip"), default=0, minimum=0),
         }
 
-    def _build_command(self, params: dict[str, Any], pipeline_script: Path) -> list[str]:
+    def _build_command(self, params: dict[str, Any], pipeline_script: Path, pipeline_python: str) -> list[str]:
         return [
-            self.python_executable,
+            pipeline_python,
             "-u",
             str(pipeline_script),
             "--input",
@@ -206,6 +293,7 @@ class AnalysisTaskManager:
             "id": task.get("id"),
             "name": task.get("name"),
             "owner": task.get("owner", ""),
+            "owner_group": task.get("owner_group", ""),
             "status": task.get("status"),
             "created_at": task.get("created_at"),
             "started_at": task.get("started_at"),
@@ -227,6 +315,14 @@ class AnalysisTaskManager:
             return ""
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         return "\n".join(lines[-log_lines:])
+
+    def _resolve_runtime_python(self, raw_value: str | None) -> str:
+        candidate = self._clean_str(raw_value) or self.python_executable
+        python_path = Path(candidate).expanduser()
+        python_path = python_path.resolve() if python_path.is_absolute() else (self.project_root / python_path).resolve()
+        if not python_path.is_file():
+            raise ValidationError(f"运行环境 Python 不存在: {python_path}")
+        return str(python_path)
 
     def _resolve_existing_path(self, raw_value: Any, field_name: str) -> str:
         text = self._clean_str(raw_value)

@@ -1,0 +1,82 @@
+LOCUS       contig_396              1772 bp    DNA     linear   UNK 16-MAR-2026
+DEFINITION  Genus species strain strain.
+ACCESSION   contig_396
+VERSION     contig_396
+KEYWORDS    .
+SOURCE      Genus species
+  ORGANISM  Genus species Unclassified.
+            .
+COMMENT     Annotated using prokka 1.14.6 from
+            https://github.com/tseemann/prokka.
+FEATURES             Location/Qualifiers
+     source          1..1772
+                     /organism="Genus species"
+                     /mol_type="genomic DNA"
+                     /strain="strain"
+     gene            complement(24..734)
+                     /gene="rsmI_1"
+                     /locus_tag="LCEDHOCC_01641"
+     CDS             complement(24..734)
+                     /gene="rsmI_1"
+                     /locus_tag="LCEDHOCC_01641"
+                     /EC_number="2.1.1.198"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /inference="similar to AA sequence:UniProtKB:P67087"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="Ribosomal RNA small subunit methyltransferase I"
+                     /db_xref="COG:COG0313"
+                     /translation="MSPVLYLIPTPLGTPDTPCLLPHEQQAIVGLTDFVVEAEKTARAH
+                     LKHLGVTMPIRELNLQTLNEHTDLKTLLELLKPLQEGRSMGIVSEAGCPAVADPGANLV
+                     ALAHKHGFEVRPLVGPSSLLLALMASGANGQNFAFKGYLPSEKNERIQSLKALEQRSRQ
+                     QNETQLFIETPYRNDVLLADAVENLHSETRLCTATDLTLPTQEIISQTVVQWRKRKEMP
+                     NLKKRPTIFVMYAG"
+     gene            complement(796..1386)
+                     /gene="yceF"
+                     /locus_tag="LCEDHOCC_01642"
+     CDS             complement(796..1386)
+                     /gene="yceF"
+                     /locus_tag="LCEDHOCC_01642"
+                     /EC_number="3.6.1.-"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /inference="similar to AA sequence:UniProtKB:P58627"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="7-methyl-GTP pyrophosphatase"
+                     /db_xref="COG:COG0424"
+                     /translation="MGLELPLILGTSSVFRREQMERLGIAFQAASPDFDETPMLGESAP
+                     QTALRLAEGKARSLAGRFPEALIVGADQVAWCDGRQWGKPMNLANAQKMLMHLSGREIE
+                     FYSAVVLLNTVTGRMQRHIDKTVVVMRQLDELHILRYLEREPDAVYCSCALKSEDLGAL
+                     LIERIESTDPNALIGLPVFRLVDFLKNEGVEVL"
+ORIGIN
+        1 accccctatc ggggcggaaa tcttcaacct gcatacatca caaaaatcgt cgggcgtttt
+       61 ttcagattgg gcatttcttt tctttttcgc cactgcacaa ccgtctggct gatgatttcc
+      121 tgagtcggca acgtcaaatc cgtagccgta cacaaacgcg tttcagaatg caggttttcc
+      181 accgcatccg ccaacaacac atcgttgcga tacggcgttt cgataaacag ctgcgtttca
+      241 ttctgctggc gcgaacgttg ttccaaagcc ttcaaactct gaatccgctc gtttttttca
+      301 gacggcagat aacctttaaa cgcaaagttc tgcccattcg cacccgaagc catcagcgcc
+      361 agcaacaagc tggacggacc gaccaaaggc cgtacttcaa aaccgtgttt atgcgccaat
+      421 gccaccaaat tcgcacccgg atcggcaaca gccgggcaac ccgcctcgct gacaatgccc
+      481 atactgcgcc cttcttgcaa aggtttcagc aattccagca aagtcttcaa atccgtgtgt
+      541 tcgttcagcg tttgcaaatt cagttcgcgg ataggcattg tcacgcccaa atgtttcaaa
+      601 tgcgcgcgcg ccgttttttc cgcttccacg acaaaatccg tcagcccgac aatcgcctgt
+      661 tgttcatgcg gcaacaggca cggcgtgtca ggcgtaccca aaggcgtagg aatcaaatac
+      721 aaaacaggag acatcattcc ctcattcatc ggttaaaaat gccgtctgag cctttcagac
+      781 ggcataaacg ggcagttaca gaacctccac gccctcattt ttcaagaaat caaccagacg
+      841 gaaaaccggc aaaccgatta aagcattcgg atcggtactc tcaatccttt cgatcaacaa
+      901 tgcacccaaa tcctcactct tcaacgcaca cgaacaataa accgcatcag gctcgcgctc
+      961 caaatagcgg aggatgtgca actcgtccaa ctgcctcatc acgaccaccg tcttatcaat
+     1021 atgccgctgc atcctgcccg taaccgtatt tagcagaacg accgcgctgt aaaactcaat
+     1081 ctccctgccg ctcaaatgca tcagcatctt ttgcgcgttg gcaaggttca tcggcttgcc
+     1141 ccactgcctg ccgtcgcacc acgccacctg gtccgcaccg acaatcaacg cctcggggaa
+     1201 acgtccggcc aacgaccgcg ccttaccctc ggcaaggcgc aatgccgtct gaggggcgga
+     1261 ttcccccaac atcggcgttt cgtcaaaatc gggggatgcc gcctgaaagg caatgccgag
+     1321 cctttccatc tgttcgcggc ggaaaaccga actcgtaccc aaaatcaaag gcagttccaa
+     1381 acccatccca tcctccttac cgttgaaaac acgcccgaag gggcggtaaa atccagccat
+     1441 gcgccgaaac acggataccc gccttcggcg taccgcaaca tttttcttaa aaatattgac
+     1501 gttagaacat ctaaattata tcatacctcg tttatgtcag accctaattt gattgacccg
+     1561 gaaatttttg ccgccgaagg gcagaacctg caaggcagtt ttctgctgga agaattggat
+     1621 gaacgcgtca gttcgcacga ttatcccgcc gacaggcaga ccaaaatatc gtttacactg
+     1681 accggcggtc gcgatcggct gcaacgcctg ttcctcgacc tgaacgtcaa agccgatatg
+     1741 cccctgattt gccagagatg tatcaaaccc at
+//

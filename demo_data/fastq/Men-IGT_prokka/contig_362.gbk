@@ -1,0 +1,80 @@
+LOCUS       contig_362              1929 bp    DNA     linear   UNK 16-MAR-2026
+DEFINITION  Genus species strain strain.
+ACCESSION   contig_362
+VERSION     contig_362
+KEYWORDS    .
+SOURCE      Genus species
+  ORGANISM  Genus species Unclassified.
+            .
+COMMENT     Annotated using prokka 1.14.6 from
+            https://github.com/tseemann/prokka.
+FEATURES             Location/Qualifiers
+     source          1..1929
+                     /organism="Genus species"
+                     /mol_type="genomic DNA"
+                     /strain="strain"
+     gene            complement(756..1028)
+                     /locus_tag="LCEDHOCC_01571"
+     CDS             complement(756..1028)
+                     /locus_tag="LCEDHOCC_01571"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="hypothetical protein"
+                     /translation="MNKRMKMCPACQQGYLYHSKPKYLHDEIILCDECDAVWLKGMNIF
+                     YGEYEKDFYSYVPFMESQGITSECIWEGDLFDHPYYEDENSNGMD"
+     gene            complement(1216..1437)
+                     /locus_tag="LCEDHOCC_01572"
+     CDS             complement(1216..1437)
+                     /locus_tag="LCEDHOCC_01572"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="hypothetical protein"
+                     /translation="MAVWRDYITLESHDLAEGYTYFFNENTDDCYVLKQDFINNERYEK
+                     TELYSQKDKVILFPKFGEYDLVLNPDII"
+     gene            complement(1485..1703)
+                     /locus_tag="LCEDHOCC_01573"
+     CDS             complement(1485..1703)
+                     /locus_tag="LCEDHOCC_01573"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="hypothetical protein"
+                     /translation="MKKDIFYCEQWSYGYKRLHKPFSEKQAEEKHLKGELYTAVIGSAT
+                     QPEYVITLREEVGFFSVNFSINLEGII"
+ORIGIN
+        1 tttttttcct gaacgttcca gttttttaag cccttcgtcg aaacccattc atctaaagca
+       61 gcatgtattt cttccattag tgcggaatct gcgatgattc tcaccccaaa aatatcattt
+      121 aacaccttat tcgctggata cccggactcg cgttccgaaa accagcggat tttgtcgaaa
+      181 acggactccg tggttttaac gcggtagtag tatgccaaag gcaagtcccc gatgtcagat
+      241 cgaatcagat agtcgttgat tgactcatgc aaattaagtc ggtattgcaa cacaaaatcg
+      301 atgtccagat gccggagcgt ctttgacaaa ttgggaaggt ttccgccata cagtttggaa
+      361 accctttcgt gatatccggc gtgtatgcgg ttaatttcgt caatcagccg ttctacatta
+      421 ctgatttcat gagtggggga cattccttgt tactctttca ttccaattat atgaaaataa
+      481 catactaatt gctttcaact atatattata caaaacaaat ttcaaaactt acttttaatt
+      541 tttcattacc gttaatacgc taaaatagga ggaattgcaa atccaaaaaa catacacggt
+      601 aacagattac aggtcatcaa tgaatccaat ccatcccatg aagacaaagg agcgactact
+      661 cggcctccaa gcagcctccc gtactgaaaa cgacattgca ttaaagacag cgccgtttga
+      721 tggctaatcg tacctacgca ggcttaaagt ttccatcaat ccataccatt tgagttttca
+      781 tcttcataat atggatgatc aaacaaatct ccttcccaaa tacattcact cgttatacct
+      841 tgggattcca tgaaaggaac ataagaataa aaatcttttt catattctcc ataaaatata
+      901 ttcatacctt tgagccatac tgcatcgcat tcatcacaca gaataatttc atcatgaaga
+      961 tatttaggtt tcgaatggta gagatagcct tgttgacaag caggacacat tttcattctc
+     1021 ttattcatga ttattccata taatcaattt atttttgtgg gtaagcaata gtgatttgat
+     1081 tgctgccttt agtctgtaca acaatacgta tatagcaatc tgataatttc ctggttttta
+     1141 tcagctttat cctcagattc caaacccaat aataaaagcc gtttgaaatt tttttcagac
+     1201 ggccttaaaa cttaattaaa taatgtccgg atttaacacc aaatcatatt caccaaactt
+     1261 tggaaataga attaccttat ctttttggga atataattct gttttttcat atcgctcatt
+     1321 attaataaaa tcttgtttca aaacatagca atcatccgta ttttcattga agaaataagt
+     1381 atatccttct gctaagtcat gagattccaa agttatataa tctctccata cagccataga
+     1441 aagaaaataa taattcgaat tggaatattt ttgaaattga tgggttaaat aatcccttcc
+     1501 aaatttatcg aaaaatttac cgaaaaaaaa cctacttcct ctcgcaaggt aattacatat
+     1561 tcaggttgtg tcgccgaacc tattacggca gtatataact cccctttaag atgtttttcc
+     1621 tcagcttgtt tctcagaaaa aggcttatga agtctcttat aaccataaga ccactgctca
+     1681 caataaaaaa tatctttctt catttgtaaa tccttcctgt tgtatctcta atgataacat
+     1741 tttcttcttg tgccgccctt aatacagatt gtggaattgg attgacctga gcaggaactt
+     1801 ctaaaataag ttttccttca agctgtcttc ctcttagcag attaggtgta cttggaacat
+     1861 tggaaatgac aaagtgagac ctttgcaaaa ttccccaaaa tcccctaaat tcccaccaag
+     1921 acatttagg
+//

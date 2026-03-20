@@ -1,0 +1,49 @@
+LOCUS       contig_558              1266 bp    DNA     linear   UNK 16-MAR-2026
+DEFINITION  Genus species strain strain.
+ACCESSION   contig_558
+VERSION     contig_558
+KEYWORDS    .
+SOURCE      Genus species
+  ORGANISM  Genus species Unclassified.
+            .
+COMMENT     Annotated using prokka 1.14.6 from
+            https://github.com/tseemann/prokka.
+FEATURES             Location/Qualifiers
+     source          1..1266
+                     /organism="Genus species"
+                     /mol_type="genomic DNA"
+                     /strain="strain"
+     gene            316..564
+                     /locus_tag="LCEDHOCC_01916"
+     CDS             316..564
+                     /locus_tag="LCEDHOCC_01916"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="hypothetical protein"
+                     /translation="MGILLVIARNTNAVAPRCIIALTRKRLVSGRLMAKLHSLVDENSS
+                     ACFALIIEKAISIHFSAVSGSSVMRVILPSSFIAGGK"
+ORIGIN
+        1 gtttcgcggt cgcggatttc gccgataagg atgacatccg gcgcctgacg cagcgtgttt
+       61 ttcaacgccg ccatccagtt ttccgtatcc acgccgacct cgcgctgggt gatgatgcag
+      121 tttttgtgtt cgtggacaaa ctcgatcggg tcttcgatgg tgatgatgtg tccgaacgaa
+      181 ttttcattgc ggtaatcgat aagcgaggca agcgaagtcg atttgcccga gccggtgccg
+      241 ccgacaaaaa taaccagccc gcgttttttc agcgcgacat ccttcaagac cggcggcagg
+      301 ttcaggcttt caaacttggg aatcttgctg gtaatcgcac ggaataccaa cgccgtcgcg
+      361 ccgcgctgta tcatcgcatt gacgcggaag cggctggtgt ccggcaggct gatggcgaag
+      421 ttgcactcgt tggtcgatga aaattcttcc gcctgcttcg cactcataat cgaaaaggcg
+      481 atttccatac atttttccgc cgtcagcggt tcgtccgtga tgcgggtgat tttgccgtcc
+      541 agcttcattg cgggcgggaa atgagtcgtc acgaacaggt cggaaccttt gttttggttc
+      601 atatggcgca gccatgcgaa cagttcttcc tttgcggtca tattttcatc ggtaaacatc
+      661 ctcgtcccct aatcttcaaa caatctgtac cttcccattc taccaaaaac ccgccgtgcc
+      721 gtctgaaacc gtttcagacg gcacggacaa accacctcca ctcaatcctg ccgtgttagc
+      781 gtgtataatc aggcattcta tccgaaattc acaacaggtc agcaatatgt ctttgaaaac
+      841 agtagccgtt atcggcgcaa tggaacaaga aatcgagctt ttgcgcgaga tgatggaaaa
+      901 tgtcaaagcc gtctctttcg gcaagtttgc cgcctatgaa ggcgaattag cgggaaaacg
+      961 catggtgctt gcattgagcg gcatcggcaa ggtcaacgcg gcggttgcaa cggcttggat
+     1021 tatccgtgaa ttcgcaccgg actgcgttat caacaccggc agcgcgggcg gcttgggcaa
+     1081 gggtttgaaa gtcggcgatg tcgtggtcgg cacagaaatc gcgcaccacg atgtcgatgt
+     1141 aaccgcattc ggctatgttt ggggacaagt gccgcaactg cccgccgtat ttgtttcaga
+     1201 cggcctcttg gtcggcaaag caaaacaggc ggcggaagtg tttgaaggcg cggcggtaga
+     1261 acaagg
+//

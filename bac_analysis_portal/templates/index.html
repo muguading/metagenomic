@@ -16,15 +16,8 @@
           <p class="eyebrow">Clinical Assembly Console</p>
           <h1>细菌组装分析工作台</h1>
           <p class="hero-copy">面向实验室分析人员的提交与调度入口，优先保证参数明确、任务可追踪、批量运行可管理。</p>
-          <div class="hero-actions">
-            <button id="hero-start-button" class="primary-button" type="button">开始提交任务</button>
-            <button id="hero-queue-button" class="ghost-button" type="button">查看任务队列</button>
-          </div>
         </div>
         <div class="hero-meta-line">
-          <span>异步分析</span>
-          <span>端口 5055</span>
-          <span>日志尾部回看</span>
           <span id="current-user-chip">用户加载中</span>
           <button id="logout-button" class="ghost-button" type="button">退出登录</button>
         </div>
@@ -34,6 +27,7 @@
         <nav class="tab-bar" aria-label="主导航">
           <button class="tab-button active" type="button" data-tab-target="submission-tab">提交任务</button>
           <button class="tab-button" type="button" data-tab-target="queue-tab">任务队列</button>
+          <button class="tab-button" type="button" data-tab-target="server-tab">服务器检测</button>
           <button id="admin-tab-button" class="tab-button hidden" type="button" data-tab-target="admin-tab">后台管理</button>
         </nav>
 
@@ -45,7 +39,10 @@
               <h2>快速提交样本分析</h2>
               <p class="field-note">基础参数默认展开，高级参数按需展开，减少录入负担并降低误配风险。</p>
             </div>
-            <button id="submit-button" class="primary-button" type="submit" form="task-form">启动任务</button>
+            <div class="submission-actions">
+              <button id="demo-button" class="ghost-button" type="button">Demo任务</button>
+              <button id="submit-button" class="primary-button" type="submit" form="task-form">启动任务</button>
+            </div>
           </div>
 
           <section class="submission-band" aria-label="快速说明">
@@ -78,11 +75,16 @@
                 </label>
                 <label class="wide">
                   <span>输入路径</span>
+                  <div class="input-mode-switch" role="tablist" aria-label="输入模式切换">
+                    <button id="single-input-mode" class="input-mode-button active" type="button">单样本输入</button>
+                    <button id="batch-input-mode" class="input-mode-button" type="button">批量输入</button>
+                  </div>
                   <div class="picker-field">
                     <input id="input_path" required readonly placeholder="点击右侧按钮选择文件或目录">
                     <button id="choose-input-path" class="ghost-button" type="button">选择输入</button>
+                    <button id="open-batch-input" class="ghost-button hidden" type="button">编辑批量表</button>
                   </div>
-                  <small class="field-note">从当前项目工作区中选择输入文件或输入目录。</small>
+                  <small id="input-path-note" class="field-note">从当前项目工作区中选择输入文件或输入目录。</small>
                 </label>
                 <label class="wide">
                   <span>输出目录</span>
@@ -218,8 +220,48 @@
               </div>
               <button id="refresh-button" class="ghost-button" type="button">刷新</button>
             </div>
+            <div class="queue-toolbar">
+              <div class="queue-filter-group" role="tablist" aria-label="任务状态筛选">
+                <button id="queue-filter-all" class="queue-filter-button active" type="button" data-filter-status="ALL">全部</button>
+                <button class="queue-filter-button" type="button" data-filter-status="RUNNING">运行中</button>
+                <button class="queue-filter-button" type="button" data-filter-status="SUCCEEDED">已完成</button>
+                <button class="queue-filter-button" type="button" data-filter-status="FAILED">失败</button>
+                <button class="queue-filter-button" type="button" data-filter-status="QUEUED">排队中</button>
+              </div>
+              <div class="queue-toolbar-fields">
+                <label class="queue-toolbar-field">
+                  <span>搜索</span>
+                  <input id="queue-search" type="search" placeholder="任务名称、用户、组装软件">
+                </label>
+                <label class="queue-toolbar-field">
+                  <span>排序</span>
+                  <select id="queue-sort">
+                    <option value="created_desc">创建时间：最新优先</option>
+                    <option value="created_asc">创建时间：最早优先</option>
+                    <option value="name_asc">任务名称：A-Z</option>
+                    <option value="name_desc">任务名称：Z-A</option>
+                    <option value="status">任务状态</option>
+                  </select>
+                </label>
+              </div>
+            </div>
             <div id="queue-summary" class="queue-summary" aria-live="polite"></div>
             <div id="task-list" class="task-list"></div>
+          </section>
+        </section>
+
+        <section id="server-tab" class="tab-panel">
+          <section class="panel server-panel">
+            <div class="panel-head">
+              <div>
+                <p class="section-kicker">Server</p>
+                <h2>服务器检测</h2>
+                <p class="field-note">用于查看当前服务器硬件概况，以及 CPU、内存和存储的实时占用情况。</p>
+              </div>
+              <button id="refresh-server-button" class="ghost-button" type="button">刷新状态</button>
+            </div>
+            <div id="server-summary" class="server-summary" aria-live="polite"></div>
+            <div id="server-metrics" class="server-metrics"></div>
           </section>
         </section>
 
@@ -250,7 +292,18 @@
                     <button id="choose-pipeline-script" class="ghost-button" type="button">选择脚本</button>
                   </div>
                 </label>
-                <p class="field-note">先选择部署基准目录，再从该目录中选择脚本文件。保存时系统会自动转换成相对路径。</p>
+                <label class="wide">
+                  <span>运行环境 Python 路径</span>
+                  <div class="picker-field">
+                    <input id="admin_pipeline_python" required placeholder="例如：/opt/conda/envs/bac/bin/python">
+                    <button id="choose-pipeline-python" class="ghost-button" type="button">选择环境</button>
+                  </div>
+                </label>
+                <label>
+                  <span>最大同时运行任务数量</span>
+                  <input id="admin_max_concurrent_tasks" type="number" min="1" value="2">
+                </label>
+                <p class="field-note">先选择部署基准目录，再选择脚本文件；运行环境 Python 路径用于实际执行 Bac_assemble_260112_newformat.py。</p>
                 <button class="primary-button" type="submit">保存脚本路径</button>
               </form>
             </div>
@@ -267,6 +320,10 @@
                   <input id="new_display_name">
                 </label>
                 <label>
+                  <span>用户组</span>
+                  <input id="new_group_name" placeholder="例如：microbiology_lab">
+                </label>
+                <label>
                   <span>密码</span>
                   <input id="new_password" type="password" required>
                 </label>
@@ -274,6 +331,7 @@
                   <span>角色</span>
                   <select id="new_role">
                     <option value="user">普通用户</option>
+                    <option value="group_admin">group 管理</option>
                     <option value="admin">管理员</option>
                   </select>
                 </label>
@@ -292,22 +350,101 @@
         <div class="panel-head">
           <div>
             <p class="section-kicker">Detail</p>
-            <h2 id="task-detail-title">任务详情</h2>
-            <p class="field-note">点击任务队列中的任务后，以弹窗形式查看参数、执行命令和日志。</p>
+            <h2 id="task-detail-title">任务信息</h2>
+            <p class="field-note">这里用于查看日志和任务参数；点击任务主体会进入单独的结果窗口。</p>
           </div>
           <div class="modal-head-actions">
+            <button id="rebuild-task-button" class="ghost-button" type="button">重建任务</button>
             <div id="task-status-chip" class="status-chip">未选择</div>
             <button id="close-task-detail" class="ghost-button" type="button">关闭</button>
           </div>
+        </div>
+        <div class="task-detail-tabs" role="tablist" aria-label="任务信息切换">
+          <button id="task-view-result" class="task-view-button active" type="button">结果</button>
+          <button id="task-view-log" class="task-view-button" type="button">日志</button>
+          <button id="task-view-meta" class="task-view-button" type="button">任务详情</button>
         </div>
         <div id="task-detail" class="task-detail empty-state">请选择一个任务。</div>
       </section>
     </div>
 
+    <div id="result-viewer-modal" class="browser-modal hidden" aria-hidden="true">
+      <div id="result-viewer-backdrop" class="browser-backdrop"></div>
+      <section class="browser-panel result-viewer-panel" role="dialog" aria-modal="true" aria-labelledby="result-viewer-title">
+        <div class="result-viewer-head">
+          <div class="result-viewer-head-main">
+            <button id="result-viewer-back" class="ghost-button" type="button">返回任务列表</button>
+            <div>
+              <p class="section-kicker">Result</p>
+              <h2 id="result-viewer-title">任务结果</h2>
+              <p id="result-viewer-subtitle" class="field-note">选择任务后在这里查看结果页面。</p>
+            </div>
+          </div>
+          <div class="modal-head-actions">
+            <div id="result-viewer-status-chip" class="status-chip">未选择</div>
+            <button id="close-result-viewer" class="ghost-button" type="button">关闭</button>
+          </div>
+        </div>
+        <div id="result-viewer-body" class="result-viewer-body empty-state">请选择一个任务。</div>
+      </section>
+    </div>
+
+    <div id="batch-input-modal" class="browser-modal hidden" aria-hidden="true">
+      <div id="batch-input-backdrop" class="browser-backdrop"></div>
+      <section class="browser-panel batch-input-panel" role="dialog" aria-modal="true" aria-labelledby="batch-input-title">
+        <div class="panel-head">
+          <div>
+            <p class="section-kicker">Batch Intake</p>
+            <h2 id="batch-input-title">批量输入表</h2>
+            <p class="field-note">为每个样本填写名称、测序文件和物种信息，确认后自动生成 TSV 并回填到输入路径。</p>
+          </div>
+          <div class="modal-head-actions">
+            <button id="add-batch-row" class="ghost-button" type="button">+ 新增一行</button>
+            <button id="close-batch-input" class="ghost-button" type="button">关闭</button>
+          </div>
+        </div>
+        <div class="batch-input-table-shell">
+          <div class="batch-input-table-head">
+            <span>样本名称（输入框）</span>
+            <span>三代数据（文件选择器）</span>
+            <span>二代数据左（文件选择器）</span>
+            <span>二代数据右（文件选择器）</span>
+            <span>物种信息</span>
+            <span>操作</span>
+          </div>
+          <div id="batch-input-rows" class="batch-input-rows"></div>
+        </div>
+        <div class="browser-bottom-bar">
+          <label class="browser-selected-path-wrap">
+            <span>生成后回填</span>
+            <input id="batch-input-preview" readonly placeholder="确认后会自动生成 TSV 并写入输入路径">
+          </label>
+          <div class="browser-bottom-actions">
+            <button id="confirm-batch-input" class="primary-button" type="button">确定</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div id="rebuild-modal" class="browser-modal hidden" aria-hidden="true">
+      <div id="rebuild-backdrop" class="browser-backdrop"></div>
+      <section id="rebuild-modal-panel" class="browser-panel rebuild-modal-panel" role="dialog" aria-modal="true" aria-labelledby="rebuild-modal-title">
+        <div class="panel-head">
+          <div>
+            <p class="section-kicker">Rebuild</p>
+            <h2 id="rebuild-modal-title">重建任务</h2>
+            <p class="field-note">已根据当前任务自动回填参数，你可以继续修改后再提交。</p>
+          </div>
+          <button id="close-rebuild-modal" class="ghost-button" type="button">关闭</button>
+        </div>
+        <div id="rebuild-panel-slot" class="rebuild-panel-slot"></div>
+      </section>
+    </div>
+
     <div id="path-browser-modal" class="browser-modal hidden" aria-hidden="true">
       <div id="path-browser-backdrop" class="browser-backdrop"></div>
-      <section class="browser-panel browser-panel-saveas" role="dialog" aria-modal="true" aria-labelledby="path-browser-title">
-        <div class="panel-head browser-dialog-head">
+      <section id="path-browser-panel" class="browser-panel browser-panel-saveas" role="dialog" aria-modal="true" aria-labelledby="path-browser-title">
+        <div id="path-browser-drag-handle" class="panel-head browser-dialog-head browser-drag-handle">
           <div>
             <p class="section-kicker">File Picker</p>
             <h2 id="path-browser-title">选择路径</h2>

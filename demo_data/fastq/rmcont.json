@@ -1,0 +1,21 @@
+[
+    {
+        "version": "1.0.0",
+        "aligner": "bowtie2",
+        "index": "/data/deploy/meta_new/Database/Host_Ref/hostile/human-t2t-hla.argos-bacteria-985_rs-viral-202401_ml-phage-202401",
+        "options": [],
+        "fastq1_in_name": "Men-IGT_t.R1.fastq.gz",
+        "fastq1_in_path": "/data/deploy/meta_genome/Script/Blood/fastq_analysis/Men-IGT/Men-IGT_t.R1.fastq.gz",
+        "fastq1_out_name": "Men-IGT_t.R1.clean_1.fastq.gz",
+        "fastq1_out_path": "/data/deploy/meta_genome/Script/Blood/fastq_analysis/Men-IGT/Men-IGT_t.R1.clean_1.fastq.gz",
+        "reads_in": 22441218,
+        "reads_out": 20372942,
+        "reads_removed": 2068276,
+        "reads_removed_proportion": 0.09216,
+        "fastq2_in_name": "Men-IGT_t.R2.fastq.gz",
+        "fastq2_in_path": "/data/deploy/meta_genome/Script/Blood/fastq_analysis/Men-IGT/Men-IGT_t.R2.fastq.gz",
+        "fastq2_out_name": "Men-IGT_t.R2.clean_2.fastq.gz",
+        "fastq2_out_path": "/data/deploy/meta_genome/Script/Blood/fastq_analysis/Men-IGT/Men-IGT_t.R2.clean_2.fastq.gz"
+    }
+]
+

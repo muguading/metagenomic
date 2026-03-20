@@ -1,0 +1,8 @@
+PASS	Per base sequence quality	raw.R1.fastq
+PASS	Per sequence quality scores	raw.R1.fastq
+PASS	Per base sequence content	raw.R1.fastq
+WARN	Per sequence GC content	raw.R1.fastq
+PASS	Per base N content	raw.R1.fastq
+PASS	Sequence Length Distribution	raw.R1.fastq
+FAIL	Sequence Duplication Levels	raw.R1.fastq
+WARN	Adapter Content	raw.R1.fastq

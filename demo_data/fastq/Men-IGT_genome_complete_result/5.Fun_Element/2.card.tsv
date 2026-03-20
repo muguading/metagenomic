@@ -1,0 +1,11 @@
+耐药基因	平均深度	覆盖率	支持序列数	基因家族	耐药分类	耐药机制
+mtrD	1159.78	1.0	30049	resistance-nodulation-cell division (RND) antibiotic efflux pump	macrolide antibiotic	antibiotic efflux
+macB	1069.06	1.0	17084	ATP-binding cassette (ABC) antibiotic efflux pump	macrolide antibiotic	antibiotic efflux
+mtrC	1462.18	1.0	15316	resistance-nodulation-cell division (RND) antibiotic efflux pump	macrolide antibiotic	antibiotic efflux
+farB	1166.17	1.0	14747	major facilitator superfamily (MFS) antibiotic efflux pump	antibacterial free fatty acids	antibiotic efflux
+mtrE	1249.44	1.0	14522	resistance-nodulation-cell division (RND) antibiotic efflux pump	macrolide antibiotic	antibiotic efflux
+farA	1271.89	1.0	12917	major facilitator superfamily (MFS) antibiotic efflux pump	antibacterial free fatty acids	antibiotic efflux
+mtrA	1316.2	1.0	9974	resistance-nodulation-cell division (RND) antibiotic efflux pump	macrolide antibiotic	antibiotic efflux
+macA	891.89	1.0	8812	ATP-binding cassette (ABC) antibiotic efflux pump	macrolide antibiotic	antibiotic efflux
+tet(B)	11.4	0.98	121	major facilitator superfamily (MFS) antibiotic efflux pump	tetracycline antibiotic	antibiotic efflux
+ErmC	3.89	0.66	24	Erm 23S ribosomal RNA methyltransferase	lincosamide antibiotic;macrolide antibiotic;streptogramin A antibiotic;streptogramin B antibiotic;streptogramin antibiotic	antibiotic target alteration

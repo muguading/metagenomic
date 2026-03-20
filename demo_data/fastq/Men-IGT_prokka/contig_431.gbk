@@ -1,0 +1,74 @@
+LOCUS       contig_431              1658 bp    DNA     linear   UNK 16-MAR-2026
+DEFINITION  Genus species strain strain.
+ACCESSION   contig_431
+VERSION     contig_431
+KEYWORDS    .
+SOURCE      Genus species
+  ORGANISM  Genus species Unclassified.
+            .
+COMMENT     Annotated using prokka 1.14.6 from
+            https://github.com/tseemann/prokka.
+FEATURES             Location/Qualifiers
+     source          1..1658
+                     /organism="Genus species"
+                     /mol_type="genomic DNA"
+                     /strain="strain"
+     gene            390..824
+                     /gene="nosD_2"
+                     /locus_tag="LCEDHOCC_01706"
+     CDS             390..824
+                     /gene="nosD_2"
+                     /locus_tag="LCEDHOCC_01706"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /inference="similar to AA sequence:UniProtKB:P19843"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="putative ABC transporter binding protein NosD"
+                     /translation="MDAGIYLEETAPRALIEHNNILDNSVGVYLHGSADAMVRENKIVG
+                     DATLRVNERGNGVTVWNAPGAQVVGNDISKGRDGIFSNTSTHNTYKNNRFSDLRFAVHY
+                     MYTNDSEISGNISVGNNMGYVLMFSERLKVFDNIAVGSRD"
+     gene            831..1409
+                     /gene="nosD_3"
+                     /locus_tag="LCEDHOCC_01707"
+     CDS             831..1409
+                     /gene="nosD_3"
+                     /locus_tag="LCEDHOCC_01707"
+                     /inference="ab initio prediction:Prodigal:002006"
+                     /inference="similar to AA sequence:UniProtKB:P19843"
+                     /codon_start=1
+                     /transl_table=11
+                     /product="putative ABC transporter binding protein NosD"
+                     /translation="MLNYVNYSDIHDNIINKAGKCVFAYNANYDKLSANHFENCQIGIH
+                     FTAAIEGTSLHDNSFINNESQVKYVSTRFLDWSEGGHGNYWSDNSAFDLNGDGFGDSAY
+                     RPNGIIDQIIWRAPVLRLLMNSLAISIVKWAQAQFPAVLPGGVVDSKPLMKPYVPKIQT
+                     RYQAMKDELLKEAETRQSEWGRAENGSLN"
+ORIGIN
+        1 gtttacaaag gcgatgagca gttgggcttg gtctatatca cgaccgatgc ggtcaatacg
+       61 cgcggttatt cgagcaaacc gatcgatacg ctgatggctt tggcaaatga cggcacgata
+      121 gccggagcga aactggtcga tcatcacgaa ccgattatgc tgatcggtat cccgcatttg
+      181 cccgcgcccg ggcgggcgat acgcttaaac tggcttccgg cgtatatcaa accaaacttt
+      241 atatcgacaa accgattacg attgaagggc ctgccgaccg ttccgcaacc atcgaagggg
+      301 acaggagcgg ccgcaccata gccgtacacg cgccggacgt aacgctccgc aacctgaccg
+      361 ttacccgttc cggtatgagc ctgccagcaa tggatgccgg tatttatctc gaagaaaccg
+      421 ccccgcgcgc cctgattgaa cacaacaata ttttggataa ttcggtcggc gtatatctgc
+      481 atggttctgc cgatgcgatg gtgcgcgaga ataaaattgt cggcgacgcg actttgcgcg
+      541 tgaacgagcg cggcaacggc gttaccgttt ggaacgcacc cggcgcgcag gtcgtcggca
+      601 acgacatttc caaagggcgg gacggcattt tttccaatac cagcacgcac aacacctaca
+      661 aaaacaaccg cttcagcgat ttgcgtttcg ccgtccacta tatgtacacc aacgacagcg
+      721 aaatcagcgg caatatttcc gtgggcaaca atatgggcta tgtgctgatg ttttccgaac
+      781 ggctcaaagt attcgacaat attgccgtcg gtagtcgcga ctagggcatc atgctcaact
+      841 atgtcaacta ttccgatatt cacgacaata ttatcaacaa agcgggcaag tgcgtttttg
+      901 cctacaatgc caactacgat aaactgtccg ccaatcattt tgaaaactgc caaatcggca
+      961 tacactttac cgccgccatc gaaggcacgt ctctgcacga caattccttt atcaacaacg
+     1021 aaagccaggt caaatacgtc agcacgcgct ttctcgactg gagcgagggc ggacacggca
+     1081 actattggag cgacaacagt gcgttcgatt tgaacggcga cggcttcggc gacagcgcgt
+     1141 accggcccaa cggcatcatc gaccaaatca tctggcgcgc gcccgtattg cgcctcttga
+     1201 tgaacagtct cgcaatcagc atcgtcaaat gggcgcaggc gcagtttccc gccgttctgc
+     1261 ccggcggcgt ggtggacagc aaaccgctga tgaagcctta tgtccccaaa attcaaaccc
+     1321 gctatcaggc aatgaaggac gagttgctca aagaagccga aacacggcag tcggaatggg
+     1381 gcagggcgga aaacggttct ttgaactagt ctgcttcaga cggcatccgg attcaaatgc
+     1441 cgtctgaaaa cacaaaagga acaaccatga ccacacatca tgtcgaattg aggaatgtca
+     1501 ccaaacggtt cggggcgcaa aaagccgtca accaagtcga tttggttttg aaggcaggag
+     1561 aaagcgtcgg gcttgccgga tacaacggcg cgggcaagtc caccattatg aagctgatac
+     1621 tcgggctgat taccccgacc gaaggcgaag tgatgctt
+//

@@ -1,0 +1,8 @@
+PASS	Per base sequence quality	Men-IGT.R2.fastq.gz
+PASS	Per sequence quality scores	Men-IGT.R2.fastq.gz
+PASS	Per base sequence content	Men-IGT.R2.fastq.gz
+WARN	Per sequence GC content	Men-IGT.R2.fastq.gz
+PASS	Per base N content	Men-IGT.R2.fastq.gz
+WARN	Sequence Length Distribution	Men-IGT.R2.fastq.gz
+FAIL	Sequence Duplication Levels	Men-IGT.R2.fastq.gz
+PASS	Adapter Content	Men-IGT.R2.fastq.gz
