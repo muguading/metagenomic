@@ -178,6 +178,7 @@ powershell -ExecutionPolicy Bypass -File .\build_windows_desktop_app.ps1 -SkipIn
 - 旧主入口 `Bac_assemble_260112_newformat.py` 仍保留参数兼容，具体节点逐步下沉到 `metagenomic_refactor/`。
 - 新增分析能力时，优先在 `metagenomic_refactor/` 中补模块和测试，不要继续把逻辑堆回旧主脚本。
 - 数据库、大体积中间结果、虚拟环境、打包产物不应进入 Git；它们属于部署资产，不属于源码。
+- 仓库边界与资产归属见 `docs/repository-boundaries.md`。新增二进制、数据库、压缩包、运行输出或打包应用前，先确认它是否属于源码。
 
 ## 许可证
 

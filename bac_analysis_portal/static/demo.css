@@ -1,0 +1,96 @@
+body {
+  --demo-accent: #3d6ba5;
+}
+
+body::before {
+  content: "客户演示版";
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 9999;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(61, 107, 165, 0.92);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  box-shadow: 0 10px 28px rgba(35, 58, 95, 0.18);
+}
+
+body.demo-lite .app-nav-button[data-tab-target="host-tab"],
+body.demo-lite .app-nav-button[data-tab-target="audit-tab"],
+body.demo-lite #host-tab,
+body.demo-lite #audit-tab,
+body.demo-lite #open-local-import-modal,
+body.demo-lite #open-batch-import-modal,
+body.demo-lite #open-database-batch-edit-modal,
+body.demo-lite #open-database-dictionary-modal,
+body.demo-lite #database-report-export,
+body.demo-lite [data-database-section="database-knowledge-panel"],
+body.demo-lite #database-knowledge-panel,
+body.demo-lite .app-sidebar-note,
+body.demo-lite .submission-band,
+body.demo-lite .report-export-toolbar,
+body.demo-lite #report-scene-switcher-topbar,
+body.demo-lite #report-scene-switcher {
+  display: none !important;
+}
+
+body.demo-lite .page-shell.app-window {
+  max-width: 1640px;
+}
+
+body.demo-lite .app-titlebar-copy span {
+  color: #6c7b92;
+}
+
+body.demo-lite .titlebar-actions::before {
+  content: "演示模式";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 14px;
+  margin-right: 10px;
+  border-radius: 999px;
+  background: rgba(61, 107, 165, 0.1);
+  color: #31527d;
+  font-weight: 700;
+}
+
+body.demo-lite .report-topbar::after {
+  content: "当前为客户演示版，已隐藏复杂配置与写入操作";
+  display: block;
+  margin-left: auto;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: rgba(61, 107, 165, 0.08);
+  color: #436284;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+body.demo-lite .report-topbar {
+  gap: 14px;
+  align-items: flex-start;
+}
+
+body.demo-lite .report-topbar-actions {
+  align-items: flex-end;
+}
+
+body.demo-lite [data-task-action="rerun"],
+body.demo-lite [data-task-action="rebuild"],
+body.demo-lite [data-task-action="delete"],
+body.demo-lite [data-database-delete],
+body.demo-lite [data-database-submit-main],
+body.demo-lite .database-action-dropdown-danger,
+body.demo-lite .user-action-danger {
+  display: none !important;
+}
+
+body.demo-lite .report-status {
+  background: rgba(61, 107, 165, 0.08);
+  color: #31527d;
+}

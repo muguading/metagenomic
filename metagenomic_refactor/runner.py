@@ -407,11 +407,11 @@ def _run_list_mode(cfg: RunnerConfig, main_process) -> None:
                 if protype == "fadir":
                     faendlist = ["fa", "fasta", "fna", "fas", "fa.gz", "fasta.gz", "fna.gz", "fas.gz"]
                     fadir_anum = 0
-                    for tfile in os.listdir(cfg.inf):
+                    for tfile in os.listdir(tinf):
                         if [i for i in faendlist if tfile.endswith(i)]:
                             fadir_anum += 1
                     snum = 1
-                    for tfile in os.listdir(cfg.inf):
+                    for tfile in os.listdir(tinf):
                         endssuf = [i for i in faendlist if tfile.endswith(i)]
                         if endssuf:
                             sample = tfile.replace(f".{endssuf[0]}", "")
@@ -419,7 +419,7 @@ def _run_list_mode(cfg: RunnerConfig, main_process) -> None:
                             sample_dir = _ensure_sample_dir(root, sample)
                             os.chdir(sample_dir)
                             _set_wkdir(os.getcwd())
-                            subprocess.run(f"seqkit seq -i -w 0  {tinf} > {sample}.final.fasta", shell=True)
+                            subprocess.run(f"seqkit seq -w 0 {tinf}/{tfile} > {sample}.final.fasta", shell=True)
                             try:
                                 _run_sample(main_process, cfg, f"{sample}.final.fasta", fastq1, fastq2, sample, fadir_anum, snum, llid)
                             except Exception:
@@ -432,8 +432,11 @@ def _run_list_mode(cfg: RunnerConfig, main_process) -> None:
                     sample_dir = _ensure_sample_dir(root, pre)
                     os.chdir(sample_dir)
                     _set_wkdir(os.getcwd())
-                    subprocess.run(f"seqkit seq -i -w 0 {tinf} > {pre}.final.fasta", shell=True)
-                    _run_sample(main_process, cfg, f"{pre}.final.fasta", fastq1, fastq2, pre, anum, snum, llid)
+                    subprocess.run(f"seqkit seq -w 0 {tinf} > {pre}.final.fasta", shell=True)
+                    try:
+                        _run_sample(main_process, cfg, f"{pre}.final.fasta", fastq1, fastq2, pre, anum, snum, llid)
+                    except Exception:
+                        _print_failure(pre, snum, anum)
                     os.chdir(cfg.ofn)
                     _set_wkdir(cfg.ofn)
                     snum += 1
@@ -443,7 +446,10 @@ def _run_list_mode(cfg: RunnerConfig, main_process) -> None:
             os.chdir(sample_dir)
             _set_wkdir(os.getcwd())
             subprocess.run(f"touch {pre}.raw.fastq", shell=True)
+            #try:
             _run_sample(main_process, cfg, 0, fastq1, fastq2, pre, anum, snum, llid)
+            #except Exception:
+            #    _print_failure(pre, snum, anum)
             snum += 1
             os.chdir(cfg.ofn)
             _set_wkdir(cfg.ofn)

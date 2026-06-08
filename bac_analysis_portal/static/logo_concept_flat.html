@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Huangpu Pathogen Database Logo</title>
+    <style>
+      :root {
+        --navy: #0B3A67;
+        --navy-soft: #104572;
+        --teal: #1BA7A6;
+        --teal-soft: #35B4B3;
+        --pale: #A9D8E8;
+        --pale-soft: #CFE8F1;
+        --white: #F7FAFC;
+        --ink: #0B3A67;
+        --muted: #607080;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        min-height: 100%;
+        margin: 0;
+        background: var(--white);
+        font-family: "Source Sans 3", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+      }
+
+      .artboard {
+        overflow: hidden;
+        background: var(--white);
+      }
+
+      .artboard.icon {
+        width: 1024px;
+        height: 1024px;
+        display: grid;
+        place-items: center;
+      }
+
+      .artboard.brand {
+        width: 1200px;
+        height: 720px;
+        display: flex;
+        align-items: center;
+        gap: 52px;
+        padding: 70px 86px;
+      }
+
+      .emblem {
+        position: relative;
+        width: 780px;
+        aspect-ratio: 1;
+        border-radius: 132px;
+        overflow: hidden;
+        background:
+          linear-gradient(90deg, var(--navy) 0 55%, var(--teal) 55% 100%);
+        box-shadow: 0 18px 32px rgba(11, 58, 103, 0.11);
+      }
+
+      .emblem::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: var(--navy-soft);
+        clip-path: polygon(36% 0, 58% 0, 58% 100%, 30% 100%, 45% 64%, 52% 34%);
+        opacity: 0.72;
+        z-index: 1;
+      }
+
+      .brand .emblem {
+        width: 548px;
+        border-radius: 94px;
+        box-shadow: 0 18px 32px rgba(11, 58, 103, 0.11);
+      }
+
+      .river {
+        position: absolute;
+        left: 35%;
+        top: -6%;
+        width: 330px;
+        height: 900px;
+        background: var(--white);
+        clip-path: path("M126 0 C34 64 42 126 132 178 C238 238 244 318 134 386 C42 442 48 510 148 572 C252 638 244 724 126 812 L232 812 C342 724 354 620 232 548 C146 498 146 458 236 400 C354 324 348 212 230 144 C154 100 166 62 294 0 Z");
+        filter: drop-shadow(0 3px 6px rgba(11, 58, 103, 0.12));
+        z-index: 8;
+      }
+
+      .read-lane {
+        position: absolute;
+        left: 8.5%;
+        top: 25%;
+        width: 35%;
+        height: 37%;
+        z-index: 5;
+      }
+
+      .read {
+        position: absolute;
+        height: 12px;
+        border-radius: 999px;
+        background: var(--white);
+        box-shadow: inset 0 -1px 0 rgba(11, 58, 103, 0.14);
+      }
+
+      .read.teal {
+        background: var(--teal-soft);
+      }
+
+      .read.cyan {
+        background: var(--pale);
+      }
+
+      .r1 { left: 0; top: 0; width: 24%; }
+      .r2 { left: 30%; top: 0; width: 30%; }
+      .r3 { left: 66%; top: 0; width: 25%; }
+      .r4 { left: 8%; top: 12%; width: 25%; }
+      .r5 { left: 38%; top: 12%; width: 30%; }
+      .r6 { left: 70%; top: 12%; width: 22%; }
+      .r7 { left: 0; top: 27%; width: 27%; }
+      .r8 { left: 34%; top: 27%; width: 29%; }
+      .r9 { left: 68%; top: 27%; width: 22%; }
+      .r10 { left: 0; top: 42%; width: 45%; }
+      .r11 { left: 50%; top: 42%; width: 29%; }
+      .r12 { left: 24%; top: 60%; width: 32%; }
+      .r13 { left: 61%; top: 60%; width: 26%; }
+
+      .bases {
+        position: absolute;
+        left: 9%;
+        bottom: 34%;
+        display: flex;
+        gap: 36px;
+        color: var(--pale);
+        font-size: 28px;
+        font-weight: 850;
+        letter-spacing: 0;
+        z-index: 5;
+      }
+
+      .bars {
+        position: absolute;
+        left: 8.5%;
+        bottom: 22%;
+        width: 32%;
+        height: 76px;
+        display: flex;
+        align-items: end;
+        gap: 8px;
+        z-index: 5;
+      }
+
+      .bar {
+        width: 12px;
+        border-radius: 6px 6px 0 0;
+        background: var(--pale);
+      }
+
+      .bar.teal {
+        background: var(--teal-soft);
+      }
+
+      .skyline {
+        position: absolute;
+        left: 47%;
+        right: 10%;
+        bottom: 15%;
+        height: 118px;
+        z-index: 4;
+        opacity: 0.5;
+      }
+
+      .tower {
+        position: absolute;
+        bottom: 0;
+        background: var(--pale);
+      }
+
+      .t1 {
+        left: 25%;
+        width: 20px;
+        height: 112px;
+        border-radius: 999px 999px 0 0;
+        background: var(--pale);
+      }
+
+      .t1::before,
+      .t1::after {
+        content: "";
+        position: absolute;
+        left: 50%;
+        border-radius: 50%;
+        transform: translateX(-50%);
+        background: var(--pale);
+      }
+
+      .t1::before {
+        top: 22px;
+        width: 54px;
+        height: 54px;
+      }
+
+      .t1::after {
+        top: 82px;
+        width: 38px;
+        height: 38px;
+      }
+
+      .t2 {
+        left: 44%;
+        width: 52px;
+        height: 96px;
+        clip-path: polygon(50% 0, 82% 18%, 82% 100%, 18% 100%, 18% 18%);
+      }
+
+      .t3 {
+        left: 58%;
+        width: 38px;
+        height: 130px;
+        clip-path: polygon(46% 0, 58% 0, 72% 100%, 30% 100%);
+      }
+
+      .t4 {
+        left: 72%;
+        width: 66px;
+        height: 86px;
+        clip-path: polygon(50% 0, 76% 16%, 76% 100%, 24% 100%, 24% 16%);
+      }
+
+      .t5 {
+        left: 88%;
+        width: 32px;
+        height: 58px;
+      }
+
+      .wave {
+        position: absolute;
+        left: -7%;
+        right: -7%;
+        bottom: 2%;
+        height: 112px;
+        z-index: 7;
+      }
+
+      .wave::before,
+      .wave::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: 50% 50% 0 0;
+      }
+
+      .wave::before {
+        background: var(--teal);
+        clip-path: path("M0 70 C150 10 260 36 380 82 C520 136 610 76 742 46 C874 16 954 54 1100 18 L1100 150 L0 150 Z");
+      }
+
+      .wave::after {
+        top: 16px;
+        background: var(--white);
+        clip-path: path("M0 62 C166 4 264 32 390 78 C518 125 624 74 744 48 C874 20 960 54 1100 22 L1100 38 C960 70 874 38 744 66 C624 92 518 143 390 96 C264 50 166 22 0 80 Z");
+        opacity: 0.96;
+      }
+
+      .brand-lockup {
+        min-width: 0;
+      }
+
+      .brand .kicker {
+        margin: 0 0 24px;
+        color: #7B8996;
+        font-size: 24px;
+        font-weight: 760;
+        letter-spacing: 6px;
+      }
+
+      .brand .cn {
+        margin: 0;
+        color: var(--ink);
+        font-size: 39px;
+        font-weight: 900;
+        line-height: 1.22;
+        letter-spacing: 0;
+        max-width: 500px;
+      }
+
+      .brand .en {
+        margin: 24px 0 0;
+        color: var(--muted);
+        font-size: 22px;
+        font-weight: 650;
+        letter-spacing: 3.5px;
+        line-height: 1.35;
+      }
+
+      .icon .brand-lockup {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="artboard" class="artboard brand">
+      <section class="emblem" aria-hidden="true">
+        <div class="read-lane">
+          <span class="read r1"></span>
+          <span class="read r2"></span>
+          <span class="read r3"></span>
+          <span class="read r4"></span>
+          <span class="read cyan r5"></span>
+          <span class="read r6"></span>
+          <span class="read cyan r7"></span>
+          <span class="read r8"></span>
+          <span class="read teal r9"></span>
+          <span class="read teal r10"></span>
+          <span class="read cyan r11"></span>
+          <span class="read r12"></span>
+          <span class="read teal r13"></span>
+        </div>
+        <div class="bases"><span>A</span><span>C</span><span>G</span><span>T</span></div>
+        <div class="bars">
+          <span class="bar" style="height: 18px"></span>
+          <span class="bar" style="height: 42px"></span>
+          <span class="bar" style="height: 58px"></span>
+          <span class="bar teal" style="height: 70px"></span>
+          <span class="bar" style="height: 36px"></span>
+          <span class="bar teal" style="height: 48px"></span>
+          <span class="bar" style="height: 40px"></span>
+          <span class="bar" style="height: 24px"></span>
+          <span class="bar" style="height: 32px"></span>
+          <span class="bar" style="height: 28px"></span>
+          <span class="bar" style="height: 52px"></span>
+          <span class="bar teal" style="height: 60px"></span>
+          <span class="bar teal" style="height: 42px"></span>
+        </div>
+        <div class="skyline">
+          <span class="tower t1"></span>
+          <span class="tower t2"></span>
+          <span class="tower t3"></span>
+          <span class="tower t4"></span>
+          <span class="tower t5"></span>
+        </div>
+        <div class="river"></div>
+        <div class="wave"></div>
+      </section>
+      <section class="brand-lockup">
+        <p class="kicker">HUANGPU CDC</p>
+        <h1 class="cn">黄浦区公共卫生病原基因数据库和生物信息学分析系统</h1>
+        <p class="en">PATHOGEN GENOMIC DATABASE · BIOINFORMATICS · TRACEBACK</p>
+      </section>
+    </main>
+    <script>
+      const mode = new URLSearchParams(window.location.search).get("mode");
+      if (mode === "icon") {
+        const artboard = document.getElementById("artboard");
+        artboard.classList.remove("brand");
+        artboard.classList.add("icon");
+      }
+    </script>
+  </body>
+</html>

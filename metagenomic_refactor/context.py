@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from metagenomic_refactor.config import ResourcePaths
+
 
 @dataclass
 class RuntimeContext:
@@ -15,11 +17,16 @@ class RuntimeContext:
     krdb: str = ""
     wkdir: str = ""
     long_type: str = ""
+    analysis_target: str = "bacteria"
     species: str = ""
     genome_len: str = ""
     ref: str = ""
     gtf: str = ""
+    base_species: str = ""
+    base_ref: str = ""
+    base_gtf: str = ""
     vfmeta: Any = None
+    resources: ResourcePaths | None = None
 
 
 runtime: RuntimeContext | None = None

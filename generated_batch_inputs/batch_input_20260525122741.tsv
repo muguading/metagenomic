@@ -1,0 +1,5 @@
+样本名称	三代数据	二代数据左	二代数据右	物种信息
+10239		/Users/wuhhh/Desktop/徐老师/代码/metagenomic/demo_data/chikv_demo/fastq_analysis/chikv_demo/10239.1.fastq	/Users/wuhhh/Desktop/徐老师/代码/metagenomic/demo_data/chikv_demo/fastq_analysis/chikv_demo/10239.2.fastq	False
+ERR3131354		/Users/wuhhh/Desktop/徐老师/代码/metagenomic/demo_data/chikv_demo/ERR3131354_1.fastq.gz		False
+ERR3131363		/Users/wuhhh/Desktop/徐老师/代码/metagenomic/demo_data/chikv_demo/ERR3131363_1.fastq.gz	/Users/wuhhh/Desktop/徐老师/代码/metagenomic/demo_data/chikv_demo/ERR3131363_2.fastq.gz	False
+chikv_demo.raw	/Users/wuhhh/Desktop/徐老师/代码/metagenomic/demo_data/chikv_demo/fastq_analysis/chikv_demo/chikv_demo.raw.fastq			False

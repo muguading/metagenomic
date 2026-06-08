@@ -7,6 +7,7 @@ import subprocess
 import pandas as pd
 
 from metagenomic_refactor.assembly import outfun, run_genovi_summary, write_gene_summaries
+from metagenomic_refactor.common import conda_base_bin, conda_run_command
 from metagenomic_refactor.context import get_runtime_context
 
 
@@ -46,8 +47,8 @@ def DrugFinder(Pre, threads):
     open("SV_ok", "w").write("")
 
 
-def getvfID(tmpdb):
-    matches = re.findall(r"VF\d+", tmpdb["产物"])
+def getvfID(value):
+    matches = re.findall(r"VF\d+", str(value))
     if len(matches) > 0:
         if len(matches) > 1:
             newID = "|".join([i for i in matches])
@@ -60,12 +61,12 @@ def getvfID(tmpdb):
 
 def hAMRCom(Pre):
     subprocess.run(f"abricate --db card {Pre}.final.fasta > {Pre}.abricate.tsv", shell=True)
-    subprocess.run(f"/home/dell/miniconda3/bin/conda run -n hamronization hamronize abricate {Pre}.abricate.tsv --format tsv --analysis_software_version 1.0.1 --reference_database_version 20250207 > {Pre}.hamr.abricate.tsv", shell=True)
-    subprocess.run(f"/home/dell/miniconda3/bin/conda run -n RGI rgi main -i {Pre}.final.fasta -o {Pre}.rgi --clean --include_loose", shell=True)
-    subprocess.run(f"/home/dell/miniconda3/bin/conda run -n hamronization hamronize rgi {Pre}.rgi.txt  --format tsv --analysis_software_version 6.0.3 --reference_database_version 20250207 --input_file_name {Pre}.final > {Pre}.hamr.rgi.tsv", shell=True)
-    subprocess.run(f"/home/dell/miniconda3/bin/conda run -n hamronization run_resfinder.py -ifa {Pre}.final.fasta -o {Pre}_resfinder -acq", shell=True)
-    subprocess.run(f"/home/dell/miniconda3/bin/conda run -n hamronization hamronize resfinder {Pre}_resfinder/ResFinder_results_tab.txt  --format tsv --analysis_software_version 4.6.0 --reference_database_version 20250207 --input_file_name {Pre}.final > {Pre}.hamr.resfinder.tsv", shell=True)
-    subprocess.run(f"/home/dell/miniconda3/bin/conda run -n hamronization amrfinder -n {Pre}.final.fasta -o {Pre}.amrfinder.tsv -t 10", shell=True)
+    subprocess.run(f"{conda_run_command('amr_aux', f'hamronize abricate {Pre}.abricate.tsv --format tsv --analysis_software_version 1.0.1 --reference_database_version 20250207')} > {Pre}.hamr.abricate.tsv", shell=True)
+    subprocess.run(conda_run_command("amr_aux", f"rgi main -i {Pre}.final.fasta -o {Pre}.rgi --clean --include_loose"), shell=True)
+    subprocess.run(f"{conda_run_command('amr_aux', f'hamronize rgi {Pre}.rgi.txt  --format tsv --analysis_software_version 6.0.3 --reference_database_version 20250207 --input_file_name {Pre}.final')} > {Pre}.hamr.rgi.tsv", shell=True)
+    subprocess.run(conda_run_command("amr_aux", f"run_resfinder.py -ifa {Pre}.final.fasta -o {Pre}_resfinder -acq"), shell=True)
+    subprocess.run(f"{conda_run_command('amr_aux', f'hamronize resfinder {Pre}_resfinder/ResFinder_results_tab.txt  --format tsv --analysis_software_version 4.6.0 --reference_database_version 20250207 --input_file_name {Pre}.final')} > {Pre}.hamr.resfinder.tsv", shell=True)
+    subprocess.run(conda_run_command("amr_aux", f"amrfinder -n {Pre}.final.fasta -o {Pre}.amrfinder.tsv -t 10"), shell=True)
     subprocess.run(f"hamronize summarize *.hamr*.tsv -t interactive -o {Pre}.hamr.html", shell=True)
 
 
@@ -94,7 +95,7 @@ def assem_vfdr(Pre, inty="fastq"):
     asvfdb = asvfdb[["SEQUENCE", "Name", "taxid", "GENE", "%COVERAGE", "%IDENTITY", "PRODUCT", "START", "END", "STRAND"]]
     asvfdb.rename(columns={"SEQUENCE": "Contig名称", "START": "起始碱基", "END": "终止碱基", "STRAND": "正负链", "GENE": "基因名称", "%COVERAGE": "覆盖度%", "%IDENTITY": "一致性%", "PRODUCT": "产物"}, inplace=True)
     if asvfdb.shape[0] > 0:
-        asvfdb["VFID"] = asvfdb.apply(lambda x: getvfID(x), axis=1)
+        asvfdb["VFID"] = asvfdb["产物"].fillna("").astype(str).apply(getvfID)
     else:
         asvfdb["VFID"] = "-"
     asvfdb = asvfdb.merge(runtime_vfmeta, on="VFID", how="left")
@@ -102,8 +103,22 @@ def assem_vfdr(Pre, inty="fastq"):
     asvfdb = asvfdb[["Contig名称", "物种名称", "taxid", "基因名称", "覆盖度%", "一致性%", "产物", "VF分类", "VF名称", "起始碱基", "终止碱基", "正负链"]]
     asdrdb = asdrdb[["SEQUENCE", "Name", "taxid", "GENE", "%COVERAGE", "%IDENTITY", "PRODUCT", "RESISTANCE", "START", "END", "STRAND"]]
     asdrdb.rename(columns={"SEQUENCE": "Contig名称", "START": "起始碱基", "END": "终止碱基", "STRAND": "正负链", "GENE": "基因名称", "%COVERAGE": "覆盖度%", "%IDENTITY": "一致性%", "PRODUCT": "产物", "RESISTANCE": "耐药药物", "Name": "物种名称"}, inplace=True)
-    asvfdb["基因名称"] = asvfdb["基因名称"].str.replace("'", "").str.replace("/", "_").str.replace(" ", "").replace("(", "_").replace(")", "_")
-    asdrdb["基因名称"] = asdrdb["基因名称"].str.replace("'", "").str.replace("/", "_").str.replace(" ", "").replace("(", "_").replace(")", "_")
+    asvfdb["基因名称"] = (
+        asvfdb["基因名称"].astype(str)
+        .str.replace("'", "", regex=False)
+        .str.replace("/", "_", regex=False)
+        .str.replace(" ", "", regex=False)
+        .str.replace("(", "_", regex=False)
+        .str.replace(")", "_", regex=False)
+    )
+    asdrdb["基因名称"] = (
+        asdrdb["基因名称"].astype(str)
+        .str.replace("'", "", regex=False)
+        .str.replace("/", "_", regex=False)
+        .str.replace(" ", "", regex=False)
+        .str.replace("(", "_", regex=False)
+        .str.replace(")", "_", regex=False)
+    )
     asvfdb.to_csv("Assem_abricate_VFDB.tsv", sep="\t", index=False)
     asdrdb.to_csv("Assem_abricate_CARD.tsv", sep="\t", index=False)
     if not os.path.isdir("geneDepth"):
@@ -149,7 +164,7 @@ def VFDR(Pre, threads, intype="fastq"):
         vfdb = pd.read_table(f"{Pre}.vfdb.tsv")
         vfdb = vfdb[["SEQUENCE", "START", "END", "STRAND", "GENE", "%COVERAGE", "%IDENTITY", "PRODUCT"]]
         vfdb.rename(columns={"SEQUENCE": "Contig名称", "START": "起始碱基", "END": "终止碱基", "STRAND": "正负链", "GENE": "基因名称", "%COVERAGE": "覆盖度%", "%IDENTITY": "一致性%", "PRODUCT": "产物"}, inplace=True)
-        vfdb["VFID"] = vfdb.apply(lambda x: getvfID(x), axis=1)
+        vfdb["VFID"] = vfdb["产物"].fillna("").astype(str).apply(getvfID)
         vfdb = vfdb.merge(runtime_vfmeta, on="VFID", how="left")
         vfdb.rename(columns={"VF_Name": "VF名称", "VF_FullName": "VF全称", "Bacteria": "物种来源", "VFcategory": "VF分类", "Characteristics": "特征", "Structure": "结构", "Function": "功能", "Mechanism": "机制", "Reference": "文献来源"}, inplace=True)
         vfdb.to_csv(f"{Pre}.vfdb.tsv", sep="\t", index=False)
@@ -175,10 +190,10 @@ def VFDR(Pre, threads, intype="fastq"):
         assem_vfdr(Pre, intype)
         tmpbind = "/".join(os.getcwd().split("/")[:2])
         if runtime_method != "meta":
-            subprocess.run(f"""/home/dell/miniconda3/bin/singularity exec --bind {tmpbind}:{tmpbind} /home/dell/biosoft/mummer2circos.simg mummer2circos -q {os.getcwd()}/{Pre}.final.fasta -r {os.getcwd()}/{Pre}.final.fasta -gb {os.getcwd()}/{Pre}_prokka/{Pre}.gbk -l  -o '{Pre}_raw' """, shell=True, stdout=f1, stderr=f1)
+            subprocess.run(f"""{conda_base_bin("singularity")} exec --bind {tmpbind}:{tmpbind} /home/dell/biosoft/mummer2circos.simg mummer2circos -q {os.getcwd()}/{Pre}.final.fasta -r {os.getcwd()}/{Pre}.final.fasta -gb {os.getcwd()}/{Pre}_prokka/{Pre}.gbk -l  -o '{Pre}_raw' """, shell=True, stdout=f1, stderr=f1)
             for feature in ["card", "vfdb", "rgi"]:
                 if os.path.isfile(f"{feature}.bed"):
-                    subprocess.run(f"""/home/dell/miniconda3/bin/singularity exec --bind {tmpbind}:{tmpbind} /home/dell/biosoft/mummer2circos.simg mummer2circos -q {os.getcwd()}/{Pre}.final.fasta -r {os.getcwd()}/{Pre}.final.fasta -gb {os.getcwd()}/{Pre}_prokka/{Pre}.gbk -l -lf {feature}.bed -o '{Pre}_{feature}' """, shell=True, stdout=f1, stderr=f1)
+                    subprocess.run(f"""{conda_base_bin("singularity")} exec --bind {tmpbind}:{tmpbind} /home/dell/biosoft/mummer2circos.simg mummer2circos -q {os.getcwd()}/{Pre}.final.fasta -r {os.getcwd()}/{Pre}.final.fasta -gb {os.getcwd()}/{Pre}_prokka/{Pre}.gbk -l -lf {feature}.bed -o '{Pre}_{feature}' """, shell=True, stdout=f1, stderr=f1)
 
 
 def AnnoEle(Pre, threads):
@@ -188,32 +203,6 @@ def AnnoEle(Pre, threads):
         CRIdb = pd.read_table(f"{Pre}_CRISPRs.tsv", header=None, names=["序列ID", "软件版本", "片段类型", "开始位置", "终止位置", "得分", "a", "b", "结果注释"])
         CRIdb = CRIdb[["序列ID", "软件版本", "片段类型", "开始位置", "终止位置", "得分", "结果注释"]]
         CRIdb.to_csv(f"{Pre}.CRISPR.tsv", sep="\t", index=False)
-        ignum = int(os.popen(f"""cat {Pre}_prokka/{Pre}.gff|grep '##' |wc -l """).read().strip()) - 1
-        afile = pd.read_table(f"{Pre}_prokka/{Pre}.gff", skiprows=ignum, low_memory=False, header=None)
-        afile = afile.loc[~afile[3].isna()]
-        repeatfile = afile[[0, 1, 2, 3, 4, 8]]
-        repeatfile.rename(columns={0: "Contig名称", 1: "数据库", 2: "类型", 3: "序列开始", 4: "序列结尾", 8: "结果注释"}, inplace=True)
-        repeatfile.to_csv(f"{Pre}.repeat.tsv", sep="\t", index=False)
-    with open("physpy.log", "a") as phyf:
-        subprocess.run(f"PhiSpy.py {Pre}_prokka/{Pre}.gbk -o {Pre}_PhySpy --threads {threads}", shell=True, stdout=phyf, stderr=phyf)
-    if int(os.popen(f"cat {Pre}_PhySpy/prophage_coordinates.tsv|wc -l").read().strip()) >= 1:
-        bfile = pd.read_table(f"{Pre}_PhySpy/prophage_coordinates.tsv", header=None)
-        bfile.rename(columns={0: "噬菌体名称", 1: "Contig名称", 2: "Contig起始位置", 3: "Contig终止位置", 4: "attL起始位置", 5: "attL终止位置", 6: "attR起始位置", 7: "attR终止位置", 8: "attL序列", 9: "attR序列", 10: "原因"}, inplace=True)
-        bfile.to_csv(f"{Pre}.phi.tsv", index=False, sep="\t")
-    with open("AnnoElog", "a") as f1:
-        subprocess.run(f"/data/deploy/meta_genome/soft/islandpath/Dimob.pl {Pre}_prokka/{Pre}.gbk {Pre}", shell=True, stdout=f1, stderr=f1)
-        isdb = pd.read_table(f"{Pre}_annot.tsv")
-        isdb.rename(columns={"##GI_id": "GI号", "sequence": "序列ID", "start": "起始位置", "end": " 终止位置", "strand": "正负链", "orf_name": "开放阅读框", "annotation": "结果注释"}, inplace=True)
-        isdb.to_csv(f"{Pre}.annot.tsv", sep="\t", index=False)
-    try:
-        with open("AnnoElog", "a") as f1:
-            subprocess.run(f"mefinder find --contig {Pre}.final.fasta  {Pre} -t {threads}", shell=True, stdout=f1, stderr=f1)
-            medb = pd.read_table(f"{Pre}.csv", sep=",", skiprows=5)
-            medb = medb[["contig", "start", "end", "name", "type", "allele_len", "e_value", "identity", "coverage"]]
-            medb.rename(columns={"name": "元件名称", "type": "元件类型", "allele_len": "元件长度", "identity": "一致性", "coverage": "覆盖度", "contig": "序列名称", "start": "起始位置", "end": "终止位置"}, inplace=True)
-            medb.to_csv(f"{Pre}.medb.tsv", sep="\t", index=False)
-    except Exception:
-        print("不是完整基因组，移动元件鉴定失败")
     with open("mobileOG.log", "w") as mbf:
         mgemt = pd.read_table("/data/deploy/meta_genome/database/beatrix/mobileOG-db-beatrix-1.6-All.csv", sep=",", low_memory=False)
         subprocess.run(f"diamond blastp -q {Pre}.faa --db /data/deploy/meta_genome/database/beatrix/mobileOG-db  --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore --out {Pre}.mgeblast.tsv", shell=True, stdout=mbf, stderr=mbf)
@@ -225,5 +214,3 @@ def AnnoEle(Pre, threads):
         mgedb = mgedb[["序列名称", "参考基因组名称", "类型", "Manual Annotation", "Name", "相似性(%)", "长度", "差异数量", "空缺数量", "序列起始", "序列终止", "参考起始", "参考终止", "evalue", "比对得分"]]
         mgedb.rename(columns={"Manual Annotation": "注释", "Name": "元件名称"}, inplace=True)
         mgedb.to_csv(f"{Pre}.medb.tsv", sep="\t", index=False)
-    with open("enrichplot.log", "w") as enf:
-        subprocess.run(f"/home/dell/miniconda3/bin/conda run -n report_env Rscript /data/deploy/meta_genome/GO.R {os.getcwd()}", shell=True, stdout=enf, stderr=enf)

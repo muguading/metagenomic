@@ -1,0 +1,138 @@
+{
+  "report_kind": "community_meta_ecology",
+  "generated_at": "2026-04-08 01:32:59 UTC",
+  "input_summary": {
+    "path_type": "directory",
+    "entry_count": 8,
+    "entries": [
+      "S01_abundance.tsv",
+      "S02_abundance.tsv",
+      "S03_abundance.tsv",
+      "S04_abundance.tsv",
+      "S05_abundance.tsv",
+      "S06_abundance.tsv",
+      "S07_abundance.tsv",
+      "S08_abundance.tsv"
+    ],
+    "suffix": ""
+  },
+  "metadata_summary": {
+    "sample_count": 8,
+    "sample_id_column": "SampleID",
+    "group_column": "Group",
+    "metadata_columns": [
+      "SampleID",
+      "Group",
+      "Cohort",
+      "Timepoint",
+      "SampleType",
+      "HostStatus",
+      "LibraryBatch"
+    ]
+  },
+  "parameters": {
+    "thread": 8,
+    "taxonomy_level": "genus",
+    "normalization": "relative",
+    "alpha_metrics": [
+      "shannon",
+      "simpson",
+      "chao1"
+    ],
+    "beta_metric": "braycurtis",
+    "ml_model": "random_forest"
+  },
+  "modules": [
+    {
+      "key": "alpha",
+      "label": "Alpha 多样性",
+      "status": "planned",
+      "description": "基于 shannon,simpson,chao1 计算组内多样性指标，并输出箱线图与显著性检验汇总。",
+      "runtime": "qiime2"
+    },
+    {
+      "key": "beta",
+      "label": "Beta 多样性",
+      "status": "planned",
+      "description": "基于 braycurtis 距离做 PCoA / NMDS 与组间差异检验。",
+      "runtime": "qiime2"
+    },
+    {
+      "key": "lefse",
+      "label": "LEfSe 差异特征",
+      "status": "planned",
+      "description": "基于分组信息筛选差异特征，并输出 LDA 柱图与进化枝图所需结果。",
+      "runtime": "microeco"
+    },
+    {
+      "key": "ml",
+      "label": "机器学习建模",
+      "status": "planned",
+      "description": "使用 random_forest 进行组别预测与特征重要性排序。",
+      "runtime": "qiime2"
+    }
+  ],
+  "commands": [
+    {
+      "module": "Alpha 多样性",
+      "runtime": "qiime2",
+      "command": "conda run -n qiime2 --no-capture-output qiime diversity alpha --p-metric shannon ..."
+    },
+    {
+      "module": "Beta 多样性",
+      "runtime": "qiime2",
+      "command": "conda run -n qiime2 --no-capture-output qiime diversity beta-group-significance --p-method braycurtis ..."
+    },
+    {
+      "module": "LEfSe 差异特征",
+      "runtime": "microeco",
+      "command": "conda run -n microeco --no-capture-output Rscript -e \"library(microeco); ...\""
+    },
+    {
+      "module": "机器学习建模",
+      "runtime": "qiime2",
+      "command": "conda run -n qiime2 --no-capture-output qiime sample-classifier classify-samples --p-estimator random_forest ..."
+    }
+  ],
+  "outputs": [
+    {
+      "label": "分析总览",
+      "status": "ready",
+      "path": "/Users/wuhhh/Desktop/徐老师/代码/metagenomic/示例数据/群落分析示例/expected_output/community_summary.json"
+    },
+    {
+      "label": "命令规划表",
+      "status": "ready",
+      "path": "/Users/wuhhh/Desktop/徐老师/代码/metagenomic/示例数据/群落分析示例/expected_output/community_command_plan.tsv"
+    },
+    {
+      "label": "元数据预览",
+      "status": "ready",
+      "path": "/Users/wuhhh/Desktop/徐老师/代码/metagenomic/示例数据/群落分析示例/expected_output/community_metadata_preview.tsv"
+    },
+    {
+      "label": "Alpha 多样性",
+      "status": "planned",
+      "path": "/Users/wuhhh/Desktop/徐老师/代码/metagenomic/示例数据/群落分析示例/expected_output/alpha_results"
+    },
+    {
+      "label": "Beta 多样性",
+      "status": "planned",
+      "path": "/Users/wuhhh/Desktop/徐老师/代码/metagenomic/示例数据/群落分析示例/expected_output/beta_results"
+    },
+    {
+      "label": "LEfSe 差异特征",
+      "status": "planned",
+      "path": "/Users/wuhhh/Desktop/徐老师/代码/metagenomic/示例数据/群落分析示例/expected_output/lefse_results"
+    },
+    {
+      "label": "机器学习建模",
+      "status": "planned",
+      "path": "/Users/wuhhh/Desktop/徐老师/代码/metagenomic/示例数据/群落分析示例/expected_output/ml_results"
+    }
+  ],
+  "notes": [
+    "当前版本已完成多样本群落分析模块的任务入口、参数组织与结果骨架。",
+    "实际 QIIME2 / microeco 运行命令已生成到命令规划表，可按部署环境进一步接通执行。"
+  ]
+}

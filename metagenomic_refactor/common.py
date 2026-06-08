@@ -1,18 +1,153 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
+import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import IO, Sequence
 
 import glob
-from Bio import SeqIO
+
+
+@dataclass
+class CommandResult:
+    command: str
+    returncode: int
+    elapsed_seconds: float
+
+
+class CommandExecutionError(RuntimeError):
+    def __init__(self, command: str, returncode: int):
+        super().__init__(f"命令执行失败(returncode={returncode}): {command}")
+        self.command = command
+        self.returncode = returncode
+
+
+CONDA_ENV_ALIASES = {
+    "VFind": "genomad_aux",
+    "geNomad": "genomad_aux",
+    "genomad": "genomad_aux",
+    "TB_ONT": "meta_main",
+    "hamronization": "amr_aux",
+    "RGI": "amr_aux",
+    "RGI_new": "amr_aux",
+    "hostile": "host_filter",
+    "kneaddata": "host_filter",
+    "BASALT": "mag_aux",
+    "mag_binning": "mag_aux",
+    "coverm": "mag_aux",
+    "gtdbtk": "mag_aux",
+    "GTDBtk": "mag_aux",
+    "TB": "ncov",
+    "PathoSource": "ncov",
+    "medaka": "longread_aux",
+    "clair3": "longread_aux",
+}
+
+
+def resolve_conda_env_name(env_name: str) -> str:
+    return CONDA_ENV_ALIASES.get(str(env_name), str(env_name))
+
+
+def get_conda_root() -> str:
+    raw_root = str(os.environ.get("META_CONDA_ROOT") or "").strip()
+    if raw_root:
+        return str(Path(raw_root).expanduser())
+
+    raw_exe = str(os.environ.get("META_CONDA_EXE") or os.environ.get("CONDA_EXE") or "").strip()
+    if raw_exe and raw_exe != "conda":
+        exe_path = Path(raw_exe).expanduser()
+        if exe_path.parent.name in {"bin", "condabin", "Scripts"}:
+            return str(exe_path.parent.parent)
+
+    which_conda = shutil.which("conda")
+    if which_conda:
+        exe_path = Path(which_conda)
+        if exe_path.parent.name in {"bin", "condabin", "Scripts"}:
+            return str(exe_path.parent.parent)
+
+    raw_prefix = str(os.environ.get("CONDA_PREFIX") or "").strip()
+    if raw_prefix:
+        prefix_path = Path(raw_prefix).expanduser()
+        if prefix_path.parent.name == "envs":
+            return str(prefix_path.parent.parent)
+        return str(prefix_path)
+
+    return ""
+
+
+def get_conda_exe() -> str:
+    raw_exe = str(os.environ.get("META_CONDA_EXE") or "").strip()
+    if raw_exe:
+        return str(Path(raw_exe).expanduser()) if raw_exe != "conda" else "conda"
+
+    root = get_conda_root()
+    if root:
+        root_path = Path(root).expanduser()
+        candidates = (
+            root_path / "bin" / "conda",
+            root_path / "condabin" / "conda",
+            root_path / "Scripts" / "conda.exe",
+            root_path / "conda.exe",
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        return str(candidates[0])
+
+    raw_conda_exe = str(os.environ.get("CONDA_EXE") or "").strip()
+    return str(Path(raw_conda_exe).expanduser()) if raw_conda_exe else "conda"
+
+
+def conda_run_prefix(env_name: str, *, no_capture: bool = True) -> list[str]:
+    env_name = resolve_conda_env_name(env_name)
+    prefix = [get_conda_exe(), "run"]
+    if no_capture:
+        prefix.append("--no-capture-output")
+    prefix.extend(["-n", str(env_name)])
+    return prefix
+
+
+def conda_run_command(env_name: str, command: str | Sequence[str], *, no_capture: bool = True) -> str:
+    prefix = " ".join(shlex.quote(part) for part in conda_run_prefix(env_name, no_capture=no_capture))
+    if isinstance(command, str):
+        return f"{prefix} {command}".strip()
+    return f"{prefix} {' '.join(shlex.quote(str(part)) for part in command)}".strip()
+
+
+def conda_env_path(env_name: str, *parts: str) -> str:
+    env_name = resolve_conda_env_name(env_name)
+    root = get_conda_root()
+    if root:
+        return str(Path(root).expanduser() / "envs" / str(env_name) / Path(*parts))
+    return str(Path("envs") / str(env_name) / Path(*parts))
+
+
+def conda_base_bin(command_name: str) -> str:
+    root = get_conda_root()
+    if root:
+        return str(Path(root).expanduser() / "bin" / command_name)
+    return command_name
 
 
 def is_fasta(filename):
-    with open(filename, "r") as handle:
-        fasta = SeqIO.parse(handle, "fasta")
-        return any(fasta)
+    from Bio import SeqIO
+
+    try:
+        for fmt in ("fasta", "fasta-blast", "fasta-pearson"):
+            try:
+                with open(filename, "r", encoding="utf-8", errors="ignore") as handle:
+                    fasta = SeqIO.parse(handle, fmt)
+                    if any(fasta):
+                        return True
+            except ValueError:
+                continue
+        return False
+    except OSError:
+        return False
 
 
 def is_fastq(file_path):
@@ -23,8 +158,33 @@ def is_fastq(file_path):
     return False
 
 
+def run_command(
+    cmd: str,
+    logf: IO[str] | None = None,
+    check: bool = True,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+) -> CommandResult:
+    start = time.time()
+    if logf is not None:
+        logf.write(f"\n[CMD] {cmd}\n")
+        logf.flush()
+    merged_env = None
+    if env:
+        merged_env = os.environ.copy()
+        merged_env.update({str(key): str(value) for key, value in env.items()})
+    completed = subprocess.run(cmd, shell=True, stdout=logf, stderr=logf, cwd=cwd, env=merged_env)
+    elapsed_seconds = time.time() - start
+    if logf is not None:
+        logf.write(f"[CMD_EXIT] code={completed.returncode} elapsed={elapsed_seconds:.2f}s\n")
+        logf.flush()
+    if check and completed.returncode != 0:
+        raise CommandExecutionError(cmd, completed.returncode)
+    return CommandResult(command=cmd, returncode=completed.returncode, elapsed_seconds=elapsed_seconds)
+
+
 def run_cmd(cmd, logf=None):
-    subprocess.run(cmd, shell=True, stdout=logf, stderr=logf)
+    return run_command(cmd, logf=logf, check=True)
 
 
 def copy_pattern(patterns, dest):

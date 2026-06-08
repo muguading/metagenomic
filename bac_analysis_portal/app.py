@@ -1,42 +1,3571 @@
 from __future__ import annotations
 
 import csv
+import copy
 import gzip
+import hashlib
+import http.client
 import io
+import importlib.util
 import json
+import math
 import os
 import platform
+import random
+import re
+import shlex
+import subprocess
 import shutil
 import sys
+import tempfile
+import threading
 import time
+import uuid
 import zipfile
+from collections import Counter, defaultdict
+from difflib import SequenceMatcher
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlencode
+from urllib.request import urlopen, Request
 from xml.sax.saxutils import escape as xml_escape
+from xml.etree import ElementTree as ET
 
-from flask import Flask, Response, jsonify, redirect, render_template, request, session, url_for
-from functools import wraps
+from flask import Flask, Response, abort, current_app, g, jsonify, redirect, render_template, request, session, send_file, send_from_directory, url_for
+from functools import lru_cache, wraps
 
-from .task_manager import ASM_METHOD_OPTIONS, AnalysisTaskManager, ValidationError
-from .store import PortalStore
+from metagenomic_refactor.common import resolve_conda_env_name
+from typing import Any
+from werkzeug.exceptions import HTTPException
+
+from .knowledge_base import load_knowledge_base_bundle, load_knowledge_base_summary
+from .sample_library_manager import SampleLibraryManager
+from .task_analytics import (
+    build_pending_queue_analytics_snapshot,
+    build_queue_analytics_snapshot,
+    read_task_analytics_snapshot,
+    write_task_analytics_snapshot,
+)
+from .task_manager import ASM_METHOD_OPTIONS, AnalysisTaskManager, SHORT_READ_R1_RE, SHORT_READ_R2_RE, ValidationError, read_json
+from .store import DEFAULT_ALLOWED_VIRUSES, PortalStore
+
+
+VIRUS_PERMISSION_ALIASES = {
+    "ncov": ["sars-cov-2", "新型冠状病毒", "新冠病毒", "新冠", "2019-ncov"],
+    "flu": ["influenza virus", "influenza a virus", "influenza b virus", "流感病毒", "甲型流感病毒", "乙型流感病毒", "甲流", "乙流"],
+    "rsv": ["respiratory syncytial virus", "human respiratory syncytial virus", "orthopneumovirus hominis", "呼吸道合胞病毒", "rsv"],
+    "hmpv": ["human metapneumovirus", "metapneumovirus", "人偏肺病毒", "hmpv"],
+    "hpiv": ["human parainfluenza virus", "parainfluenza virus", "副流感病毒", "hpiv"],
+    "hadv": ["adenovirus", "human adenovirus", "腺病毒"],
+    "rhinovirus": ["human rhinovirus", "rhinovirus", "鼻病毒", "hrv"],
+    "seasonal_hcov": ["human coronavirus", "coronavirus", "人冠状病毒", "冠状病毒"],
+    "mpox": ["monkeypox virus", "mpox virus", "human monkeypox virus", "猴痘病毒", "猴痘", "mpox", "hmpxv"],
+    "denv": ["dengue virus", "dengue", "denv", "登革热病毒", "登革热"],
+    "zikav": ["zika virus", "zika", "zikv", "zikav", "寨卡病毒", "寨卡"],
+    "chikv": ["chikungunya virus", "chikungunya", "chikv", "基孔肯雅病毒", "基孔肯雅"],
+    "bandavirus": ["bandavirus dabieense", "bandavirus", "sftsv", "大别班达病毒", "班达病毒", "发热伴血小板减少综合征病毒"],
+    "orthohantavirus": ["orthohantavirus", "hantavirus", "汉坦病毒", "汉他病毒"],
+    "orthoebolavirus": ["orthoebolavirus", "ebola virus", "ebolavirus", "ebov", "埃博拉病毒", "正埃博拉病毒"],
+    "norovirus": ["norovirus", "诺如病毒"],
+    "rotavirus": ["rotavirus a", "rotavirus", "a组轮状病毒", "轮状病毒"],
+    "astroviridae": ["astrovirus", "星状病毒"],
+    "enterovirus": ["human enterovirus", "enterovirus", "coxsackievirus", "echovirus", "肠道病毒", "柯萨奇病毒", "埃可病毒"],
+    "hepatovirus": ["hepatovirus", "hepatitis a virus", "hav", "甲肝病毒", "甲型肝炎病毒", "甲型肝炎"],
+    "hiv": ["hiv", "hiv-1", "hiv1", "human immunodeficiency virus", "human immunodeficiency virus 1", "艾滋病病毒", "艾滋病毒"],
+    "sapovirus": ["sapovirus", "札如病毒"],
+}
+
+DEMO_TYPE_TO_VIRUS_PERMISSION = {
+    "ncov": "ncov",
+    "flu": "flu",
+    "rsv": "rsv",
+    "hmpv": "hmpv",
+    "hpiv": "hpiv",
+    "hadv": "hadv",
+    "norovirus": "norovirus",
+    "rotavirus": "rotavirus",
+    "astroviridae": "astroviridae",
+    "bandavirus": "bandavirus",
+    "denv": "denv",
+    "zikav": "zikav",
+    "chikv": "chikv",
+    "rhinovirus": "rhinovirus",
+    "enterovirus": "enterovirus",
+    "hepatovirus": "hepatovirus",
+    "hiv": "hiv",
+    "orthohantavirus": "orthohantavirus",
+    "orthoebolavirus": "orthoebolavirus",
+    "seasonal_hcov": "seasonal_hcov",
+    "hmpxv": "mpox",
+}
+
+NEXTSTRAIN_BUILD_TASK_TYPE = "nextstrain_auspice_build"
+NEXTSTRAIN_CLI_PATH = Path("/Users/wuhhh/.nextstrain/cli-standalone/nextstrain")
+AUSPICE_UPLOAD_KIND = "uploaded_auspice_json"
+BATCH_IMPORT_PRECHECK_TTL_SECONDS = 30 * 60
+VIRUS_REPORT_TEMPLATE_SETTING_KEY = "virus_report_templates"
+VIRUS_REPORT_TEMPLATE_HISTORY_SETTING_KEY = "virus_report_template_history"
+DEFAULT_VIRUS_REPORT_TEMPLATES: list[dict[str, object]] = [
+    {
+        "id": "virus_influenza",
+        "name": "流感病毒",
+        "category": "respiratory",
+        "modes": ["influenza_typing"],
+        "clinicalRisk": "中风险",
+        "cdcRisk": "中",
+        "evidenceBasis": "流感类型、HA/NA 分型、segment 组成、覆盖度与突变注释",
+        "clinicalMeaning": "流感病毒检出具有明确呼吸道感染相关性，但病情轻重、传染期和治疗决策仍需结合症状、采样时间、抗原/核酸复核及基础疾病综合判断。",
+        "cdcMeaning": "流感结果应纳入呼吸道传染病季节性监测，重点关注亚型变化、聚集性病例和重症病例比例。",
+        "clinicalRecommendations": ["建议结合发病时间窗、重症风险因素和当地诊疗规范评估抗病毒治疗时机。", "建议结合呼吸道症状、抗原/核酸复核结果和采样质量判断检出结果的临床相关性。", "如为重症、聚集性或特殊人群样本，建议优先复核分型、segment 覆盖度和关键突变位点。"],
+        "cdcRecommendations": ["建议纳入流感季节性监测，关注亚型变化、重症比例和聚集性病例。", "建议与本地哨点监测、疫苗株背景和历史序列进行比对，判断是否存在异常谱系变化。", "如出现学校、养老机构或医院聚集性病例，建议补充分型/同源性证据并按规范处置。"],
+    },
+    {
+        "id": "virus_monkeypox",
+        "name": "猴痘病毒",
+        "category": "contact-transmitted",
+        "modes": ["monkeypox_nextclade"],
+        "clinicalRisk": "中风险",
+        "cdcRisk": "中",
+        "evidenceBasis": "Nextclade clade/lineage、覆盖度、QC 与突变位点",
+        "clinicalMeaning": "猴痘病毒检出需结合皮疹、发热、暴露史与采样部位判断临床相关性；分型结果可辅助追踪传播背景，但不替代临床诊断流程。",
+        "cdcMeaning": "猴痘结果具有公共卫生追踪价值，建议结合个案调查、接触者管理和本地历史序列开展传播链评估。",
+        "clinicalRecommendations": ["建议结合皮疹部位、病程阶段、暴露史和采样类型评估检出结果的临床意义。", "建议必要时复核关键位点和覆盖度，避免因低覆盖或混样造成谱系解释偏差。", "临床处置仍应依据现行诊疗规范和感染防控要求执行。"],
+        "cdcRecommendations": ["建议结合个案调查、接触者管理和活动轨迹评估传播链。", "建议将 clade/lineage 与本地及上级平台历史序列比对，判断是否为既有传播链延续。", "如存在聚集性或跨区域关联，应补充同源性分析和暴露网络信息。"],
+    },
+    {
+        "id": "virus_hepatitis",
+        "name": "肝炎病毒",
+        "category": "hepatitis",
+        "modes": ["hepatovirus_typing"],
+        "clinicalRisk": "中风险",
+        "cdcRisk": "中",
+        "evidenceBasis": "肝炎病毒 broad 大亚型、子亚型/基因型参考竞争、覆盖度与突变注释",
+        "clinicalMeaning": "肝炎病毒分型结果可辅助判断病毒类别与分子流行病学背景；临床诊断仍需结合肝功能、血清学标志物、病毒载量、病程阶段和既往感染/免疫史综合判断。",
+        "cdcMeaning": "肝炎病毒结果应重点关注传播途径、感染来源和同型别聚集情况；不同大亚型对应的流调问题不同，不应只按通用病毒阳性处理。",
+        "clinicalRecommendations": ["建议结合肝功能、血清学标志物、病毒载量和临床病程判断活动性感染与疾病阶段。", "建议核对 broad 大亚型与子亚型/基因型是否一致，必要时复核覆盖度和关键参考株选择。", "如涉及治疗或随访，应由临床结合指南、既往感染史和免疫状态综合决策。"],
+        "cdcRecommendations": ["建议按 HAV/HBV/HCV/HDV/HEV 不同传播特点分别补充流调信息，不要混用同一处置路径。", "建议关注同一单位、家庭或共同暴露场景中的同型别聚集信号。", "如用于暴发研判，应补充采样时间、暴露史和更高分辨率的序列比较证据。"],
+    },
+    {
+        "id": "virus_natural_focus",
+        "name": "自然疫源性病毒",
+        "category": "natural-focus",
+        "modes": ["bandavirus_typing", "orthohantavirus_typing", "orthoebolavirus_typing", "ebola_nextclade"],
+        "clinicalRisk": "中风险",
+        "cdcRisk": "中",
+        "evidenceBasis": "自然疫源性病毒分型、分段参考选择、覆盖度与潜在重配提示",
+        "clinicalMeaning": "该类病毒结果应结合发热、出血倾向、肾损伤或血小板变化等临床表现判断；分段分型结果可辅助判断自然疫源背景和潜在暴露来源。",
+        "cdcMeaning": "该类病毒具备自然疫源性监测意义，建议结合病例暴露史、地域来源、媒介/宿主线索和本地监测资料综合研判。",
+        "clinicalRecommendations": ["建议结合发热、血小板、肾功能、出血倾向及流行病学暴露史综合判断临床相关性。", "建议复核分段分型是否一致，若多片段证据不一致，应谨慎解释潜在重配或混合信号。", "如病情进展或暴露史明确，建议结合规范检测和临床专科意见动态评估。"],
+        "cdcRecommendations": ["建议补充病例居住地、活动地、野外或农田暴露、动物或媒介接触信息。", "建议结合宿主和媒介监测资料判断是否存在自然疫源地活跃信号。", "如同一区域出现多例同型别结果，建议开展时空聚集和传播风险复核。"],
+    },
+    {
+        "id": "virus_vector_borne",
+        "name": "虫媒病毒",
+        "category": "vector-borne",
+        "modes": ["denv_nextclade", "zikav_nextclade", "chikv_nextclade"],
+        "clinicalRisk": "低-中风险",
+        "cdcRisk": "中",
+        "evidenceBasis": "虫媒病毒 clade/lineage、覆盖度、QC 与突变位点",
+        "clinicalMeaning": "虫媒病毒检出需结合发热、皮疹、关节痛、出血表现、旅行史和采样时间窗判断临床相关性；分型结果更适合用于输入来源和传播背景分析。",
+        "cdcMeaning": "该结果具备虫媒病毒监测意义，建议结合旅行史、媒介密度、病例时空分布和本地输入/本地传播背景研判。",
+        "clinicalRecommendations": ["建议结合旅行史、蚊媒暴露史、发病时间窗和血清学/核酸复核结果判断临床意义。", "建议关注采样时间对核酸检出率的影响，必要时补充血清学或复采证据。", "如出现重症表现，应结合当地诊疗规范和实验室确认结果及时评估。"],
+        "cdcRecommendations": ["建议核查旅行史、活动轨迹和发病地，区分输入病例与本地传播风险。", "建议结合媒介密度、季节和周边病例分布判断是否需要强化媒介控制。", "如出现同区域同时间多例，应补充分型/系统发育比较和现场流调证据。"],
+    },
+    {
+        "id": "virus_bloodborne",
+        "name": "血源性病毒",
+        "category": "bloodborne",
+        "modes": ["hiv_resistance"],
+        "clinicalRisk": "中风险",
+        "cdcRisk": "中",
+        "evidenceBasis": "血源性病毒分型、耐药或关键位点、覆盖度与参考选择结果",
+        "clinicalMeaning": "血源性或慢性感染相关病毒结果应结合确认试验、病毒载量、免疫状态和既往诊疗史综合解释；测序分型可辅助耐药、传播背景和随访管理。",
+        "cdcMeaning": "该结果可用于传播网络和重点人群监测线索，但不应替代确认试验、个案管理和规范报告流程。",
+        "clinicalRecommendations": ["建议结合确认试验、病毒载量、免疫状态和既往治疗史判断临床意义。", "如涉及耐药或亚型解释，应复核覆盖度、关键位点和参考选择结果。", "诊疗决策应依据现行临床指南和专科评估，不以单一测序报告替代。"],
+        "cdcRecommendations": ["建议结合个案管理、传播风险评估和重点人群监测资料进行解释。", "如用于传播网络分析，应补充匿名化流调信息和更高分辨率序列比较。", "涉及报告管理时，应按现行规范和确认试验结果执行。"],
+    },
+    {
+        "id": "virus_respiratory",
+        "name": "呼吸道病毒",
+        "category": "respiratory",
+        "modes": ["rsv_nextclade", "hmpv_nextclade", "hpiv_typing", "hadv_typing", "rhinovirus_typing", "seasonal_hcov_typing"],
+        "clinicalRisk": "低-中风险",
+        "cdcRisk": "低",
+        "evidenceBasis": "呼吸道病毒分型、覆盖度、QC 与突变位点",
+        "clinicalMeaning": "呼吸道病毒检出需结合症状、采样部位、病程阶段和共感染背景判断临床意义；分型结果可辅助判断流行株背景和院内/社区传播线索。",
+        "cdcMeaning": "呼吸道病毒结果适合纳入季节性和聚集性监测，重点关注同型别病例聚集、特殊机构暴发和重症病例。",
+        "clinicalRecommendations": ["建议结合呼吸道症状、病程阶段、采样质量和共感染证据判断临床相关性。", "如为重症或免疫低下患者，建议复核覆盖度和关键变异位点。", "抗病毒或感染控制决策应结合当地诊疗规范、病原确认和患者风险因素。"],
+        "cdcRecommendations": ["建议关注同型别病例在学校、养老机构、医院等场景中的聚集信号。", "建议与同期本地呼吸道病原监测数据对照，判断是否存在流行株变化。", "如出现异常重症或聚集性事件，应补充分型和同源性证据。"],
+    },
+    {
+        "id": "virus_enteric",
+        "name": "肠道/胃肠炎相关病毒",
+        "category": "enteric",
+        "modes": ["norovirus_typing", "enterovirus_typing", "rotavirus_typing", "astroviridae_typing"],
+        "clinicalRisk": "低-中风险",
+        "cdcRisk": "低",
+        "evidenceBasis": "肠道病毒或胃肠炎相关病毒分型、覆盖度与参考竞争结果",
+        "clinicalMeaning": "肠道病毒或胃肠炎相关病毒检出需结合腹泻、呕吐、发热、采样时间和暴露史判断临床相关性；分型结果可辅助食品、水源或机构聚集事件研判。",
+        "cdcMeaning": "该结果适合纳入肠道传染病或胃肠炎聚集性监测，重点关注共同暴露、机构传播和同型别聚集。",
+        "clinicalRecommendations": ["建议结合胃肠道症状、采样时间、脱水程度和共感染结果判断临床意义。", "如结果用于个案诊疗，需结合病程和其他病原检测排除偶然携带或残留核酸。", "建议复核分型和覆盖度，尤其是用于聚集性事件解释时。"],
+        "cdcRecommendations": ["建议补充共同就餐、水源、托幼/学校/养老机构暴露史。", "建议关注同型别病例聚集，并结合环境或食品样本结果进行综合判断。", "如涉及暴发调查，应补充采样时间轴和序列同源性比较。"],
+    },
+]
+
+
+def _default_project_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _normalize_database_root_path(candidate: Path) -> Path:
+    resolved = candidate.expanduser().resolve()
+    nested_database = resolved / "database"
+    if resolved.name != "database" and nested_database.is_dir():
+        return nested_database
+    return resolved
+
+
+def _resolve_runtime_database_root() -> Path:
+    project_root = _default_project_root()
+    store = None
+    try:
+        store = current_app.config.get("PORTAL_STORE")
+        configured_project_root = current_app.config.get("PROJECT_ROOT")
+        if configured_project_root:
+            project_root = Path(str(configured_project_root)).expanduser().resolve()
+    except RuntimeError:
+        store = None
+
+    if store is None:
+        return _normalize_database_root_path(project_root)
+
+    raw_value = str(store.get_setting("database_root", "") or "").strip()
+    if not raw_value:
+        return _normalize_database_root_path(project_root)
+    try:
+        candidate = _normalize_database_root_path(Path(raw_value))
+    except OSError:
+        return _normalize_database_root_path(project_root)
+    return candidate if candidate.is_dir() else _normalize_database_root_path(project_root)
+
+
+def _normalize_taxonomy_lookup_name(value: object) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip()).lower()
+    if not text:
+        return ""
+    text = text.replace("，", " ").replace(",", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _taxonomy_link_payload(pathogen: dict) -> dict | None:
+    taxid = str(pathogen.get("taxid") or "").strip()
+    ncbi = pathogen.get("ncbi_taxonomy") if isinstance(pathogen.get("ncbi_taxonomy"), dict) else {}
+    if not taxid and not ncbi:
+        return None
+    classification = ncbi.get("classification") if isinstance(ncbi.get("classification"), dict) else {}
+    terminal = ncbi.get("terminal") if isinstance(ncbi.get("terminal"), dict) else {}
+    return {
+        "pathogen_id": str(pathogen.get("id") or "").strip(),
+        "species": str(pathogen.get("species") or "").strip(),
+        "taxid": taxid,
+        "scientific_name": str(ncbi.get("scientific_name") or terminal.get("name") or pathogen.get("species") or "").strip(),
+        "rank": str(ncbi.get("rank") or terminal.get("rank") or "").strip(),
+        "order": str(((classification.get("order") or {}) if isinstance(classification.get("order"), dict) else {}).get("name") or "").strip(),
+        "family": str(((classification.get("family") or {}) if isinstance(classification.get("family"), dict) else {}).get("name") or "").strip(),
+        "genus": str(((classification.get("genus") or {}) if isinstance(classification.get("genus"), dict) else {}).get("name") or "").strip(),
+        "species_rank": str(((classification.get("species") or {}) if isinstance(classification.get("species"), dict) else {}).get("name") or "").strip(),
+    }
+
+
+def _normalize_serotype_lookup_text(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = text.replace("（", "(").replace("）", ")")
+    text = re.sub(r"\s+", "", text)
+    return text
+
+
+SALMONELLA_SEROVAR_ALIAS_MAP = {
+    "伤寒沙门菌": ["Typhi", "S.Typhi", "Salmonella Typhi", "伤寒沙门氏菌"],
+    "甲型副伤寒沙门菌": ["Paratyphi A", "S.Paratyphi A", "Salmonella Paratyphi A", "甲型副伤寒沙门氏菌"],
+    "乙型副伤寒沙门菌": ["Paratyphi B", "S.Paratyphi B", "Salmonella Paratyphi B", "乙型副伤寒沙门氏菌"],
+    "丙型副伤寒沙门菌": ["Paratyphi C", "S.Paratyphi C", "Salmonella Paratyphi C", "丙型副伤寒沙门氏菌"],
+    "肠炎沙门菌": ["Enteritidis", "S.Enteritidis", "Salmonella Enteritidis", "肠炎沙门氏菌"],
+    "鼠伤寒沙门菌": ["Typhimurium", "S.Typhimurium", "Salmonella Typhimurium", "鼠伤寒沙门氏菌"],
+    "猪霍乱沙门菌": ["Choleraesuis", "Choleracsuis", "S.Choleraesuis", "S.Choleracsuis", "Salmonella Choleraesuis", "猪霍乱沙门氏菌"],
+    "德尔卑沙门菌": ["Derby", "S.Derby", "Salmonella Derby", "德尔卑沙门氏菌"],
+    "伦敦沙门菌": ["London", "S.London", "Salmonella London", "伦敦沙门氏菌"],
+    "斯坦利沙门菌": ["Stanley", "S.Stanley", "Salmonella Stanley", "斯坦利沙门氏菌"],
+    "山夫登堡沙门菌": ["Senftenberg", "S.Senftenberg", "Salmonella Senftenberg", "山夫登堡沙门氏菌"],
+    "阿贡纳沙门菌": ["Agona", "S.Agona", "Salmonella Agona", "阿贡纳沙门氏菌"],
+    "汤卜逊沙门菌": ["Thompson", "S.Thompson", "Salmonella Thompson", "汤卜逊沙门氏菌"],
+    "罗森沙门菌": ["Rissen", "S.Rissen", "Salmonella Rissen", "罗森沙门氏菌"],
+    "I,4,[5],12:i:-": ["1,4,[5],12:i:-", "S.1,4,[5],12:i:-", "单相鼠伤寒沙门菌", "单相鼠伤寒沙门氏菌"],
+}
+
+
+def _expand_salmonella_serovar_aliases(value: object) -> list[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    aliases = [raw]
+    normalized_raw = _normalize_serotype_lookup_text(raw)
+    for canonical, values in SALMONELLA_SEROVAR_ALIAS_MAP.items():
+        candidates = [canonical, *values]
+        normalized_candidates = [_normalize_serotype_lookup_text(item) for item in candidates]
+        if normalized_raw and normalized_raw in normalized_candidates:
+            aliases.extend(candidates)
+            break
+    seen: set[str] = set()
+    output: list[str] = []
+    for alias in aliases:
+        text = str(alias or "").strip()
+        key = _normalize_serotype_lookup_text(text)
+        if text and key and key not in seen:
+            seen.add(key)
+            output.append(text)
+    return output
+
+
+def _sanitize_virus_demo_note(value: object) -> str:
+    text = str(value or "").strip()
+    if not text or text == "-":
+        return ""
+    blocked_fragments = [
+        "当前仅内置流感病毒分型流程",
+        "当前仅支持流感病毒分型流程",
+        "当前仅内置细菌分型流程",
+        "当前仅支持细菌分型流程",
+    ]
+    if any(fragment in text for fragment in blocked_fragments):
+        return ""
+    return text
+
+
+def write_tsv(path: Path, columns: list[str], rows: list[list[object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerow(columns)
+        for row in rows:
+            writer.writerow(list(row))
+
+
+def _parse_sample_location_json(raw_value: object) -> dict[str, str]:
+    if isinstance(raw_value, dict):
+        payload = raw_value
+    else:
+        text = str(raw_value or "").strip()
+        if not text:
+            return {}
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): str(value or "").strip() for key, value in payload.items()}
+
+
+def _normalize_nextstrain_dataset_prefix(prefix: str) -> tuple[str, str] | None:
+    normalized = str(prefix or "").strip().strip("/")
+    if not normalized:
+        return None
+    parts = [part for part in normalized.split("/") if part]
+    if len(parts) >= 2 and parts[0] == "nextstrain":
+        return ("task", parts[1])
+    if len(parts) >= 2 and parts[0] == "uploaded":
+        return ("uploaded", parts[1])
+    if len(parts) >= 3 and parts[0] == "auspice" and parts[1] == "uploaded":
+        return ("uploaded", parts[2])
+    if len(parts) >= 3 and parts[0] == "auspice" and parts[1] == "nextstrain":
+        return ("task", parts[2])
+    return None
+
+
+def _uploaded_auspice_root(project_root: Path) -> Path:
+    return (project_root / "public" / "auspice-uploads").resolve()
+
+
+def _uploaded_auspice_metadata_path(project_root: Path, upload_id: str) -> Path:
+    return _uploaded_auspice_root(project_root) / "metadata" / f"{upload_id}.json"
+
+
+def _uploaded_auspice_dataset_path(project_root: Path, upload_id: str) -> Path:
+    return _uploaded_auspice_root(project_root) / "datasets" / f"{upload_id}.json"
+
+
+def _load_uploaded_auspice_metadata(project_root: Path, upload_id: str) -> dict[str, Any]:
+    metadata_path = _uploaded_auspice_metadata_path(project_root, upload_id)
+    if not metadata_path.is_file():
+        raise KeyError(f"Uploaded auspice dataset not found: {upload_id}")
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise KeyError(f"Uploaded auspice dataset is invalid: {upload_id}")
+    return payload
+
+
+def _can_view_uploaded_auspice(metadata: dict[str, Any]) -> bool:
+    role = str(session.get("role") or "")
+    username = str(session.get("username") or "")
+    group_name = str(session.get("group_name") or "")
+    if role == "admin":
+        return True
+    if username and username == str(metadata.get("owner") or "").strip():
+        return True
+    if group_name and group_name == str(metadata.get("owner_group") or "").strip():
+        return True
+    return False
+
+
+def _ensure_can_view_uploaded_auspice(metadata: dict[str, Any]) -> None:
+    if not _can_view_uploaded_auspice(metadata):
+        raise KeyError(f"Uploaded auspice dataset not found: {metadata.get('id', '-')}")
+
+
+def _resolve_nextstrain_dataset_main_json(project_root: Path, task: dict[str, Any]) -> Path:
+    output_dir = Path(str((task.get("params") or {}).get("output_dir") or "")).expanduser().resolve()
+    return output_dir / "auspice" / "zika.json"
+
+
+def _resolve_nextstrain_dataset_sidecar(project_root: Path, task: dict[str, Any], sidecar_type: str) -> Path:
+    output_dir = Path(str((task.get("params") or {}).get("output_dir") or "")).expanduser().resolve()
+    if sidecar_type == "root-sequence":
+        return output_dir / "auspice" / "zika_root-sequence.json"
+    if sidecar_type == "tip-frequencies":
+        return output_dir / "auspice" / "zika_tip-frequencies.json"
+    if sidecar_type == "measurements":
+        return output_dir / "auspice" / "zika_measurements.json"
+    return _resolve_nextstrain_dataset_main_json(project_root, task)
+
+
+def _serialize_nextstrain_build_task(project_root: Path, task: dict[str, Any]) -> dict[str, Any]:
+    params = task.get("params") if isinstance(task.get("params"), dict) else {}
+    dataset_json = _resolve_nextstrain_dataset_main_json(project_root, task)
+    build_manifest = Path(str(params.get("output_dir") or "")).expanduser().resolve() / "build_manifest.json"
+    manifest_payload: dict[str, Any] = {}
+    if build_manifest.is_file():
+        try:
+            loaded = json.loads(build_manifest.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                manifest_payload = loaded
+        except json.JSONDecodeError:
+            manifest_payload = {}
+    return {
+        "entry_kind": "build",
+        "task_id": str(task.get("id") or "").strip(),
+        "task_name": str(task.get("name") or "").strip(),
+        "status": str(task.get("status") or "").strip().upper(),
+        "created_at": task.get("created_at"),
+        "started_at": task.get("started_at"),
+        "finished_at": task.get("finished_at"),
+        "workspace_dir": str(params.get("output_dir") or "").strip(),
+        "reference_genbank": str(params.get("ref") or "").strip(),
+        "sample_count": int(manifest_payload.get("sample_count") or len(manifest_payload.get("samples") or [])) if isinstance(manifest_payload, dict) else 0,
+        "species_name": str(manifest_payload.get("species_name") or "").strip() if isinstance(manifest_payload, dict) else "",
+        "dataset_ready": dataset_json.is_file(),
+        "dataset_path": f"/nextstrain/{str(task.get('id') or '').strip()}",
+        "dataset_json_path": str(dataset_json),
+        "log_path": str(task.get("log_path") or "").strip(),
+    }
+
+
+def _serialize_uploaded_auspice_dataset(project_root: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+    upload_id = str(metadata.get("id") or "").strip()
+    dataset_json = _uploaded_auspice_dataset_path(project_root, upload_id)
+    return {
+        "entry_kind": "upload",
+        "upload_id": upload_id,
+        "task_id": "",
+        "task_name": str(metadata.get("name") or metadata.get("original_filename") or upload_id).strip(),
+        "status": "UPLOADED",
+        "created_at": metadata.get("created_at"),
+        "started_at": metadata.get("created_at"),
+        "finished_at": metadata.get("created_at"),
+        "workspace_dir": "",
+        "reference_genbank": "",
+        "sample_count": int(metadata.get("sample_count") or 0),
+        "species_name": str(metadata.get("species_name") or "").strip(),
+        "dataset_ready": dataset_json.is_file(),
+        "dataset_path": f"/uploaded/{upload_id}",
+        "dataset_json_path": str(dataset_json),
+        "log_path": "",
+        "owner": str(metadata.get("owner") or "").strip(),
+        "owner_group": str(metadata.get("owner_group") or "").strip(),
+        "original_filename": str(metadata.get("original_filename") or "").strip(),
+        "source_kind": AUSPICE_UPLOAD_KIND,
+    }
+
+
+def _is_portal_only_task(task: dict[str, Any]) -> bool:
+    return str(task.get("task_type") or "").strip() == NEXTSTRAIN_BUILD_TASK_TYPE
+
+
+def _normalize_virus_permission_lookup(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = text.replace("（", "(").replace("）", ")")
+    text = re.sub(r"[\s,_/]+", " ", text)
+    return text.strip()
+
+
+def _resolve_requested_virus_permission(species_name: object) -> str:
+    normalized = _normalize_virus_permission_lookup(species_name)
+    if not normalized:
+        return ""
+    for key, aliases in VIRUS_PERMISSION_ALIASES.items():
+        for alias in aliases:
+            alias_text = _normalize_virus_permission_lookup(alias)
+            if not alias_text:
+                continue
+            if normalized == alias_text or alias_text in normalized:
+                return key
+    return ""
+
+
+def _ensure_user_has_virus_permission(user: dict[str, object], virus_key: str) -> None:
+    if not virus_key:
+        return
+    allowed_viruses = user.get("allowed_viruses") if isinstance(user, dict) else None
+    normalized_allowed = {
+        str(item or "").strip().lower()
+        for item in (allowed_viruses if isinstance(allowed_viruses, list) else DEFAULT_ALLOWED_VIRUSES)
+        if str(item or "").strip()
+    }
+    if virus_key not in normalized_allowed:
+        raise ValidationError("当前账号未开通该病毒类型权限")
+
+
+def _tokenize_serotype_values(value: object) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    text = text.replace("，", "、").replace(",", "、").replace("；", "、").replace(";", "、")
+    tokens = [item.strip() for item in re.split(r"[、/]", text) if item.strip()]
+    normalized: list[str] = []
+    for token in tokens:
+        token_normalized = _normalize_serotype_lookup_text(token)
+        if token_normalized and token_normalized not in normalized:
+            normalized.append(token_normalized)
+    return normalized
+
+
+def _normalize_mlst_lookup_text(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if not text or text in {"-", "--", "NONE", "FALSE"}:
+        return ""
+    text = re.sub(r"\s+", "", text)
+    if re.fullmatch(r"\d+", text):
+        return f"ST{text}"
+    match = re.fullmatch(r"ST[-_]?(\d+)", text)
+    if match:
+        return f"ST{match.group(1)}"
+    return text
+
+
+@lru_cache(maxsize=4)
+def _build_kb_mlst_index(project_root_text: str) -> dict[str, list[dict]]:
+    bundle = load_knowledge_base_bundle(project_root_text)
+    collections = bundle.get("collections") if isinstance(bundle, dict) else {}
+    pathogens = collections.get("pathogens") if isinstance(collections, dict) else []
+    index: dict[str, list[dict]] = {}
+    for pathogen in pathogens if isinstance(pathogens, list) else []:
+        if not isinstance(pathogen, dict):
+            continue
+        mlst_rows = pathogen.get("mlst_associations")
+        if not isinstance(mlst_rows, list) or not mlst_rows:
+            continue
+        record = {
+            "pathogen_id": str(pathogen.get("id") or "").strip(),
+            "species": str(pathogen.get("species") or "").strip(),
+            "common_name": str(pathogen.get("common_name") or "").strip(),
+            "mlst_associations": [item for item in mlst_rows if isinstance(item, dict)],
+            "lineage_associations": [item for item in (pathogen.get("lineage_associations") or []) if isinstance(item, dict)],
+        }
+        candidate_names: list[str] = []
+        for value in [
+            pathogen.get("species"),
+            *([item for item in (pathogen.get("aliases") or []) if isinstance(item, str)]),
+        ]:
+            normalized = _normalize_taxonomy_lookup_name(value)
+            if normalized and normalized not in candidate_names:
+                candidate_names.append(normalized)
+        for name in candidate_names:
+            index.setdefault(name, []).append(record)
+    return index
+
+
+def _lookup_kb_mlst_association(project_root_text: str, species_name: object, st_text: object) -> dict | None:
+    normalized_species = _normalize_taxonomy_lookup_name(species_name)
+    normalized_st = _normalize_mlst_lookup_text(st_text)
+    if not normalized_species or not normalized_st or normalized_species in {"false", "-", "none"}:
+        return None
+    candidates = _build_kb_mlst_index(project_root_text).get(normalized_species, [])
+    if not candidates:
+        return None
+    for candidate in candidates:
+        for association in candidate.get("mlst_associations") or []:
+            if _normalize_mlst_lookup_text(association.get("mlst")) != normalized_st:
+                continue
+            lineage_matches = []
+            suffix = normalized_st[2:] if normalized_st.startswith("ST") else normalized_st
+            for lineage in candidate.get("lineage_associations") or []:
+                lineage_name = str(lineage.get("lineage") or "").strip()
+                lineage_norm = re.sub(r"[^A-Z0-9]+", "", lineage_name.upper())
+                if suffix and suffix in lineage_norm:
+                    lineage_matches.append(lineage)
+            return {
+                "pathogen_id": candidate.get("pathogen_id"),
+                "species": candidate.get("species"),
+                "common_name": candidate.get("common_name"),
+                "association": association,
+                "lineage_matches": lineage_matches,
+            }
+    return None
+
+
+def _build_mlst_knowledge_summary(project_root_text: str, rows: list[list[str]]) -> dict:
+    summary_items: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, list) or len(row) < 11:
+            continue
+        st_value = row[9] if len(row) > 9 else ""
+        species_value = row[10] if len(row) > 10 else ""
+        key = (_normalize_taxonomy_lookup_name(species_value), _normalize_mlst_lookup_text(st_value))
+        if not key[0] or not key[1] or key in seen:
+            continue
+        seen.add(key)
+        match = _lookup_kb_mlst_association(project_root_text, species_value, st_value)
+        association = match.get("association") if isinstance(match, dict) else {}
+        lineage_matches = match.get("lineage_matches") if isinstance(match, dict) else []
+        if not association:
+            continue
+        lineage_text = "；".join(
+            [str(item.get("lineage") or "").strip() for item in lineage_matches if str(item.get("lineage") or "").strip()]
+        ) or "-"
+        summary_items.append({
+            "species": str((match or {}).get("species") or species_value or "-"),
+            "st": str(association.get("mlst") or _normalize_mlst_lookup_text(st_value) or "-"),
+            "lineage_type": str(association.get("lineage_type") or "-"),
+            "lineage_text": lineage_text,
+            "virulence": association.get("virulence_associations") or [],
+            "resistance": association.get("resistance_associations") or [],
+            "regional": association.get("regional_distribution") or [],
+            "interpretation": str(association.get("interpretation") or "").strip(),
+        })
+    if not summary_items:
+        return {"headline": "", "items": []}
+    primary = summary_items[0]
+    headline = f"当前 MLST 结果提示样本更接近 {primary['species']} 的 {primary['st']} 分型背景。"
+    if primary.get("lineage_type") and primary["lineage_type"] != "-":
+        headline += f" 该分型在知识库中归为“{primary['lineage_type']}”。"
+    return {"headline": headline, "items": summary_items[:3]}
+
+
+@lru_cache(maxsize=4)
+def _build_kb_serotype_index(project_root_text: str) -> dict[str, list[dict]]:
+    bundle = load_knowledge_base_bundle(project_root_text)
+    collections = bundle.get("collections") if isinstance(bundle, dict) else {}
+    pathogens = collections.get("pathogens") if isinstance(collections, dict) else []
+    index: dict[str, list[dict]] = {}
+    for pathogen in pathogens if isinstance(pathogens, list) else []:
+        if not isinstance(pathogen, dict):
+            continue
+        serotype_rows = pathogen.get("serotype_associations")
+        if not isinstance(serotype_rows, list) or not serotype_rows:
+            continue
+        serotype_panels = pathogen.get("serotype_panels")
+        record = {
+            "pathogen_id": str(pathogen.get("id") or "").strip(),
+            "species": str(pathogen.get("species") or "").strip(),
+            "common_name": str(pathogen.get("common_name") or "").strip(),
+            "serotype_panels": [item for item in serotype_panels if isinstance(item, dict)] if isinstance(serotype_panels, list) else [],
+            "serotype_associations": [item for item in serotype_rows if isinstance(item, dict)],
+        }
+        candidate_names: list[str] = []
+        for value in [
+            pathogen.get("species"),
+            *([item for item in (pathogen.get("aliases") or []) if isinstance(item, str)]),
+        ]:
+            normalized = _normalize_taxonomy_lookup_name(value)
+            if normalized and normalized not in candidate_names:
+                candidate_names.append(normalized)
+        for name in candidate_names:
+            index.setdefault(name, []).append(record)
+    return index
+
+
+def _lookup_kb_serotype_association(project_root_text: str, species_name: object, serotype_text: object) -> dict | None:
+    normalized_species = _normalize_taxonomy_lookup_name(species_name)
+    normalized_serotype = _normalize_serotype_lookup_text(serotype_text)
+    if not normalized_species or not normalized_serotype or normalized_species in {"false", "-", "none"}:
+        return None
+    serotype_index = _build_kb_serotype_index(project_root_text)
+    candidates = serotype_index.get(normalized_species, [])
+    if not candidates:
+        fuzzy_candidates: list[dict] = []
+        for indexed_name, rows in serotype_index.items():
+            if not indexed_name:
+                continue
+            if indexed_name == normalized_species or indexed_name in normalized_species or normalized_species in indexed_name:
+                for row in rows:
+                    if row not in fuzzy_candidates:
+                        fuzzy_candidates.append(row)
+        candidates = fuzzy_candidates
+    if not candidates:
+        return None
+    best_match: dict | None = None
+    best_score = -1
+    for candidate in candidates:
+        for association in candidate.get("serotype_associations") or []:
+            candidate_values = [
+                _normalize_serotype_lookup_text(association.get("serotype")),
+                *[
+                    _normalize_serotype_lookup_text(value)
+                    for value in (association.get("serotype_aliases") or [])
+                    if isinstance(value, str)
+                ],
+            ]
+            if str(candidate.get("pathogen_id") or "") == "salmonella_enterica":
+                candidate_values.extend(
+                    _normalize_serotype_lookup_text(value)
+                    for value in _expand_salmonella_serovar_aliases(association.get("serotype"))
+                )
+            candidate_values = [value for value in candidate_values if value]
+            if not candidate_values:
+                continue
+            score = 0
+            if normalized_serotype in candidate_values:
+                score = 100
+            elif len(normalized_serotype) >= 3 and any(
+                len(value) >= 3 and (value in normalized_serotype or normalized_serotype in value)
+                for value in candidate_values
+            ):
+                score = 60
+            if score > best_score:
+                best_score = score
+                best_match = {
+                    "pathogen_id": candidate.get("pathogen_id"),
+                    "species": candidate.get("species"),
+                    "common_name": candidate.get("common_name"),
+                    "panels": candidate.get("serotype_panels") or [],
+                    "association": association,
+                }
+    return best_match if best_score > 0 else None
+
+
+@lru_cache(maxsize=4)
+def _build_kb_hepatitis_typing_index(project_root_text: str) -> dict[str, dict[str, list[dict]]]:
+    bundle = load_knowledge_base_bundle(project_root_text)
+    collections = bundle.get("collections") if isinstance(bundle, dict) else {}
+    typing_rules = collections.get("typing_rules") if isinstance(collections, dict) else []
+    by_broad: dict[str, list[dict]] = {}
+    by_broad_serotype: dict[str, list[dict]] = {}
+    for rule in typing_rules if isinstance(typing_rules, list) else []:
+        if not isinstance(rule, dict):
+            continue
+        broad_type = str(rule.get("broad_type") or "").strip().upper()
+        if broad_type not in {"HAV", "HBV", "HCV", "HDV", "HEV"}:
+            continue
+        by_broad.setdefault(broad_type, []).append(rule)
+        candidate_values = [
+            rule.get("serotype"),
+            rule.get("subtype"),
+            *[value for value in (rule.get("aliases") or []) if isinstance(value, str)],
+        ]
+        for value in candidate_values:
+            normalized = _normalize_serotype_lookup_text(value)
+            if normalized:
+                by_broad_serotype.setdefault(f"{broad_type}:{normalized}", []).append(rule)
+    return {"by_broad": by_broad, "by_broad_serotype": by_broad_serotype}
+
+
+def _lookup_kb_hepatitis_typing_rule(project_root_text: str, broad_type: object, subtype_text: object = "") -> dict | None:
+    normalized_broad = str(broad_type or "").strip().upper()
+    if normalized_broad not in {"HAV", "HBV", "HCV", "HDV", "HEV"}:
+        return None
+    index = _build_kb_hepatitis_typing_index(project_root_text)
+    normalized_subtype = _normalize_serotype_lookup_text(subtype_text)
+    if normalized_subtype:
+        candidates = index.get("by_broad_serotype", {}).get(f"{normalized_broad}:{normalized_subtype}", [])
+        subtype_matches = [item for item in candidates if str(item.get("level") or "").strip() == "subtype"]
+        if subtype_matches:
+            return subtype_matches[0]
+        if candidates:
+            return candidates[0]
+    broad_matches = [
+        item
+        for item in index.get("by_broad", {}).get(normalized_broad, [])
+        if str(item.get("level") or "").strip() == "broad_type"
+    ]
+    return broad_matches[0] if broad_matches else None
+
+
+def _hepatitis_typing_rule_to_summary_item(rule: dict, matched_on: object) -> dict:
+    references = rule.get("references") if isinstance(rule.get("references"), list) else []
+    reference_accessions = rule.get("reference_accessions") if isinstance(rule.get("reference_accessions"), list) else []
+    return {
+        "species": str(rule.get("species") or "").strip(),
+        "common_name": str(rule.get("common_name") or "").strip(),
+        "panel": str(rule.get("panel") or "-"),
+        "serotype": str(rule.get("serotype") or rule.get("subtype") or rule.get("broad_type") or "").strip(),
+        "matched_on": str(matched_on or rule.get("serotype") or "").strip(),
+        "level": str(rule.get("level") or "").strip(),
+        "broad_type": str(rule.get("broad_type") or "").strip(),
+        "subtype": str(rule.get("subtype") or "").strip(),
+        "reference_count": str(rule.get("reference_count") or len(reference_accessions) or len(references) or "0"),
+        "reference_accessions": [str(item).strip() for item in reference_accessions if str(item).strip()],
+        "references": [item for item in references if isinstance(item, dict)][:8],
+        "virulence": [],
+        "resistance": [],
+        "regional": [],
+        "interpretation": str(rule.get("interpretation") or "").strip(),
+    }
+
+
+@lru_cache(maxsize=4)
+def _build_kb_hiv_typing_index(project_root_text: str) -> dict[str, dict[str, list[dict]]]:
+    bundle = load_knowledge_base_bundle(project_root_text)
+    collections = bundle.get("collections") if isinstance(bundle, dict) else {}
+    typing_rules = collections.get("typing_rules") if isinstance(collections, dict) else []
+    by_broad: dict[str, list[dict]] = {}
+    by_broad_serotype: dict[str, list[dict]] = {}
+    for rule in typing_rules if isinstance(typing_rules, list) else []:
+        if not isinstance(rule, dict):
+            continue
+        broad_type = str(rule.get("broad_type") or "").strip().upper()
+        if broad_type not in {"HIV-1", "HIV-2"}:
+            continue
+        by_broad.setdefault(broad_type, []).append(rule)
+        candidate_values = [
+            rule.get("serotype"),
+            rule.get("subtype"),
+            *[value for value in (rule.get("aliases") or []) if isinstance(value, str)],
+        ]
+        for value in candidate_values:
+            normalized = _normalize_serotype_lookup_text(value)
+            if normalized:
+                by_broad_serotype.setdefault(f"{broad_type}:{normalized}", []).append(rule)
+    return {"by_broad": by_broad, "by_broad_serotype": by_broad_serotype}
+
+
+def _lookup_kb_hiv_typing_rule(project_root_text: str, broad_type: object, subtype_text: object = "") -> dict | None:
+    normalized_broad = str(broad_type or "").strip().upper()
+    if normalized_broad not in {"HIV-1", "HIV-2"}:
+        return None
+    index = _build_kb_hiv_typing_index(project_root_text)
+    normalized_subtype = _normalize_serotype_lookup_text(subtype_text)
+    if normalized_subtype:
+        candidates = index.get("by_broad_serotype", {}).get(f"{normalized_broad}:{normalized_subtype}", [])
+        subtype_matches = [item for item in candidates if str(item.get("level") or "").strip() == "subtype"]
+        if subtype_matches:
+            return subtype_matches[0]
+        if candidates:
+            return candidates[0]
+    broad_matches = [
+        item
+        for item in index.get("by_broad", {}).get(normalized_broad, [])
+        if str(item.get("level") or "").strip() == "broad_type"
+    ]
+    return broad_matches[0] if broad_matches else None
+
+
+def _hiv_typing_rule_to_summary_item(rule: dict, matched_on: object) -> dict:
+    references = rule.get("references") if isinstance(rule.get("references"), list) else []
+    reference_accessions = rule.get("reference_accessions") if isinstance(rule.get("reference_accessions"), list) else []
+    regional = rule.get("regional_distribution") if isinstance(rule.get("regional_distribution"), list) else []
+    return {
+        "species": str(rule.get("species") or "").strip(),
+        "common_name": str(rule.get("common_name") or "").strip(),
+        "panel": str(rule.get("panel") or "-"),
+        "serotype": str(rule.get("serotype") or rule.get("subtype") or rule.get("broad_type") or "").strip(),
+        "matched_on": str(matched_on or rule.get("serotype") or "").strip(),
+        "level": str(rule.get("level") or "").strip(),
+        "broad_type": str(rule.get("broad_type") or "").strip(),
+        "subtype": str(rule.get("subtype") or "").strip(),
+        "reference_count": str(rule.get("reference_count") or len(reference_accessions) or len(references) or "0"),
+        "reference_accessions": [str(item).strip() for item in reference_accessions if str(item).strip()],
+        "references": [item for item in references if isinstance(item, dict)][:8],
+        "virulence": [],
+        "resistance": [],
+        "regional": [str(item).strip() for item in regional if str(item).strip()],
+        "interpretation": str(rule.get("interpretation") or "").strip(),
+    }
+
+
+@lru_cache(maxsize=4)
+def _build_kb_tb_typing_index(project_root_text: str) -> dict[str, list[dict]]:
+    bundle = load_knowledge_base_bundle(project_root_text)
+    collections = bundle.get("collections") if isinstance(bundle, dict) else {}
+    typing_rules = collections.get("typing_rules") if isinstance(collections, dict) else []
+    index: dict[str, list[dict]] = {}
+    for rule in typing_rules if isinstance(typing_rules, list) else []:
+        if not isinstance(rule, dict):
+            continue
+        if str(rule.get("pathogen_id") or "").strip() != "mycobacterium_tuberculosis":
+            continue
+        candidate_values = [
+            rule.get("serotype"),
+            rule.get("subtype"),
+            *[value for value in (rule.get("aliases") or []) if isinstance(value, str)],
+        ]
+        if str(rule.get("level") or "").strip() == "broad_type":
+            candidate_values.append(rule.get("broad_type"))
+        for value in candidate_values:
+            normalized = _normalize_serotype_lookup_text(value)
+            if not normalized:
+                continue
+            bucket = index.setdefault(normalized, [])
+            if rule not in bucket:
+                bucket.append(rule)
+    return index
+
+
+def _tb_typing_rule_to_summary_item(rule: dict, matched_on: object) -> dict:
+    regional = rule.get("regional_distribution") if isinstance(rule.get("regional_distribution"), list) else []
+    markers = rule.get("key_markers") if isinstance(rule.get("key_markers"), list) else []
+    return {
+        "species": str(rule.get("species") or "").strip(),
+        "common_name": str(rule.get("common_name") or "").strip(),
+        "panel": str(rule.get("panel") or "-"),
+        "serotype": str(rule.get("serotype") or rule.get("subtype") or rule.get("broad_type") or "").strip(),
+        "matched_on": str(matched_on or rule.get("serotype") or rule.get("subtype") or "").strip(),
+        "level": str(rule.get("level") or "").strip(),
+        "broad_type": str(rule.get("broad_type") or "").strip(),
+        "subtype": str(rule.get("subtype") or "").strip(),
+        "reference_count": str(rule.get("reference_count") or "0"),
+        "reference_accessions": [str(item).strip() for item in (rule.get("reference_accessions") or []) if str(item).strip()],
+        "references": [item for item in (rule.get("references") or []) if isinstance(item, dict)][:8],
+        "virulence": [],
+        "resistance": [],
+        "regional": [str(item).strip() for item in regional if str(item).strip()],
+        "key_markers": [str(item).strip() for item in markers if str(item).strip()],
+        "interpretation": str(rule.get("interpretation") or "").strip(),
+    }
+
+
+def _tb_typing_specificity(rule: dict) -> tuple[int, int]:
+    level = str(rule.get("level") or "").strip().lower()
+    level_rank = {
+        "sublineage": 4,
+        "lineage": 3,
+        "subtype": 2,
+        "broad_type": 1,
+    }.get(level, 0)
+    label = str(rule.get("subtype") or rule.get("serotype") or "").strip()
+    dot_count = label.count(".")
+    return (level_rank, dot_count)
+
+
+def _build_tb_knowledge_summary(project_root_text: str, species_name: object, typing_values: list[object]) -> dict:
+    normalized_species = _normalize_taxonomy_lookup_name(species_name)
+    if normalized_species not in {
+        "mycobacterium tuberculosis",
+        "mtuberculosis",
+        "mtb",
+        "tb",
+    }:
+        return {"headline": "", "items": []}
+    index = _build_kb_tb_typing_index(project_root_text)
+    ordered_matches: list[tuple[str, dict]] = []
+    seen_ids: set[str] = set()
+    for value in typing_values:
+        normalized = _normalize_serotype_lookup_text(value)
+        if not normalized:
+            continue
+        for rule in index.get(normalized, []):
+            rule_id = str(rule.get("id") or "").strip()
+            if not rule_id or rule_id in seen_ids:
+                continue
+            seen_ids.add(rule_id)
+            ordered_matches.append((str(value or "").strip(), rule))
+    if not ordered_matches:
+        broad_rule = next((
+            rule for rule in index.get("mtbc", [])
+            if isinstance(rule, dict) and str(rule.get("level") or "").strip() == "broad_type"
+        ), None)
+        if broad_rule:
+            ordered_matches.append(("MTBC", broad_rule))
+    if not ordered_matches:
+        return {"headline": "", "items": []}
+
+    best_match = max(ordered_matches, key=lambda item: _tb_typing_specificity(item[1]))
+    best_rule = best_match[1]
+    best_specificity = _tb_typing_specificity(best_rule)
+    retained_matches = [
+        item for item in ordered_matches
+        if _tb_typing_specificity(item[1]) == best_specificity
+    ]
+    items = [_tb_typing_rule_to_summary_item(rule, matched_on) for matched_on, rule in retained_matches[:2]]
+    if not items:
+        return {"headline": "", "items": []}
+    headline = "当前结核家系结果已命中知识库，可结合家系背景、地区分布和关键标记做流行病学解释。"
+    top_labels = [item.get("serotype") for item in items if str(item.get("serotype") or "").strip()]
+    if top_labels:
+        headline = f"当前结核家系结果已命中知识库中的 {' / '.join(top_labels)} 条目，可直接补充分子流调背景解释。"
+    return {"headline": headline, "items": items}
+
+
+@lru_cache(maxsize=4)
+def _build_kb_pathogen_profile_index(project_root_text: str) -> dict[str, dict]:
+    bundle = load_knowledge_base_bundle(project_root_text)
+    collections = bundle.get("collections") if isinstance(bundle, dict) else {}
+    pathogens = collections.get("pathogens") if isinstance(collections, dict) else []
+    index: dict[str, dict] = {}
+    for pathogen in pathogens if isinstance(pathogens, list) else []:
+        if not isinstance(pathogen, dict):
+            continue
+        pathogen_id = str(pathogen.get("id") or "").strip()
+        if pathogen_id:
+            index[pathogen_id] = pathogen
+    return index
+
+
+def _lookup_kb_pathogen_profile(project_root_text: str, pathogen_id: str) -> dict | None:
+    if not project_root_text or not pathogen_id:
+        return None
+    return _build_kb_pathogen_profile_index(project_root_text).get(str(pathogen_id).strip())
+
+
+def _first_table_value(table: dict, candidates: list[str]) -> str:
+    columns = table.get("columns") if isinstance(table, dict) else []
+    rows = table.get("rows") if isinstance(table, dict) else []
+    if not isinstance(columns, list) or not isinstance(rows, list) or not rows:
+        return ""
+    first_row = rows[0] if isinstance(rows[0], list) else []
+    if not isinstance(first_row, list):
+        return ""
+    for column in candidates:
+        if column not in columns:
+            continue
+        index = columns.index(column)
+        if index >= len(first_row):
+            continue
+        value = str(first_row[index] or "").strip()
+        if value and value not in {"-", "--", "False", "false", "none", "None"}:
+            return value
+    return ""
+
+
+def _infer_priority_serotype_species(species_value: object, serotype_result: dict | None, checkm_info: dict | None = None) -> str:
+    species_text = str(species_value or "").strip()
+    normalized = _normalize_taxonomy_lookup_name(species_text)
+    if normalized and normalized not in {"false", "-", "none", "--"}:
+        return species_text
+    checkm_candidates = [
+        (checkm_info or {}).get("species_name") if isinstance(checkm_info, dict) else "",
+        (checkm_info or {}).get("mlst_species_name") if isinstance(checkm_info, dict) else "",
+    ]
+    for value in checkm_candidates:
+        text = str(value or "").strip()
+        normalized_text = _normalize_taxonomy_lookup_name(text)
+        if "salmonella" in normalized_text:
+            return "Salmonella enterica"
+        if normalized_text and normalized_text not in {"false", "-", "none", "--"}:
+            return text
+    serotype_table = {
+        "columns": (serotype_result or {}).get("columns", []) if isinstance(serotype_result, dict) else [],
+        "rows": (serotype_result or {}).get("rows", []) if isinstance(serotype_result, dict) else [],
+    }
+    serotype_clues = [
+        _first_table_value(serotype_table, ["亚型全称", "菌种", "血清型注释信息(simple)", "血清型注释信息(details)", "血清型"]),
+    ]
+    for clue in serotype_clues:
+        normalized_clue = _normalize_serotype_lookup_text(clue)
+        if "salmonella" in normalized_clue or "沙门" in normalized_clue:
+            return "Salmonella enterica"
+        for alias_values in SALMONELLA_SEROVAR_ALIAS_MAP.values():
+            if normalized_clue in {_normalize_serotype_lookup_text(item) for item in alias_values}:
+                return "Salmonella enterica"
+    return species_text
+
+
+def _priority_serotype_candidates(serotype_value: object, serotype_result: dict | None) -> list[str]:
+    candidates: list[str] = []
+
+    def _push(value: object) -> None:
+        text = str(value or "").strip()
+        if not text or text in {"-", "--", "False", "false", "none", "None"}:
+            return
+        for alias in _expand_salmonella_serovar_aliases(text):
+            key = _normalize_serotype_lookup_text(alias)
+            if key and key not in {_normalize_serotype_lookup_text(item) for item in candidates}:
+                candidates.append(alias)
+        key = _normalize_serotype_lookup_text(text)
+        if key and key not in {_normalize_serotype_lookup_text(item) for item in candidates}:
+            candidates.append(text)
+        for token in _tokenize_serotype_values(text):
+            if token and token not in {_normalize_serotype_lookup_text(item) for item in candidates}:
+                candidates.append(token)
+
+    _push(serotype_value)
+    columns = (serotype_result or {}).get("columns", []) if isinstance(serotype_result, dict) else []
+    rows = (serotype_result or {}).get("rows", []) if isinstance(serotype_result, dict) else []
+    first_row = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], list) else []
+    for column in ["亚型全称", "菌种", "血清型注释信息(simple)", "血清型注释信息(details)", "血清型"]:
+        if column in columns:
+            index = columns.index(column)
+            if index < len(first_row):
+                _push(first_row[index])
+    return candidates
+
+
+def _enrich_priority_serotype_rows(project_root_text: str, table: dict, serotype_result: dict | None = None, checkm_info: dict | None = None) -> dict:
+    columns = table.get("columns") if isinstance(table, dict) else []
+    rows = table.get("rows") if isinstance(table, dict) else []
+    if not isinstance(columns, list) or not isinstance(rows, list) or not columns:
+        return {"columns": columns or [], "rows": rows or []}
+    species_index = columns.index("物种") if "物种" in columns else -1
+    serotype_index = columns.index("血清型") if "血清型" in columns else -1
+    if species_index < 0 or serotype_index < 0:
+        return {"columns": columns, "rows": rows}
+    extra_columns = [
+        "知识库血清型面板",
+        "知识库命中血清型",
+        "血清型-毒力关联",
+        "血清型-耐药关联",
+        "血清型-地域分布",
+        "血清型知识库提示",
+    ]
+    enriched_rows: list[list[str]] = []
+    for row in rows:
+        current = list(row) if isinstance(row, list) else [str(row.get(column, "") or "") for column in columns]
+        species_value = current[species_index] if species_index < len(current) else ""
+        serotype_value = current[serotype_index] if serotype_index < len(current) else ""
+        resolved_species = _infer_priority_serotype_species(species_value, serotype_result, checkm_info)
+        if (not str(serotype_value or "").strip() or str(serotype_value or "").strip() in {"-", "--"}) and serotype_result:
+            fallback_serotype = _first_table_value(serotype_result, ["亚型全称", "血清型注释信息(simple)", "血清型", "菌种"])
+            if fallback_serotype:
+                serotype_value = fallback_serotype
+                if serotype_index < len(current):
+                    current[serotype_index] = fallback_serotype
+        if resolved_species and _normalize_taxonomy_lookup_name(species_value) in {"false", "-", "none", "--"} and species_index < len(current):
+            current[species_index] = resolved_species
+        match = None
+        for candidate_serotype in _priority_serotype_candidates(serotype_value, serotype_result):
+            match = _lookup_kb_serotype_association(project_root_text, resolved_species or species_value, candidate_serotype)
+            if match:
+                break
+        association = match.get("association") if isinstance(match, dict) else {}
+        panels = match.get("panels") if isinstance(match, dict) else []
+        panel_text = "-"
+        if isinstance(association, dict) and association.get("panel"):
+            panel_text = str(association.get("panel") or "-")
+        elif isinstance(panels, list) and panels:
+            panel_values = []
+            for item in panels:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("panel") or "").strip()
+                members = item.get("serotypes") if isinstance(item.get("serotypes"), list) else []
+                if title:
+                    panel_values.append(title)
+                elif members:
+                    panel_values.append(" / ".join(str(member).strip() for member in members if str(member).strip()))
+            panel_text = "；".join([value for value in panel_values if value]) or "-"
+        enriched_rows.append(current + [
+            panel_text,
+            str(association.get("serotype") or "-"),
+            "；".join(association.get("virulence_associations") or []) if isinstance(association.get("virulence_associations"), list) and association.get("virulence_associations") else "-",
+            "；".join(association.get("resistance_associations") or []) if isinstance(association.get("resistance_associations"), list) and association.get("resistance_associations") else "-",
+            "；".join(association.get("regional_distribution") or []) if isinstance(association.get("regional_distribution"), list) and association.get("regional_distribution") else "-",
+            str(association.get("interpretation") or "-"),
+        ])
+    return {"columns": columns + extra_columns, "rows": enriched_rows}
+
+
+def _extract_viral_serotype_candidates(serotype_result: dict) -> list[str]:
+    candidates: list[str] = []
+
+    def _push(value: object) -> None:
+        text = str(value or "").strip()
+        if not text or text in {"-", "--", "none", "None"}:
+            return
+        if text not in candidates:
+            candidates.append(text)
+        for token in _tokenize_serotype_values(text):
+            if token and token not in [_normalize_serotype_lookup_text(item) for item in candidates]:
+                candidates.append(token)
+
+    if not isinstance(serotype_result, dict):
+        return candidates
+
+    mode = str(serotype_result.get("mode") or "").strip()
+    if mode == "hadv_typing":
+        # For HAdV, the knowledge-summary primary target should be the final
+        # total typing conclusion rather than PHF gene-level component types.
+        _push(serotype_result.get("predicted_clade"))
+        _push(serotype_result.get("predicted_serotype"))
+        notes = str(serotype_result.get("notes") or "").strip()
+        if notes:
+            for pattern in [
+                r"总分型：([^；]+)",
+                r"自动选择参考型别：([^；]+)",
+            ]:
+                for matched in re.findall(pattern, notes):
+                    _push(matched)
+        return candidates
+
+    ordered_keys = [
+        "predicted_serotype",
+        "predicted_subtype",
+        "predicted_clade",
+        "predicted_group",
+        "predicted_lineage",
+        "influenza_type",
+        "ha_subtype",
+        "na_subtype",
+        "predicted_outbreak",
+    ]
+    if mode == "bandavirus_typing":
+        ordered_keys = [
+            "predicted_group",
+            "predicted_clade",
+            "predicted_lineage",
+            "predicted_serotype",
+            "predicted_subtype",
+            "influenza_type",
+            "ha_subtype",
+            "na_subtype",
+            "predicted_outbreak",
+        ]
+
+    for key in ordered_keys:
+        _push(serotype_result.get(key))
+
+    summary_cards = serotype_result.get("summary_cards")
+    if isinstance(summary_cards, list):
+        for item in summary_cards:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            value = item.get("value")
+            if not label:
+                continue
+            if any(
+                keyword in label
+                for keyword in [
+                    "亚型",
+                    "分型",
+                    "Lineage",
+                    "Genotype",
+                    "Clade",
+                    "病毒属",
+                    "病毒种",
+                    "Penton",
+                    "Hexon",
+                    "Fiber",
+                ]
+            ) and not any(
+                skip in label
+                for skip in [
+                    "覆盖",
+                    "QC",
+                    "参考序列",
+                    "最近参考",
+                    "注释文件",
+                    "平均深度",
+                    "支持 reads",
+                    "覆盖碱基",
+                ]
+            ):
+                _push(value)
+
+    notes = str(serotype_result.get("notes") or "").strip()
+    if notes:
+        for pattern in [
+            r"自动选择参考型别：([^；]+)",
+            r"双位点分型：([^；]+)",
+            r"RdRp/VP1：([^；]+)",
+            r"大亚型：([^；]+)",
+            r"大类分型：([^；]+)",
+            r"S 子亚型：([^；]+)",
+            r"A_F\(LMS\)：([^；]+)",
+            r"CJ\(LMS\)：([^；]+)",
+            r"G/P 分型：([^；]+)",
+            r"组合分型：([^；]+)",
+            r"总分型：([^；]+)",
+            r"ORF2 分型：([^；]+)",
+            r"病毒种：([^；]+)",
+        ]:
+            for matched in re.findall(pattern, notes):
+                _push(matched)
+
+    return candidates
+
+
+def _virus_report_template_category(serotype_result: dict) -> str:
+    mode = str(serotype_result.get("mode") or "").strip()
+    if mode == "influenza_typing":
+        return "respiratory"
+    if mode == "monkeypox_nextclade":
+        return "contact-transmitted"
+    if mode == "hepatovirus_typing":
+        return "hepatitis"
+    if mode in {"bandavirus_typing", "orthohantavirus_typing"}:
+        return "natural-focus"
+    if mode in {"denv_nextclade", "zikav_nextclade", "chikv_nextclade"}:
+        return "vector-borne"
+    if mode == "hiv_resistance":
+        return "bloodborne"
+    if mode in {"rsv_nextclade", "hmpv_nextclade", "hpiv_typing", "hadv_typing", "rhinovirus_typing", "seasonal_hcov_typing"}:
+        return "respiratory"
+    if mode in {"norovirus_typing", "enterovirus_typing", "rotavirus_typing", "astroviridae_typing"}:
+        return "enteric"
+    return "general"
+
+
+def _entry_matches_virus_report_mode(entry: dict, mode: str) -> bool:
+    match = entry.get("match") if isinstance(entry.get("match"), dict) else {}
+    modes = match.get("modes")
+    if not isinstance(modes, list):
+        return False
+    return mode in {str(item or "").strip() for item in modes}
+
+
+def _normalize_report_template_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item or "").strip() for item in value if str(item or "").strip()]
+
+
+def _sanitize_virus_report_template_payload(payload: dict, base: dict | None = None) -> dict:
+    base = base or {}
+    sanitized = dict(base)
+    for key in ["name", "category", "clinicalRisk", "cdcRisk", "evidenceBasis", "clinicalMeaning", "cdcMeaning"]:
+        value = str(payload.get(key, sanitized.get(key, "")) or "").strip()
+        if key in {"clinicalMeaning", "cdcMeaning"} and len(value) > 1200:
+            raise ValidationError("报告意义文本过长，请控制在 1200 字以内")
+        sanitized[key] = value
+    for key in ["clinicalRecommendations", "cdcRecommendations"]:
+        source = payload.get(key, sanitized.get(key, []))
+        items = _normalize_report_template_list(source)
+        if len(items) > 8:
+            raise ValidationError("建议条目最多保留 8 条")
+        if any(len(item) > 300 for item in items):
+            raise ValidationError("单条建议请控制在 300 字以内")
+        sanitized[key] = items
+    sanitized["id"] = str(base.get("id") or payload.get("id") or "").strip()
+    sanitized["modes"] = _normalize_report_template_list(base.get("modes") or payload.get("modes"))
+    sanitized["source"] = str(payload.get("source") or base.get("source") or "default").strip()
+    return sanitized
+
+
+def _load_virus_report_template_overrides(store: PortalStore | None = None) -> dict[str, dict]:
+    active_store = store
+    if active_store is None:
+        try:
+            active_store = current_app.config.get("PORTAL_STORE")
+        except RuntimeError:
+            active_store = None
+    if active_store is None:
+        return {}
+    raw_value = str(active_store.get_setting(VIRUS_REPORT_TEMPLATE_SETTING_KEY, "[]") or "[]").strip()
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, list):
+        return {}
+    overrides: dict[str, dict] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        template_id = str(item.get("id") or "").strip()
+        if template_id:
+            overrides[template_id] = item
+    return overrides
+
+
+def _list_virus_report_templates(store: PortalStore | None = None) -> list[dict]:
+    overrides = _load_virus_report_template_overrides(store)
+    history_map = _load_virus_report_template_history(store)
+    templates: list[dict] = []
+    for base in DEFAULT_VIRUS_REPORT_TEMPLATES:
+        template_id = str(base.get("id") or "").strip()
+        merged = dict(base)
+        if isinstance(overrides.get(template_id), dict):
+            merged.update(overrides[template_id])
+            merged["source"] = "custom"
+        else:
+            merged["source"] = "default"
+        template = _sanitize_virus_report_template_payload(merged, base)
+        template["history"] = history_map.get(template_id, [])[:8]
+        templates.append(template)
+    return templates
+
+
+def _load_virus_report_template_history(store: PortalStore | None = None) -> dict[str, list[dict]]:
+    active_store = store
+    if active_store is None:
+        try:
+            active_store = current_app.config.get("PORTAL_STORE")
+        except RuntimeError:
+            active_store = None
+    if active_store is None:
+        return {}
+    raw_value = str(active_store.get_setting(VIRUS_REPORT_TEMPLATE_HISTORY_SETTING_KEY, "{}") or "{}").strip()
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    history: dict[str, list[dict]] = {}
+    for template_id, records in payload.items():
+        if not isinstance(template_id, str) or not isinstance(records, list):
+            continue
+        cleaned: list[dict] = []
+        for record in records:
+            if isinstance(record, dict):
+                cleaned.append(record)
+        history[template_id] = cleaned[:20]
+    return history
+
+
+def _record_virus_report_template_history(store: PortalStore, template_id: str, action: str, snapshot: dict, actor: str = "") -> None:
+    history = _load_virus_report_template_history(store)
+    records = history.get(template_id, [])
+    event = {
+        "eventId": f"vrt_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}",
+        "action": action,
+        "actor": str(actor or "").strip() or "system",
+        "createdAt": datetime.now().isoformat(timespec="seconds"),
+        "snapshot": _sanitize_virus_report_template_payload(snapshot, snapshot),
+    }
+    history[template_id] = [event] + records
+    history[template_id] = history[template_id][:20]
+    store.set_setting(VIRUS_REPORT_TEMPLATE_HISTORY_SETTING_KEY, json.dumps(history, ensure_ascii=False, indent=2))
+
+
+def _save_virus_report_template_override(store: PortalStore, template_id: str, payload: dict, actor: str = "", history_action: str = "save") -> dict:
+    base = next((item for item in DEFAULT_VIRUS_REPORT_TEMPLATES if str(item.get("id") or "").strip() == template_id), None)
+    if not isinstance(base, dict):
+        raise ValidationError("报告模板不存在")
+    sanitized = _sanitize_virus_report_template_payload(payload, base)
+    sanitized["source"] = "custom"
+    overrides = _load_virus_report_template_overrides(store)
+    overrides[template_id] = sanitized
+    ordered = [overrides[str(item.get("id") or "").strip()] for item in DEFAULT_VIRUS_REPORT_TEMPLATES if str(item.get("id") or "").strip() in overrides]
+    store.set_setting(VIRUS_REPORT_TEMPLATE_SETTING_KEY, json.dumps(ordered, ensure_ascii=False, indent=2))
+    if history_action:
+        _record_virus_report_template_history(store, template_id, history_action, sanitized, actor)
+    return sanitized
+
+
+def _reset_virus_report_template_override(store: PortalStore, template_id: str, actor: str = "") -> dict:
+    base = next((item for item in DEFAULT_VIRUS_REPORT_TEMPLATES if str(item.get("id") or "").strip() == template_id), None)
+    if not isinstance(base, dict):
+        raise ValidationError("报告模板不存在")
+    overrides = _load_virus_report_template_overrides(store)
+    overrides.pop(template_id, None)
+    ordered = [overrides[str(item.get("id") or "").strip()] for item in DEFAULT_VIRUS_REPORT_TEMPLATES if str(item.get("id") or "").strip() in overrides]
+    store.set_setting(VIRUS_REPORT_TEMPLATE_SETTING_KEY, json.dumps(ordered, ensure_ascii=False, indent=2))
+    sanitized = _sanitize_virus_report_template_payload(dict(base, source="default"), base)
+    _record_virus_report_template_history(store, template_id, "reset", sanitized, actor)
+    return sanitized
+
+
+def _rollback_virus_report_template_override(store: PortalStore, template_id: str, event_id: str, actor: str = "") -> dict:
+    history = _load_virus_report_template_history(store)
+    record = next((item for item in history.get(template_id, []) if str(item.get("eventId") or "") == event_id), None)
+    if not isinstance(record, dict) or not isinstance(record.get("snapshot"), dict):
+        raise ValidationError("未找到可回滚的模板版本")
+    snapshot = dict(record["snapshot"])
+    snapshot["source"] = "custom"
+    item = _save_virus_report_template_override(store, template_id, snapshot, actor, "rollback")
+    return item
+
+
+def _build_virus_report_template_summary(project_root_text: str, serotype_result: dict) -> dict:
+    if not isinstance(serotype_result, dict):
+        return {"status": "empty"}
+    entries = _list_virus_report_templates()
+    if not entries:
+        return {"status": "empty"}
+    mode = str(serotype_result.get("mode") or "").strip()
+    category = _virus_report_template_category(serotype_result)
+    selected = next((entry for entry in entries if isinstance(entry, dict) and mode in set(entry.get("modes") or [])), None)
+    if selected is None:
+        selected = next((entry for entry in entries if isinstance(entry, dict) and str(entry.get("category") or "").strip() == category), None)
+    if not isinstance(selected, dict):
+        return {"status": "empty"}
+    return {
+        "status": "ready",
+        "source": str(selected.get("source") or "default").strip(),
+        "id": str(selected.get("id") or "").strip(),
+        "category": str(selected.get("category") or category or "general").strip(),
+        "clinicalRisk": str(selected.get("clinicalRisk") or "").strip(),
+        "cdcRisk": str(selected.get("cdcRisk") or "").strip(),
+        "evidenceBasis": str(selected.get("evidenceBasis") or "").strip(),
+        "clinicalMeaning": str(selected.get("clinicalMeaning") or "").strip(),
+        "cdcMeaning": str(selected.get("cdcMeaning") or "").strip(),
+        "clinicalRecommendations": _normalize_report_template_list(selected.get("clinicalRecommendations")),
+        "cdcRecommendations": _normalize_report_template_list(selected.get("cdcRecommendations")),
+    }
+
+
+def _build_viral_serotype_knowledge_summary(project_root_text: str, species_name: object, serotype_result: dict) -> dict:
+    if not project_root_text or not isinstance(serotype_result, dict):
+        return {"headline": "", "items": []}
+    mode = str(serotype_result.get("mode") or "").strip()
+    resolved_species_name = species_name
+    if mode == "hiv_resistance":
+        broad_type = str(serotype_result.get("predicted_group") or "").strip().upper()
+        subtype = str(serotype_result.get("predicted_subtype") or serotype_result.get("predicted_clade") or "").strip()
+        items: list[dict] = []
+        broad_rule = _lookup_kb_hiv_typing_rule(project_root_text, broad_type, broad_type)
+        subtype_rule = (
+            _lookup_kb_hiv_typing_rule(project_root_text, broad_type, subtype)
+            if broad_type == "HIV-1" and subtype and subtype not in {"-", "--", broad_type}
+            else None
+        )
+        if isinstance(broad_rule, dict):
+            items.append(_hiv_typing_rule_to_summary_item(broad_rule, broad_type))
+        if isinstance(subtype_rule, dict) and subtype_rule.get("id") != (broad_rule or {}).get("id"):
+            items.append(_hiv_typing_rule_to_summary_item(subtype_rule, subtype))
+        if not items:
+            return {"headline": "", "items": []}
+        species_label = str((subtype_rule or broad_rule or {}).get("species") or species_name or "HIV").strip()
+        if broad_type == "HIV-1" and subtype and subtype not in {"-", "--", broad_type}:
+            headline = f"当前样本知识库先命中 {broad_type} 大亚型，并进一步关联到 HIV-1 {subtype} 子亚型 / CRF 背景。"
+        elif broad_type:
+            headline = f"当前样本知识库命中 {species_label} 的 {broad_type} 大亚型背景。"
+        else:
+            headline = f"当前样本命中 {species_label} 分型知识库。"
+        return {"headline": headline, "items": items[:4]}
+    if mode == "hepatovirus_typing":
+        broad_type = str(serotype_result.get("predicted_group") or "").strip().upper()
+        subtype = str(serotype_result.get("predicted_subtype") or serotype_result.get("predicted_clade") or "").strip()
+        items: list[dict] = []
+        broad_rule = _lookup_kb_hepatitis_typing_rule(project_root_text, broad_type, broad_type)
+        subtype_rule = _lookup_kb_hepatitis_typing_rule(project_root_text, broad_type, subtype) if subtype and subtype not in {"-", "--"} else None
+        if isinstance(broad_rule, dict):
+            items.append(_hepatitis_typing_rule_to_summary_item(broad_rule, broad_type))
+        if isinstance(subtype_rule, dict) and subtype_rule.get("id") != (broad_rule or {}).get("id"):
+            items.append(_hepatitis_typing_rule_to_summary_item(subtype_rule, subtype))
+        if not items:
+            return {"headline": "", "items": []}
+        species_label = str((subtype_rule or broad_rule or {}).get("species") or species_name or "肝炎病毒").strip()
+        if broad_type and subtype and subtype not in {"-", "--", broad_type}:
+            headline = f"当前样本知识库命中 {broad_type} 大亚型，并进一步关联到 {broad_type} {subtype} 子亚型/基因型背景。"
+        elif broad_type:
+            headline = f"当前样本知识库命中 {species_label} 的 {broad_type} 大亚型背景。"
+        else:
+            headline = f"当前样本命中 {species_label} 分型知识库。"
+        return {"headline": headline, "items": items[:4]}
+    normalized_species = _normalize_taxonomy_lookup_name(resolved_species_name)
+    if not normalized_species or normalized_species in {"false", "-", "none"}:
+        return {"headline": "", "items": []}
+    candidates = _extract_viral_serotype_candidates(serotype_result)
+    if not candidates:
+        return {"headline": "", "items": []}
+
+    items: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    orthohantavirus_hfrs_types = {"HTNV", "SEOV", "DOBV", "PUUV", "AMRV"}
+    orthohantavirus_hps_types = {"ANDV", "BAYV", "BCCV", "CASV", "SNVV"}
+    for candidate in candidates:
+        match = _lookup_kb_serotype_association(project_root_text, resolved_species_name, candidate)
+        association = match.get("association") if isinstance(match, dict) else {}
+        if not isinstance(association, dict) or not association:
+            continue
+        matched_serotype = str(association.get("serotype") or "").strip()
+        pathogen_id = str((match or {}).get("pathogen_id") or "").strip()
+        interpretation_text = str(association.get("interpretation") or "").strip()
+        virulence_values = list(association.get("virulence_associations") or []) if isinstance(association.get("virulence_associations"), list) else []
+        regional_values = list(association.get("regional_distribution") or []) if isinstance(association.get("regional_distribution"), list) else []
+        if pathogen_id == "orthohantavirus":
+            profile_id = ""
+            if matched_serotype.upper() in orthohantavirus_hfrs_types:
+                profile_id = "hantaviruses_hfrs"
+            elif matched_serotype.upper() in orthohantavirus_hps_types:
+                profile_id = "hantaviruses_pulmonary_syndrome"
+            profile = _lookup_kb_pathogen_profile(project_root_text, profile_id) if profile_id else None
+            if isinstance(profile, dict):
+                clinical_text = str(profile.get("clinical_significance") or "").strip()
+                public_health_text = str(profile.get("public_health_significance") or "").strip()
+                note_values = profile.get("interpretation_notes") if isinstance(profile.get("interpretation_notes"), list) else []
+                extra_parts = [value for value in [clinical_text, public_health_text] if value]
+                if extra_parts:
+                    interpretation_text = "；".join([part for part in [interpretation_text, *extra_parts] if part])
+                for value in note_values:
+                    text = str(value or "").strip()
+                    if text and text not in virulence_values:
+                        virulence_values.append(text)
+        key = (
+            pathogen_id,
+            matched_serotype or _normalize_serotype_lookup_text(candidate),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(
+            {
+                "species": str((match or {}).get("species") or resolved_species_name or "-"),
+                "common_name": str((match or {}).get("common_name") or "").strip(),
+                "panel": str(association.get("panel") or "-"),
+                "serotype": matched_serotype or str(candidate).strip(),
+                "matched_on": str(candidate).strip(),
+                "virulence": virulence_values,
+                "resistance": association.get("resistance_associations") or [],
+                "regional": regional_values,
+                "interpretation": interpretation_text,
+            }
+        )
+        if len(items) >= 4:
+            break
+
+    if not items:
+        return {"headline": "", "items": []}
+    primary = items[0]
+    primary_serotype = str(primary.get("serotype") or primary.get("matched_on") or "").strip()
+    primary_species = str(primary.get("species") or species_name or "当前病毒").strip()
+    headline = ""
+    if mode == "hepatovirus_typing":
+        broad_type = str(serotype_result.get("predicted_group") or "").strip()
+        hav_subtype = str(serotype_result.get("predicted_clade") or "").strip()
+        if broad_type and broad_type not in {"-", "--"} and hav_subtype and hav_subtype not in {"-", "--"}:
+            headline = f"当前样本知识库首先命中 {broad_type} 大亚型，并进一步匹配到 HAV {hav_subtype} 子亚型背景。"
+        elif broad_type and broad_type not in {"-", "--"}:
+            headline = f"当前样本知识库首先命中 {broad_type} 大亚型背景。"
+        elif primary_serotype:
+            headline = f"当前样本知识库命中 {primary_species} 的 {primary_serotype} 分型背景。"
+    elif primary_serotype:
+        headline = f"当前病毒分型结果提示样本更接近 {primary_species} 的 {primary_serotype} 分型背景。"
+    return {"headline": headline, "items": items}
+
+
+@lru_cache(maxsize=4)
+def _build_kb_taxonomy_index(project_root_text: str) -> dict[str, list[dict]]:
+    bundle = load_knowledge_base_bundle(project_root_text)
+    collections = bundle.get("collections") if isinstance(bundle, dict) else {}
+    pathogens = collections.get("pathogens") if isinstance(collections, dict) else []
+    index: dict[str, list[dict]] = {}
+    for pathogen in pathogens if isinstance(pathogens, list) else []:
+        if not isinstance(pathogen, dict):
+            continue
+        payload = _taxonomy_link_payload(pathogen)
+        if not payload:
+            continue
+        candidate_names: list[str] = []
+        for value in [
+            pathogen.get("species"),
+            payload.get("scientific_name"),
+            payload.get("genus"),
+            payload.get("species_rank"),
+            *([item for item in (pathogen.get("aliases") or []) if isinstance(item, str)]),
+        ]:
+            normalized = _normalize_taxonomy_lookup_name(value)
+            if normalized and normalized not in candidate_names:
+                candidate_names.append(normalized)
+        for name in candidate_names:
+            index.setdefault(name, []).append(payload)
+    return index
+
+
+def _choose_taxonomy_match(candidates: list[dict], query_name: str, genus_name: str = "") -> dict | None:
+    normalized_query = _normalize_taxonomy_lookup_name(query_name)
+    normalized_genus = _normalize_taxonomy_lookup_name(genus_name)
+    ranked: list[tuple[int, dict]] = []
+    for candidate in candidates:
+        score = 0
+        scientific_name = _normalize_taxonomy_lookup_name(candidate.get("scientific_name"))
+        species_name = _normalize_taxonomy_lookup_name(candidate.get("species"))
+        candidate_genus = _normalize_taxonomy_lookup_name(candidate.get("genus"))
+        rank = str(candidate.get("rank") or "").lower()
+        if normalized_query and scientific_name == normalized_query:
+            score += 120
+        if normalized_query and species_name == normalized_query:
+            score += 110
+        if normalized_query and candidate_genus == normalized_query:
+            score += 60
+        if normalized_genus and candidate_genus == normalized_genus:
+            score += 40
+        if rank == "species":
+            score += 15
+        elif rank == "genus":
+            score += 5
+        ranked.append((score, candidate))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked[0][1] if ranked and ranked[0][0] > 0 else None
+
+
+def _lookup_kb_taxonomy(index: dict[str, list[dict]] | None, species_name: str = "", genus_name: str = "") -> dict | None:
+    if not index:
+        return None
+    candidate_keys: list[str] = []
+    for value in [species_name, genus_name]:
+        normalized = _normalize_taxonomy_lookup_name(value)
+        if normalized and normalized not in candidate_keys:
+            candidate_keys.append(normalized)
+    for key in candidate_keys:
+        candidates = index.get(key) or []
+        match = _choose_taxonomy_match(candidates, species_name or key, genus_name)
+        if match:
+            return match
+    return None
+
+
+def _normalize_kb_token(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _truncate_list(items: list[object], limit: int = 6) -> list[str]:
+    values: list[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if not text or text == "-" or text in values:
+            continue
+        values.append(text)
+        if len(values) >= limit:
+            break
+    return values
+
+
+def _joined_text(values: list[object], fallback: str = "--") -> str:
+    cleaned = [str(value or "").strip() for value in values if str(value or "").strip() and str(value or "").strip() != "-"]
+    return "、".join(cleaned) if cleaned else fallback
+
+
+def _kb_gene_name_matches(detected_name: object, target_name: object) -> bool:
+    detected = _normalize_kb_token(detected_name)
+    target = _normalize_kb_token(target_name)
+    if not detected or not target:
+        return False
+    if detected == target:
+        return True
+    if len(target) >= 4 and detected.startswith(target):
+        return True
+    if len(detected) >= 4 and target.startswith(detected):
+        return True
+    return False
+
+
+@lru_cache(maxsize=4)
+def _build_kb_interpretation_context(project_root_text: str) -> dict:
+    bundle = load_knowledge_base_bundle(project_root_text)
+    collections = bundle.get("collections") if isinstance(bundle, dict) else {}
+    pathogens = collections.get("pathogens") if isinstance(collections, dict) else []
+    gene_rules = collections.get("gene_rules") if isinstance(collections, dict) else []
+    event_rules = collections.get("event_rules") if isinstance(collections, dict) else []
+
+    pathogen_by_taxid: dict[str, dict] = {}
+    pathogen_by_name: dict[str, dict] = {}
+    for pathogen in pathogens if isinstance(pathogens, list) else []:
+        if not isinstance(pathogen, dict):
+            continue
+        taxid = str(pathogen.get("taxid") or "").strip()
+        if taxid:
+            pathogen_by_taxid[taxid] = pathogen
+        names = [
+            pathogen.get("species"),
+            pathogen.get("common_name"),
+            *((pathogen.get("aliases") or []) if isinstance(pathogen.get("aliases"), list) else []),
+        ]
+        ncbi = pathogen.get("ncbi_taxonomy") if isinstance(pathogen.get("ncbi_taxonomy"), dict) else {}
+        terminal = ncbi.get("terminal") if isinstance(ncbi.get("terminal"), dict) else {}
+        classification = ncbi.get("classification") if isinstance(ncbi.get("classification"), dict) else {}
+        names.extend([
+            ncbi.get("scientific_name"),
+            terminal.get("name"),
+            ((classification.get("genus") or {}) if isinstance(classification.get("genus"), dict) else {}).get("name"),
+            ((classification.get("species") or {}) if isinstance(classification.get("species"), dict) else {}).get("name"),
+        ])
+        for name in names:
+            normalized = _normalize_taxonomy_lookup_name(name)
+            if normalized and normalized not in pathogen_by_name:
+                pathogen_by_name[normalized] = pathogen
+
+    return {
+        "pathogen_by_taxid": pathogen_by_taxid,
+        "pathogen_by_name": pathogen_by_name,
+        "gene_rules": [item for item in gene_rules if isinstance(item, dict)],
+        "event_rules": [item for item in event_rules if isinstance(item, dict)],
+    }
+
+
+def _rank_species_rows(species_taxonomy: dict, subspecies_taxonomy: dict | None = None) -> list[dict]:
+    ranked: list[dict] = []
+    for dataset in (species_taxonomy or {}, subspecies_taxonomy or {}):
+        for row in dataset.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            species_name = str(row.get("种") or row.get("亚种") or row.get("NCBI种") or "").strip()
+            if not species_name or species_name == "-":
+                continue
+            ranked.append(row)
+    ranked.sort(
+        key=lambda item: (
+            int(item.get("序列数量数值") or 0),
+            float(item.get("比例数值") or 0.0),
+        ),
+        reverse=True,
+    )
+    return ranked
+
+
+def _match_kb_pathogen_profile(context: dict, row: dict | None) -> dict | None:
+    if not isinstance(row, dict):
+        return None
+    pathogen_by_taxid = context.get("pathogen_by_taxid") if isinstance(context.get("pathogen_by_taxid"), dict) else {}
+    pathogen_by_name = context.get("pathogen_by_name") if isinstance(context.get("pathogen_by_name"), dict) else {}
+    taxid = str(row.get("NCBI TaxID") or "").strip()
+    if taxid and taxid != "-" and taxid in pathogen_by_taxid:
+        return pathogen_by_taxid[taxid]
+    for value in [row.get("NCBI学名"), row.get("NCBI种"), row.get("种"), row.get("亚种"), row.get("属")]:
+        normalized = _normalize_taxonomy_lookup_name(value)
+        if normalized and normalized in pathogen_by_name:
+            return pathogen_by_name[normalized]
+    return None
+
+
+def _collect_detected_gene_hits(elements: dict, gene_type: str) -> list[dict]:
+    columns = elements.get("columns") or []
+    rows = elements.get("rows") or []
+    if not columns or not rows:
+        return []
+    gene_columns = ["基因名称", "毒力基因", "耐药基因", "Gene", "Best_Hit_ARO"]
+    category_columns = ["VF分类", "耐药药物", "Drug Class", "Drug", "Resistance Mechanism"]
+    hits: list[dict] = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        gene_name = ""
+        for column in gene_columns:
+            if column in columns:
+                index = columns.index(column)
+                gene_name = str(row[index] if index < len(row) else "").strip()
+                if gene_name and gene_name != "-":
+                    break
+        if not gene_name or gene_name == "-":
+            continue
+        category = ""
+        for column in category_columns:
+            if column in columns:
+                index = columns.index(column)
+                category = str(row[index] if index < len(row) else "").strip()
+                if category and category != "-":
+                    break
+        hits.append({
+            "gene_type": gene_type,
+            "gene_name": gene_name,
+            "category": category or "未分类",
+        })
+    return hits
+
+
+def _pathogen_name_pool(pathogen: dict | None) -> set[str]:
+    if not isinstance(pathogen, dict):
+        return set()
+    names = {
+        _normalize_taxonomy_lookup_name(pathogen.get("species")),
+        _normalize_taxonomy_lookup_name(pathogen.get("common_name")),
+    }
+    for item in pathogen.get("aliases") or []:
+        names.add(_normalize_taxonomy_lookup_name(item))
+    return {item for item in names if item}
+
+
+def _rule_applies_to_pathogen(rule: dict, pathogen: dict | None) -> bool:
+    if not isinstance(rule, dict):
+        return False
+    species_scope = rule.get("species_scope")
+    scope = rule.get("scope") if isinstance(rule.get("scope"), dict) else {}
+    scope_species = scope.get("species")
+    candidates = species_scope if isinstance(species_scope, list) else scope_species if isinstance(scope_species, list) else []
+    if not candidates:
+        return True
+    pathogen_names = _pathogen_name_pool(pathogen)
+    if not pathogen_names:
+        return False
+    for item in candidates:
+        if _normalize_taxonomy_lookup_name(item) in pathogen_names:
+            return True
+    return False
+
+
+def _evaluate_gene_rule_hits(context: dict, pathogen: dict | None, resistance_hits: list[dict], virulence_hits: list[dict]) -> list[dict]:
+    hits_by_type = {"ARG": resistance_hits, "VF": virulence_hits}
+    matched: list[dict] = []
+    for rule in context.get("gene_rules") or []:
+        gene_type = str(rule.get("gene_type") or "").upper()
+        if gene_type not in hits_by_type or not _rule_applies_to_pathogen(rule, pathogen):
+            continue
+        detected_names = []
+        for hit in hits_by_type[gene_type]:
+            if _kb_gene_name_matches(hit.get("gene_name"), rule.get("gene_name")):
+                detected_names.append(str(hit.get("gene_name") or "").strip())
+        if not detected_names:
+            continue
+        matched.append({
+            "id": str(rule.get("id") or "").strip(),
+            "gene_type": gene_type,
+            "gene_name": str(rule.get("gene_name") or "").strip(),
+            "risk_level": str(rule.get("risk_level") or "").strip().lower() or "medium",
+            "report_label": str(rule.get("report_label") or rule.get("gene_name") or "").strip(),
+            "functional_meaning": str(rule.get("functional_meaning") or "").strip(),
+            "evidence_strength": str(rule.get("evidence_strength") or "").strip().lower() or "medium",
+            "matched_hits": _truncate_list(detected_names, 6),
+        })
+    matched.sort(key=lambda item: (item.get("risk_level") == "high", item.get("evidence_strength") == "high", len(item.get("matched_hits") or [])), reverse=True)
+    return matched
+
+
+def _evaluate_single_event_condition(condition: dict, resistance_hits: list[dict], virulence_hits: list[dict], has_mge_signal: bool) -> tuple[bool, list[str]]:
+    if not isinstance(condition, dict):
+        return False, []
+    if condition.get("mobile_element_related") is True:
+        return has_mge_signal, (["移动元件相关信号"] if has_mge_signal else [])
+    gene_type = str(condition.get("gene_type") or "").upper()
+    gene_names = condition.get("gene_name_in")
+    if gene_type not in {"ARG", "VF"} or not isinstance(gene_names, list):
+        return False, []
+    source_hits = resistance_hits if gene_type == "ARG" else virulence_hits
+    matched_hits: list[str] = []
+    for target in gene_names:
+        for hit in source_hits:
+            if _kb_gene_name_matches(hit.get("gene_name"), target):
+                matched_hits.append(str(hit.get("gene_name") or "").strip())
+    return bool(matched_hits), _truncate_list(matched_hits, 8)
+
+
+def _evaluate_event_rule_hits(context: dict, pathogen: dict | None, resistance_hits: list[dict], virulence_hits: list[dict], mge_monitoring: dict) -> list[dict]:
+    has_mge_signal = int(((mge_monitoring.get("overview") or {}).get("total_hits")) or 0) > 0
+    matched: list[dict] = []
+    for rule in context.get("event_rules") or []:
+        if not _rule_applies_to_pathogen(rule, pathogen):
+            continue
+        trigger = rule.get("trigger") if isinstance(rule.get("trigger"), dict) else {}
+        all_conditions = trigger.get("all") if isinstance(trigger.get("all"), list) else []
+        any_conditions = trigger.get("any") if isinstance(trigger.get("any"), list) else []
+        matched_hits: list[str] = []
+        success = True
+        if all_conditions:
+            for condition in all_conditions:
+                condition_ok, condition_hits = _evaluate_single_event_condition(condition, resistance_hits, virulence_hits, has_mge_signal)
+                if not condition_ok:
+                    success = False
+                    break
+                matched_hits.extend(condition_hits)
+        if success and any_conditions:
+            any_success = False
+            for condition in any_conditions:
+                condition_ok, condition_hits = _evaluate_single_event_condition(condition, resistance_hits, virulence_hits, has_mge_signal)
+                if condition_ok:
+                    any_success = True
+                    matched_hits.extend(condition_hits)
+            success = any_success
+        if not success:
+            continue
+        interpretation = rule.get("interpretation") if isinstance(rule.get("interpretation"), dict) else {}
+        matched.append({
+            "id": str(rule.get("id") or "").strip(),
+            "title": str(rule.get("title") or "").strip(),
+            "priority": str(rule.get("priority") or "").strip(),
+            "summary": str(interpretation.get("summary") or "").strip(),
+            "risk_level": str(interpretation.get("risk_level") or "").strip().lower() or "medium",
+            "confidence": str(interpretation.get("confidence") or "").strip().lower() or "medium",
+            "recommendation": [str(item).strip() for item in (rule.get("recommendation") or []) if str(item).strip()],
+            "matched_hits": _truncate_list(matched_hits, 10),
+        })
+    matched.sort(key=lambda item: (item.get("risk_level") == "high", item.get("priority") == "P0", item.get("confidence") == "high"), reverse=True)
+    return matched
+
+
+def _summarize_typing_information(mlst_result: dict, serotype_result: dict) -> list[str]:
+    fragments: list[str] = []
+    rows = mlst_result.get("rows") or []
+    columns = mlst_result.get("columns") or []
+    if rows and columns:
+        first_row = rows[0] if isinstance(rows[0], list) else []
+        for key in ("ST型", "ST"):
+            if key in columns:
+                index = columns.index(key)
+                value = str(first_row[index] if index < len(first_row) else "").strip()
+                if value and value != "-":
+                    fragments.append(f"MLST：{value}")
+                    break
+    if isinstance(serotype_result, dict):
+        mode = str(serotype_result.get("mode") or "").strip()
+        if mode == "sars_cov_2_nextclade":
+            clade = str(serotype_result.get("predicted_clade") or "").strip()
+            pango = str(serotype_result.get("pango_lineage") or "").strip()
+            if clade and clade != "-":
+                fragments.append(f"Nextclade：{clade}")
+            if pango and pango != "-":
+                fragments.append(f"Pango：{pango}")
+            return fragments
+        if mode == "monkeypox_nextclade":
+            clade = str(serotype_result.get("predicted_clade") or "").strip()
+            lineage = str(serotype_result.get("predicted_lineage") or "").strip()
+            outbreak = str(serotype_result.get("predicted_outbreak") or "").strip()
+            if clade and clade != "-":
+                fragments.append(f"Nextclade：{clade}")
+            if lineage and lineage != "-":
+                fragments.append(f"Lineage：{lineage}")
+            if outbreak and outbreak != "-":
+                fragments.append(f"Outbreak：{outbreak}")
+            return fragments
+        predicted = str(serotype_result.get("predicted_serotype") or "").strip()
+        if predicted and predicted != "-":
+            fragments.append(f"血清型：{predicted}")
+        else:
+            rows = serotype_result.get("rows") or []
+            columns = serotype_result.get("columns") or []
+            first_row = rows[0] if rows and isinstance(rows[0], list) else []
+            for key in ("血清型", "Serotype"):
+                if key in columns:
+                    index = columns.index(key)
+                    value = str(first_row[index] if index < len(first_row) else "").strip()
+                    if value and value != "-":
+                        fragments.append(f"血清型：{value}")
+                        break
+    return fragments
+
+
+def _interpretation_risk_label(pathogen: dict | None, gene_hits: list[dict], event_hits: list[dict], is_meta_method: bool) -> str:
+    high_events = sum(1 for item in event_hits if str(item.get("risk_level") or "").lower() == "high")
+    high_genes = sum(1 for item in gene_hits if str(item.get("risk_level") or "").lower() == "high")
+    medium_genes = sum(1 for item in gene_hits if str(item.get("risk_level") or "").lower() == "medium")
+    if high_events or high_genes >= 2:
+        return "高风险"
+    if high_genes or medium_genes >= 2:
+        return "中风险"
+    if isinstance(pathogen, dict) and pathogen.get("notifiable") and not is_meta_method:
+        return "高风险"
+    return "低风险"
+
+
+def _derive_clinical_conclusion(dominant_species_name: str, pathogen: dict | None, event_hits: list[dict], is_meta_method: bool, supporting_species: list[dict]) -> str:
+    profile_name = str((pathogen or {}).get("common_name") or (pathogen or {}).get("species") or dominant_species_name or "当前优势物种").strip()
+    pathogen_type = str((pathogen or {}).get("pathogen_type") or "").strip().lower()
+    is_viral_pathogen = pathogen_type == "病毒"
+    if event_hits:
+        summary = str(event_hits[0].get("summary") or "").strip()
+        if is_meta_method:
+            return f"当前样本以 {profile_name} 为主要优势病原线索，且出现“{summary}”相关证据，建议结合样本类型、临床表现与其他病原背景综合判断。"
+        if is_viral_pathogen:
+            return f"当前病毒结果以 {profile_name} 为主导检出对象，且出现“{summary}”相关证据，提示其在当前样本中具有明确分子判读意义。"
+        return f"当前单菌结果以 {profile_name} 为主导检出病原，且出现“{summary}”相关证据，提示其临床意义较强。"
+    if supporting_species and is_meta_method:
+        return f"当前宏基因组结果以 {profile_name} 为主要优势病原线索，但同时存在其他高丰度物种背景，建议结合临床与流行病学资料谨慎解释。"
+    if is_viral_pathogen:
+        return (
+            f"当前宏基因组结果以 {profile_name} 为主要病毒线索，宜结合覆盖度、分型结果和临床证据综合判读。"
+            if is_meta_method
+            else f"当前病毒结果以 {profile_name} 为主导判读对象，知识库提示其具有明确的病毒学和临床相关性。"
+        )
+    return (
+        f"当前宏基因组结果以 {profile_name} 为主要病原线索，宜结合样本背景和临床证据综合判读。"
+        if is_meta_method
+        else f"当前单菌结果以 {profile_name} 为主导物种，知识库提示其具有明确临床相关性。"
+    )
+
+
+def _species_identity_key(row: dict | None) -> str:
+    if not isinstance(row, dict):
+        return ""
+    for value in [row.get("NCBI学名"), row.get("NCBI种"), row.get("种")]:
+        normalized = _normalize_taxonomy_lookup_name(value)
+        if normalized and normalized != "-":
+            return normalized
+    return ""
+
+
+def _build_knowledge_interpretation(
+    project_root: Path,
+    species_taxonomy: dict,
+    subspecies_taxonomy: dict,
+    resistance_elements: dict,
+    virulence_elements: dict,
+    mge_monitoring: dict,
+    mlst_result: dict,
+    serotype_result: dict,
+    public_health_support: dict,
+    is_meta_method: bool,
+) -> dict:
+    context = _build_kb_interpretation_context(str(_resolve_runtime_database_root()))
+    ranked_rows = _rank_species_rows(species_taxonomy, subspecies_taxonomy)
+    if not ranked_rows:
+        return {"status": "empty"}
+
+    dominant_row = ranked_rows[0]
+    dominant_species_name = str(dominant_row.get("种") or dominant_row.get("亚种") or dominant_row.get("NCBI种") or "--").strip() or "--"
+    pathogen = _match_kb_pathogen_profile(context, dominant_row)
+    resistance_hits = _collect_detected_gene_hits(resistance_elements, "ARG")
+    virulence_hits = _collect_detected_gene_hits(virulence_elements, "VF")
+    matched_gene_rules = _evaluate_gene_rule_hits(context, pathogen, resistance_hits, virulence_hits)
+    matched_event_rules = _evaluate_event_rule_hits(context, pathogen, resistance_hits, virulence_hits, mge_monitoring)
+    dominant_identity = _species_identity_key(dominant_row)
+    supporting_species = []
+    for row in (species_taxonomy.get("rows") or [])[1:6]:
+        ratio = float(row.get("比例数值") or 0.0)
+        reads = int(row.get("序列数量数值") or 0)
+        species_name = str(row.get("种") or row.get("亚种") or "").strip()
+        if not species_name or species_name == "-" or ratio < 5:
+            continue
+        if dominant_identity and _species_identity_key(row) == dominant_identity:
+            continue
+        supporting_species.append({"species": species_name, "ratio": round(ratio, 2), "reads": reads})
+        if len(supporting_species) >= 3:
+            break
+    intraspecies_signals = []
+    for row in subspecies_taxonomy.get("rows") or []:
+        ratio = float(row.get("比例数值") or 0.0)
+        reads = int(row.get("序列数量数值") or 0)
+        subspecies_name = str(row.get("亚种") or row.get("种") or "").strip()
+        if not subspecies_name or subspecies_name == "-" or ratio < 1:
+            continue
+        intraspecies_signals.append({
+            "label": subspecies_name,
+            "ratio": round(ratio, 2),
+            "reads": reads,
+        })
+        if len(intraspecies_signals) >= 4:
+            break
+
+    resistance_genes = _truncate_list([item.get("gene_name") for item in resistance_hits], 8)
+    virulence_genes = _truncate_list([item.get("gene_name") for item in virulence_hits], 8)
+    resistance_classes = _truncate_list([item.get("category") for item in resistance_hits], 8)
+    infection_sites = [str(item).strip() for item in ((pathogen or {}).get("typical_infection_sites") or []) if str(item).strip()]
+    syndrome_roles = [
+        f"{str(item.get('syndrome') or '').strip()}（{str(item.get('role') or '相关病原').strip()}）"
+        for item in ((pathogen or {}).get("syndrome_associations") or [])
+        if isinstance(item, dict) and str(item.get("syndrome") or "").strip()
+    ]
+    risk_level = _interpretation_risk_label(pathogen, matched_gene_rules, matched_event_rules, is_meta_method)
+    typing_fragments = _summarize_typing_information(mlst_result, serotype_result)
+    top_event_summaries = _truncate_list([item.get("summary") for item in matched_event_rules], 3)
+    top_rule_labels = _truncate_list([item.get("report_label") for item in matched_gene_rules], 6)
+    profile_name = str((pathogen or {}).get("common_name") or (pathogen or {}).get("species") or dominant_species_name or "--").strip()
+    pathogen_type = str((pathogen or {}).get("pathogen_type") or "").strip().lower()
+    is_viral_pathogen = pathogen_type == "病毒"
+    clinical_significance = str((pathogen or {}).get("clinical_significance") or "").strip()
+    public_health_significance = str((pathogen or {}).get("public_health_significance") or "").strip()
+    significance = (
+        f"当前宏基因组结果中，{profile_name} 为主要优势病原线索。{clinical_significance}"
+        if is_meta_method and clinical_significance
+        else clinical_significance or f"当前结果以 {profile_name} 为主要判读对象。"
+    )
+    infection_hint_values = infection_sites or syndrome_roles
+    infection_hint = _joined_text(infection_hint_values, "结合送检部位、临床综合征与宿主背景判断")
+    treatment_hint = (
+        f"当前耐药相关证据提示需重点关注 {_joined_text(resistance_classes, '相关耐药类别')}，建议结合药敏试验及感染部位综合制定治疗方案。"
+        if resistance_classes
+        else ("当前未见明确高风险耐药类别，但仍建议结合药敏试验、感染部位与宿主因素综合决策。" if not is_viral_pathogen else "当前结果以病毒分型、覆盖度和变异证据为主，药物相关解释仍需结合具体抗病毒方案、宿主状态及临床诊疗背景综合判断。")
+    )
+    virulence_hint = (
+        f"检出 {len(virulence_hits)} 条毒力相关记录，重点提示包括 {_joined_text(top_event_summaries or top_rule_labels, '相关毒力因素')}。"
+        if virulence_hits or matched_event_rules
+        else ("当前未见明确高风险毒力组合，但仍应结合样本来源和临床综合征审慎判读。" if not is_viral_pathogen else "当前未见额外的病毒毒力规则命中，结果更适合结合分型、覆盖度和关键位点背景进行解释。")
+    )
+    clinical_recommendations = _truncate_list(
+        [
+            *((matched_event_rules[0].get("recommendation") or []) if matched_event_rules else []),
+            *(
+                [
+                    "建议结合病毒分型、覆盖度、关键变异位点及样本来源综合确认结果解释边界。",
+                    "建议结合患者症状、肝功能指标、流行病学接触史及影像学证据综合判断。",
+                ]
+                if is_viral_pathogen
+                else [
+                    "建议结合培养、药敏试验和样本来源综合确认病原学意义。",
+                    "对于宏基因组结果，应结合背景菌和宿主状态避免把高丰度线索直接等同于致病菌结论。" if is_meta_method else "建议结合患者症状、炎症指标及影像学证据综合判断。",
+                ]
+            ),
+        ],
+        4,
+    )
+    cdc_recommendations = _truncate_list(
+        [
+            *((matched_event_rules[0].get("recommendation") or []) if matched_event_rules else []),
+            "建议结合病例时空分布、接触史与同源性结果持续评估传播风险。",
+            "如涉及重点病原或法定报告病原，建议按疾控流程及时上报和复核。",
+        ],
+        4,
+    )
+    support_evidence = []
+    if clinical_significance:
+        support_evidence.append({"manual": "病原体画像", "rule_type": "pathogen_profile", "basis": clinical_significance})
+    if public_health_significance:
+        support_evidence.append({"manual": "公共卫生画像", "rule_type": "public_health_profile", "basis": public_health_significance})
+    for item in matched_event_rules[:2]:
+        support_evidence.append({"manual": item.get("title") or "组合事件规则", "rule_type": "event_rule", "basis": item.get("summary") or ""})
+
+    transmission_risk = "高" if (pathogen and pathogen.get("notifiable")) or risk_level == "高风险" else "中" if risk_level == "中风险" or matched_event_rules else "低"
+    typing_summary = "；".join(typing_fragments) if typing_fragments else ("未获得稳定病毒分型结果" if is_viral_pathogen else "未获得稳定分型/血清型结果")
+    reportable_label = (
+        str(public_health_support.get("reporting_hint") or "").strip()
+        or ("法定报告或重点报告病原体" if (pathogen and pathogen.get("notifiable")) else "重点监测病原体" if matched_event_rules or public_health_significance else "一般监测病原体")
+    )
+
+    return {
+        "status": "ready",
+        "dominant_species": {
+            "species": dominant_species_name,
+            "ratio": round(float(dominant_row.get("比例数值") or 0.0), 2),
+            "reads": int(dominant_row.get("序列数量数值") or 0),
+            "taxid": str(dominant_row.get("NCBI TaxID") or "-").strip() or "-",
+            "scientific_name": str(dominant_row.get("NCBI学名") or "-").strip() or "-",
+        },
+        "pathogen_profile": {
+            "id": str((pathogen or {}).get("id") or "").strip(),
+            "species": str((pathogen or {}).get("species") or dominant_species_name).strip(),
+            "common_name": str((pathogen or {}).get("common_name") or profile_name).strip(),
+            "notifiable": bool((pathogen or {}).get("notifiable")),
+            "pathogen_type": str((pathogen or {}).get("pathogen_type") or "").strip(),
+        },
+        "supporting_species": supporting_species,
+        "intraspecies_signals": intraspecies_signals,
+        "matched_gene_rules": matched_gene_rules,
+        "matched_event_rules": matched_event_rules,
+        "clinical": {
+            "status": "ready",
+            "speciesName": profile_name,
+            "significance": significance,
+            "commonLabel": (
+                "属于常见临床病毒病原"
+                if is_viral_pathogen and clinical_significance
+                else ("属于常见临床致病菌" if clinical_significance else "已纳入病原知识库判读范围")
+            ),
+            "infectionHint": infection_hint,
+            "resistanceCount": len(resistance_hits),
+            "virulenceCount": len(virulence_hits),
+            "resistanceGenes": resistance_genes,
+            "resistanceClasses": resistance_classes,
+            "virulenceGenes": virulence_genes,
+            "riskLevel": risk_level,
+            "treatmentHint": treatment_hint,
+            "virulenceHint": virulence_hint,
+            "conclusion": _derive_clinical_conclusion(dominant_species_name, pathogen, matched_event_rules, is_meta_method, supporting_species),
+            "evidence": _truncate_list([
+                f"主导物种：{dominant_species_name}（占比 {round(float(dominant_row.get('比例数值') or 0.0), 2):.2f}%）",
+                f"知识库匹配：{profile_name}",
+                *top_event_summaries,
+                *[f"{item['report_label']}：{_joined_text(item.get('matched_hits') or [], item.get('gene_name') or '--')}" for item in matched_gene_rules[:3]],
+            ], 6),
+            "recommendations": clinical_recommendations,
+        },
+        "cdc": {
+            "status": "ready",
+            "speciesName": profile_name,
+            "genus": str(dominant_row.get("NCBI属") or dominant_row.get("属") or "-").strip() or "-",
+            "family": str(dominant_row.get("NCBI科") or dominant_row.get("科") or "-").strip() or "-",
+            "reportableLabel": reportable_label,
+            "pathogenNote": public_health_significance or clinical_significance or f"{profile_name} 已纳入知识库监测判读范围。",
+            "resistanceCount": len(resistance_hits),
+            "virulenceCount": len(virulence_hits),
+            "resistanceGenes": resistance_genes,
+            "virulenceGenes": virulence_genes,
+            "resistanceClasses": resistance_classes,
+            "hasEsbl": any("ctxm" in _normalize_kb_token(item) or "esbl" in _normalize_kb_token(item) for item in resistance_genes + resistance_classes),
+            "hasCarbapenemase": any(token in _normalize_kb_token(item) for item in resistance_genes for token in ("kpc", "ndm", "oxa48", "oxa23", "vim", "imp")),
+            "outbreakPotential": top_event_summaries[0] if top_event_summaries else ("提示存在较高传播处置价值，建议结合病例时空分布和接触史综合评估。" if pathogen and pathogen.get("notifiable") else "当前未形成明确暴发性分子证据，建议结合监测背景持续观察。"),
+            "historyRelation": (
+                f"当前样本已获得 {'，'.join(typing_fragments)}，建议结合本地历史株库与同源性结果进一步判断传播链。"
+                if typing_fragments
+                else ("当前尚缺乏稳定病毒分型结果，建议结合本地历史毒株数据库、流调线索和关键位点证据进一步比较。" if is_viral_pathogen else "当前尚缺乏稳定分型结果，建议结合本地历史菌株数据库和流调线索进一步比较。")
+            ),
+            "transmissionRisk": transmission_risk,
+            "typingSummary": typing_summary,
+            "monitoringAdvice": _joined_text(cdc_recommendations, "建议结合监测背景持续评估。"),
+            "supportEvidence": support_evidence,
+            "keyResistanceGenes": [
+                {
+                    "label": item.get("report_label") or item.get("gene_name") or "--",
+                    "meaning": item.get("functional_meaning") or "--",
+                    "status": "detected",
+                    "matched_hits": item.get("matched_hits") or [],
+                }
+                for item in matched_gene_rules if item.get("gene_type") == "ARG"
+            ][:6],
+            "keyVirulenceGenes": [
+                {
+                    "label": item.get("report_label") or item.get("gene_name") or "--",
+                    "meaning": item.get("functional_meaning") or "--",
+                    "status": "detected",
+                    "matched_hits": item.get("matched_hits") or [],
+                }
+                for item in matched_gene_rules if item.get("gene_type") == "VF"
+            ][:6],
+        },
+    }
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw_value = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw_value:
+        return default
+    return raw_value not in {"0", "false", "no", "off"}
+
+
+BATCH_INPUT_HEADER_MAP = {
+    "样本名称": "sample_name",
+    "三代数据": "third_gen",
+    "三代测序": "third_gen",
+    "二代数据左": "short_left",
+    "二代测序左": "short_left",
+    "二代数据右": "short_right",
+    "二代测序右": "short_right",
+    "物种信息": "species",
+    "sample_name": "sample_name",
+    "third_gen": "third_gen",
+    "short_left": "short_left",
+    "short_right": "short_right",
+    "species": "species",
+}
+
+BATCH_INPUT_HEADERS_ZH = ["样本名称", "三代数据", "二代数据左", "二代数据右", "物种信息"]
+
+WORKSTATION_MODULES = {
+    "bacteria": {
+        "key": "bacteria",
+        "label": "细菌分析",
+        "subtitle": "面向单菌细菌样本的组装、注释、耐药毒力与分型分析工作台。",
+        "pipeline_script": "Bac_assemble_260112_newformat.py",
+    },
+    "virus": {
+        "key": "virus",
+        "label": "病毒分析",
+        "subtitle": "面向病毒样本的参考驱动分析、鉴定与病毒分型工作台。",
+        "pipeline_script": "Bac_assemble_260112_newformat.py",
+    },
+    "metagenome": {
+        "key": "metagenome",
+        "label": "宏基因组分析",
+        "subtitle": "面向混合样本的宏基因组组装、物种识别与结果汇总工作台。",
+        "pipeline_script": "Bac_assemble_260112_newformat.py",
+    },
+    "community": {
+        "key": "community",
+        "label": "群落分析",
+        "subtitle": "面向多样本群落项目的 alpha / beta 多样性与 microeco Biomarker（LEfSe / RF）后分析工作台。",
+        "pipeline_script": "CommunityAnalysis.py",
+    },
+    "pathosource": {
+        "key": "pathosource",
+        "label": "分子溯源",
+        "subtitle": "围绕分子分型、谱系判读与溯源分析组织任务和结果视图。",
+        "pipeline_script": "PathoSource.py",
+    },
+}
+
+ADMIN_REALTIME_MONITOR_PRESETS = {
+    "bacteria": {
+        "standard": {
+            "asm_type": "shortasm",
+            "method": "spades",
+        },
+        "fast-track": {
+            "asm_type": "shortasm",
+            "method": "spades",
+            "runflow": "fastp质控,耐药基因鉴定,毒力基因鉴定",
+        },
+    },
+    "virus": {
+        "reference": {
+            "asm_type": "shortref",
+            "method": "bwa",
+        },
+    },
+    "metagenome": {
+        "screening": {
+            "asm_type": "shortasm",
+            "method": "meta",
+        },
+        "deep": {
+            "asm_type": "shortasm",
+            "method": "meta",
+            "thread": 16,
+        },
+    },
+}
+
+ADMIN_PATHOSOURCE_TRIGGER_RULE_DEFAULTS = {
+    "enabled": False,
+    "priority_only": False,
+    "min_abundance_percent": 15.0,
+    "min_support_reads": 800,
+    "min_coverage_percent": 20.0,
+    "allowed_sample_sources": [],
+    "priority_species": [],
+    "excluded_species": [],
+    "max_reference_genomes": 30,
+    "msa_method": "snippy",
+    "tree_method": "ML",
+    "auto_start": True,
+}
+
+
+def _normalize_text_list(raw_value: object) -> list[str]:
+    if isinstance(raw_value, list):
+        values = raw_value
+    else:
+        text = str(raw_value or "").replace("；", "\n").replace(";", "\n").replace("，", "\n").replace(",", "\n")
+        values = text.splitlines()
+    normalized: list[str] = []
+    for item in values:
+        text = str(item or "").strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def _normalize_admin_pathosource_trigger_rules(loaded: object) -> dict[str, object]:
+    defaults = copy.deepcopy(ADMIN_PATHOSOURCE_TRIGGER_RULE_DEFAULTS)
+    if not isinstance(loaded, dict):
+        return defaults
+    normalized = defaults
+    normalized["enabled"] = bool(loaded.get("enabled", defaults["enabled"]))
+    normalized["priority_only"] = bool(loaded.get("priority_only", defaults["priority_only"]))
+    normalized["auto_start"] = bool(loaded.get("auto_start", defaults["auto_start"]))
+    normalized["msa_method"] = str(loaded.get("msa_method", defaults["msa_method"]) or defaults["msa_method"]).strip() or defaults["msa_method"]
+    normalized["tree_method"] = str(loaded.get("tree_method", defaults["tree_method"]) or defaults["tree_method"]).strip() or defaults["tree_method"]
+    normalized["allowed_sample_sources"] = _normalize_text_list(loaded.get("allowed_sample_sources"))
+    normalized["priority_species"] = _normalize_text_list(loaded.get("priority_species"))
+    normalized["excluded_species"] = _normalize_text_list(loaded.get("excluded_species"))
+    try:
+        normalized["min_abundance_percent"] = max(0.0, min(100.0, float(loaded.get("min_abundance_percent", defaults["min_abundance_percent"]))))
+    except (TypeError, ValueError):
+        normalized["min_abundance_percent"] = defaults["min_abundance_percent"]
+    try:
+        normalized["min_support_reads"] = max(0, int(float(loaded.get("min_support_reads", defaults["min_support_reads"]))))
+    except (TypeError, ValueError):
+        normalized["min_support_reads"] = defaults["min_support_reads"]
+    try:
+        normalized["min_coverage_percent"] = max(0.0, min(100.0, float(loaded.get("min_coverage_percent", defaults["min_coverage_percent"]))))
+    except (TypeError, ValueError):
+        normalized["min_coverage_percent"] = defaults["min_coverage_percent"]
+    try:
+        normalized["max_reference_genomes"] = max(1, int(float(loaded.get("max_reference_genomes", defaults["max_reference_genomes"]))))
+    except (TypeError, ValueError):
+        normalized["max_reference_genomes"] = defaults["max_reference_genomes"]
+    if normalized["msa_method"] not in {"snippy", "ska"}:
+        normalized["msa_method"] = defaults["msa_method"]
+    if normalized["tree_method"] not in {"ML", "NJ"}:
+        normalized["tree_method"] = defaults["tree_method"]
+    return normalized
+
+
+def _load_admin_pathosource_trigger_rules(store: PortalStore) -> dict[str, object]:
+    raw = str(store.get_setting("admin_pathosource_trigger_rules", "") or "").strip()
+    if not raw:
+        return copy.deepcopy(ADMIN_PATHOSOURCE_TRIGGER_RULE_DEFAULTS)
+    try:
+        loaded = json.loads(raw)
+    except json.JSONDecodeError:
+        return copy.deepcopy(ADMIN_PATHOSOURCE_TRIGGER_RULE_DEFAULTS)
+    return _normalize_admin_pathosource_trigger_rules(loaded)
+
+
+def _validate_admin_pathosource_trigger_rules(payload: dict[str, object]) -> dict[str, object]:
+    normalized = _normalize_admin_pathosource_trigger_rules(payload)
+    if normalized["priority_only"] and not normalized["priority_species"]:
+        raise ValidationError("启用“仅重点病原触发”时，请至少填写一个重点病原物种。")
+    return normalized
+
+
+def _sanitize_runtime_name(value: object, default: str = "item") -> str:
+    text = str(value or "").strip() or default
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in text)
+    return safe.strip("._-") or default
+
+
+def _normalize_species_match_key(value: object) -> str:
+    return _normalize_taxonomy_lookup_name(value)
+
+
+def _pathosource_builtin_species_alias(species_name: str) -> str:
+    normalized = _normalize_species_match_key(species_name)
+    alias_map = {
+        "salmonella enterica": "salmonella",
+        "salmonella bongori": "salmonella",
+        "escherichia coli": "E_coli",
+        "shigella sonnei": "Shigella",
+        "shigella flexneri": "Shigella",
+        "vibrio parahaemolyticus": "Parahemolyticus",
+        "vibrio cholerae": "cholerae",
+        "yersinia enterocolitica": "Y_enterocolitica",
+        "campylobacter jejuni": "Campylobacter",
+        "campylobacter coli": "Campylobacter",
+        "neisseria meningitidis": "Nmen",
+        "listeria monocytogenes": "Lmono",
+        "klebsiella pneumoniae": "Kpne",
+        "streptococcus suis": "Suare",
+        "bacillus cereus": "Bcere",
+        "brucella melitensis": "Brucella",
+        "brucella abortus": "Brucella",
+        "haemophilus influenzae": "HPinf",
+    }
+    if normalized in alias_map:
+        return alias_map[normalized]
+    genus = normalized.split(" ", 1)[0] if normalized else ""
+    genus_alias_map = {
+        "salmonella": "salmonella",
+        "escherichia": "E_coli",
+        "shigella": "Shigella",
+        "vibrio": "cholerae",
+        "yersinia": "Y_enterocolitica",
+        "campylobacter": "Campylobacter",
+        "neisseria": "Nmen",
+        "listeria": "Lmono",
+        "klebsiella": "Kpne",
+        "streptococcus": "Suare",
+        "bacillus": "Bcere",
+        "brucella": "Brucella",
+        "haemophilus": "HPinf",
+    }
+    return alias_map.get(normalized) or genus_alias_map.get(genus) or species_name
+
+
+def _estimate_pathosource_trigger_coverage_percent(assembly_coverage: dict) -> float:
+    points = assembly_coverage.get("points") if isinstance(assembly_coverage, dict) else []
+    numeric_points = []
+    for point in points if isinstance(points, list) else []:
+        value = _safe_float(point)
+        if value is not None:
+            numeric_points.append(value)
+    if not numeric_points:
+        return 0.0
+    covered = sum(1 for value in numeric_points if value > 0)
+    return round((covered / len(numeric_points)) * 100, 2) if numeric_points else 0.0
+
+
+def _resolve_auto_pathosource_current_fasta(report_dir: Path, sample_name: str) -> Path | None:
+    candidates = [
+        report_dir / "tmp_combine.fa",
+        report_dir / "tmp_combine.fasta",
+        report_dir / "megahit_output" / "final.contigs.fa",
+        report_dir / "viral_assembly" / "megahit_output" / "final.contigs.fa",
+        report_dir / f"{sample_name}.fa",
+        report_dir / f"{sample_name}.fasta",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _select_auto_pathosource_history_records(
+    store: PortalStore,
+    taxid: str,
+    *,
+    exclude_task_id: str = "",
+    max_items: int = 30,
+) -> list[dict[str, object]]:
+    target_taxid = str(taxid or "").strip()
+    if not target_taxid or target_taxid == "-":
+        return []
+    matches: list[dict[str, object]] = []
+    for item in store.list_sample_library():
+        final_fasta_path = Path(str(item.get("final_fasta_path") or "").strip()).expanduser()
+        if not final_fasta_path.is_file():
+            continue
+        if exclude_task_id and str(item.get("task_id") or "").strip() == exclude_task_id:
+            continue
+        item_taxid = str(item.get("taxid") or "").strip()
+        if item_taxid != target_taxid:
+            continue
+        matches.append(
+            {
+                "sample_key": str(item.get("sample_key") or "").strip(),
+                "sample_name": str(item.get("sample_name") or item.get("sample_key") or "").strip(),
+                "task_name": str(item.get("task_name") or item.get("owner") or "library").strip() or "library",
+                "final_fasta_path": str(final_fasta_path.resolve()),
+                "species_name": str(item.get("species_name") or "").strip(),
+                "taxid": item_taxid,
+                "updated_at": str(item.get("updated_at") or item.get("imported_at") or "").strip(),
+            }
+        )
+    matches.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    return matches[: max(1, int(max_items or 1))]
+
+
+def _write_auto_pathosource_input_sheet(
+    cache_dir: Path,
+    sample_name: str,
+    current_fasta: Path,
+    history_records: list[dict[str, object]],
+) -> Path:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / f"{_sanitize_runtime_name(sample_name, 'sample')}_pathosource_input.tsv"
+    rows = [["样本名称", "单端数据", "右端数据"]]
+    rows.append([sample_name, str(current_fasta), "none"])
+    seen_names = {sample_name}
+    for index, item in enumerate(history_records, start=1):
+        base_name = str(item.get("sample_name") or item.get("sample_key") or f"history_{index}").strip() or f"history_{index}"
+        history_name = base_name
+        suffix = 1
+        while history_name in seen_names:
+            suffix += 1
+            history_name = f"{base_name}_{suffix}"
+        seen_names.add(history_name)
+        rows.append([history_name, str(item.get("final_fasta_path") or "").strip(), "none"])
+    with target.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerows(rows)
+    return target
+
+
+def _pick_auto_pathosource_candidate(
+    species_taxonomy: dict,
+    rules: dict[str, object],
+    *,
+    coverage_percent: float,
+    sample_source: str = "",
+) -> tuple[dict[str, object] | None, str]:
+    rows = species_taxonomy.get("rows") if isinstance(species_taxonomy, dict) else []
+    if not isinstance(rows, list) or not rows:
+        return None, "未读取到可用于自动溯源判定的物种结果。"
+    allowed_sources = {_normalize_species_match_key(item) for item in (rules.get("allowed_sample_sources") or []) if str(item).strip()}
+    if allowed_sources and _normalize_species_match_key(sample_source) not in allowed_sources:
+        return None, f"当前样本来源“{sample_source or '-'}”不在允许自动溯源的样本来源范围内。"
+    excluded = {_normalize_species_match_key(item) for item in (rules.get("excluded_species") or []) if str(item).strip()}
+    priority = {_normalize_species_match_key(item) for item in (rules.get("priority_species") or []) if str(item).strip()}
+    min_ratio = float(rules.get("min_abundance_percent") or 0.0)
+    min_reads = int(rules.get("min_support_reads") or 0)
+    min_coverage = float(rules.get("min_coverage_percent") or 0.0)
+    ranked_rows = sorted(
+        [row for row in rows if isinstance(row, dict)],
+        key=lambda item: (
+            float(item.get("比例数值") or 0.0),
+            int(item.get("序列数量数值") or 0),
+        ),
+        reverse=True,
+    )
+    for row in ranked_rows:
+        species_name = str(row.get("种") or row.get("NCBI种") or "").strip()
+        if not species_name or species_name == "-":
+            continue
+        normalized_species = _normalize_species_match_key(species_name)
+        if normalized_species in excluded:
+            continue
+        if bool(rules.get("priority_only")) and normalized_species not in priority:
+            continue
+        ratio = float(row.get("比例数值") or 0.0)
+        reads = int(row.get("序列数量数值") or 0)
+        if ratio < min_ratio or reads < min_reads or coverage_percent < min_coverage:
+            continue
+        return {
+            "species_name": species_name,
+            "ratio": round(ratio, 2),
+            "reads": reads,
+            "coverage_percent": round(coverage_percent, 2),
+            "genus": str(row.get("属") or "").strip(),
+            "taxid": str(row.get("NCBI TaxID") or "").strip(),
+            "is_priority": normalized_species in priority,
+        }, ""
+    return None, "当前物种结果尚未达到自动溯源阈值。"
+
+CONDA_ENV_SETTINGS = [
+    {"key": "vfind", "label": "genomad_aux", "default": "genomad_aux", "group": "病毒发现 / cgMLST", "description": "VirSorter2、CheckV、chewBBACA 默认使用这个环境。"},
+    {"key": "hamronization", "label": "amr_aux", "default": "amr_aux", "group": "耐药整合", "description": "hamronize、ResFinder、AMRFinder 等整合工具链。"},
+    {"key": "rgi", "label": "amr_aux", "default": "amr_aux", "group": "耐药整合", "description": "RGI、pmga、salty、lissero 等分型补充工具。"},
+    {"key": "rgi_new", "label": "amr_aux", "default": "amr_aux", "group": "耐药整合", "description": "宏基因组 bin 的新版 RGI 流程。"},
+    {"key": "hostile", "label": "host_filter", "default": "host_filter", "group": "去宿主 / 清洗", "description": "hostile 去宿主流程。"},
+    {"key": "kneaddata", "label": "host_filter", "default": "host_filter", "group": "去宿主 / 清洗", "description": "kneaddata 去宿主与去污染流程。"},
+    {"key": "basalt", "label": "mag_aux", "default": "mag_aux", "group": "宏基因组", "description": "宏基因组 megahit / BASALT 分箱主流程。"},
+    {"key": "coverm", "label": "mag_aux", "default": "mag_aux", "group": "宏基因组", "description": "宏基因组覆盖度与 TPM 定量。"},
+    {"key": "cm210", "label": "cm210", "default": "cm210", "group": "宏基因组", "description": "checkm2、ectyper 等质量评估与补充分型。"},
+    {"key": "gtdbtk", "label": "mag_aux", "default": "mag_aux", "group": "宏基因组", "description": "宏基因组 bin 的 GTDB-Tk 分类。"},
+    {"key": "sistr_hicap", "label": "sistr_hicap", "default": "sistr_hicap", "group": "分型补充", "description": "SISTR 与 HICAP 补充分型工具。"},
+    {"key": "qiime2", "label": "qiime2", "default": "qiime2", "group": "群落分析", "description": "Alpha / Beta 多样性、样本分类器与多样本生态统计。"},
+    {"key": "microeco", "label": "microeco", "default": "microeco", "group": "群落分析", "description": "LEfSe、生态统计与可视化分析。"},
+    {"key": "genovi", "label": "genovi", "default": "genovi", "group": "图谱与注释", "description": "genovi 图谱与 COG 统计。"},
+    {"key": "plasflow", "label": "plasflow", "default": "plasflow", "group": "图谱与注释", "description": "质粒判定相关流程。"},
+    {"key": "medaka", "label": "longread_aux", "default": "longread_aux", "group": "三代纠错 / 变异", "description": "三代数据抛光。"},
+    {"key": "clair3", "label": "longread_aux", "default": "longread_aux", "group": "三代纠错 / 变异", "description": "三代数据变异检测。"},
+    {"key": "chewie", "label": "chewie", "default": "chewie", "group": "分型补充", "description": "chewie / chewBBACA 相关分型分析。"},
+    {"key": "tb_profiler", "label": "ncov", "default": "ncov", "group": "分型补充", "description": "结核分枝杆菌 tb-profiler 家系分析环境。"},
+    {"key": "choleraefinder", "label": "choleraefinder", "default": "choleraefinder", "group": "分型补充", "description": "霍乱弧菌专用分型工具。"},
+    {"key": "report_env", "label": "report_env", "default": "report_env", "group": "报告生成", "description": "R 报告输出与结果整合。"},
+    {"key": "vlib", "label": "Vlib", "default": "Vlib", "group": "病毒旧流程兼容", "description": "旧版病毒分析兼容环境。"},
+    {"key": "tngs", "label": "tNGS", "default": "tNGS", "group": "病毒旧流程兼容", "description": "旧版病毒流程补充环境。"},
+]
+CONDA_ENV_SETTINGS_BY_KEY = {item["key"]: item for item in CONDA_ENV_SETTINGS}
+
+
+def _detect_conda_root() -> Path | None:
+    candidates: list[Path] = []
+    conda_exe = str(os.environ.get("CONDA_EXE", "") or "").strip()
+    if conda_exe:
+        candidates.append(Path(conda_exe).expanduser())
+    which_conda = shutil.which("conda")
+    if which_conda:
+        candidates.append(Path(which_conda).expanduser())
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved.name == "conda" and resolved.parent.name in {"bin", "Scripts"}:
+            root = resolved.parent.parent
+            if root.is_dir():
+                return root
+    return None
+
+
+def _list_conda_env_names(conda_root: Path | None) -> list[str]:
+    if conda_root is None or not conda_root.is_dir():
+        return []
+    env_names: set[str] = set()
+    if (conda_root / "bin" / "python").is_file() or (conda_root / "python.exe").is_file():
+        env_names.add("base")
+    envs_dir = conda_root / "envs"
+    if envs_dir.is_dir():
+        for child in envs_dir.iterdir():
+            if child.is_dir():
+                env_names.add(child.name)
+    return sorted(env_names, key=lambda item: item.lower())
+
+
+def _resolve_workstation_module(raw_value: object) -> dict[str, str]:
+    key = str(raw_value or "bacteria").strip().lower()
+    if key in {"pathogen", "single"}:
+        key = "bacteria"
+    return WORKSTATION_MODULES.get(key, WORKSTATION_MODULES["bacteria"])
+
+
+def _load_conda_env_settings(store: PortalStore) -> dict[str, str]:
+    return {
+        item["key"]: resolve_conda_env_name(
+            str(
+                store.get_setting(
+                    f"conda_env_{item['key']}",
+                    store.get_setting("conda_env_gtdbtk_caps", item["default"]) if item["key"] == "sistr_hicap" else item["default"],
+                )
+                or item["default"]
+            ).strip() or item["default"]
+        )
+        for item in CONDA_ENV_SETTINGS
+    }
+
+
+def _load_conda_root_setting(store: PortalStore) -> str:
+    raw = str(store.get_setting("conda_root", "") or "").strip()
+    if raw:
+        return raw
+    detected = _detect_conda_root()
+    return str(detected) if detected else ""
+
+
+def _resolve_conda_exe_from_root(conda_root: str | Path | None) -> str:
+    raw = str(conda_root or "").strip()
+    if not raw:
+        return "conda"
+    root = Path(raw).expanduser()
+    candidates = (
+        root / "bin" / "conda",
+        root / "condabin" / "conda",
+        root / "Scripts" / "conda.exe",
+        root / "conda.exe",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return str(candidates[0])
+
+
+def _build_admin_realtime_monitor_payload(
+    *,
+    module_key: str,
+    preset_key: str,
+    preset_overrides: dict[str, object] | None,
+    monitor_name: str,
+    input_path: Path,
+    output_root: Path,
+    watch_stable_minutes: int,
+    watch_poll_minutes: int,
+    watch_max_samples: int,
+) -> dict[str, object]:
+    workstation = _resolve_workstation_module(module_key)
+    resolved_key = workstation["key"]
+    preset_group = ADMIN_REALTIME_MONITOR_PRESETS.get(resolved_key)
+    if not preset_group:
+        raise ValidationError(f"实时监控暂不支持模块：{resolved_key}")
+    preset = copy.deepcopy(preset_group.get(preset_key))
+    if not preset:
+        raise ValidationError(f"{workstation['label']} 不支持预设参数：{preset_key}")
+    if preset_overrides:
+        if not isinstance(preset_overrides, dict):
+            raise ValidationError(f"{workstation['label']} 的预设参数覆盖必须是对象")
+        preset.update(preset_overrides)
+    if resolved_key == "virus" and str(preset.get("species") or "").strip() in {"", "False", "false", "-", "none", "None"}:
+        raise ValidationError("病毒分析请先选择目标病毒类型")
+    timestamp_label = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]+", "_", monitor_name.strip() or input_path.name or resolved_key).strip("._-") or resolved_key
+    task_name = f"{base_name}_{resolved_key}_{timestamp_label}"
+    output_dir = output_root / resolved_key / task_name
+    payload: dict[str, object] = {
+        "task_name": task_name,
+        "input_path": str(input_path),
+        "output_dir": str(output_dir),
+        "inputtype": "fastq",
+        "watch_mode": "1",
+        "watch_stable_minutes": watch_stable_minutes,
+        "watch_poll_minutes": watch_poll_minutes,
+        "watch_max_samples": watch_max_samples,
+        "workstation_key": resolved_key,
+        "thread": preset.get("thread", 10),
+        "species": "False",
+        "rna": "0",
+        "fake_pip": 0,
+    }
+    payload.update(preset)
+    return payload
+
+
+def _first_allowed_module(user: dict[str, object] | None) -> str:
+    allowed = user.get("allowed_modules") if isinstance(user, dict) else None
+    if isinstance(allowed, list):
+        for item in allowed:
+            key = str(item or "").strip().lower()
+            if key in {"pathogen", "single"}:
+                key = "bacteria"
+            if key in WORKSTATION_MODULES:
+                return key
+    return "bacteria"
+
+
+def _resolve_home_and_desktop_paths() -> tuple[Path, Path]:
+    home_path = Path.home().resolve()
+
+    env_desktop = str(os.environ.get("XDG_DESKTOP_DIR", "")).strip()
+    if env_desktop:
+        desktop_candidate = Path(env_desktop.replace("$HOME", str(home_path))).expanduser()
+        if desktop_candidate.is_dir():
+            return home_path, desktop_candidate.resolve()
+
+    user_dirs_file = home_path / ".config" / "user-dirs.dirs"
+    if user_dirs_file.is_file():
+        try:
+            for raw_line in user_dirs_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "XDG_DESKTOP_DIR" not in line:
+                    continue
+                _, value = line.split("=", 1)
+                value = value.strip().strip('"').replace("$HOME", str(home_path))
+                desktop_candidate = Path(value).expanduser()
+                if desktop_candidate.is_dir():
+                    return home_path, desktop_candidate.resolve()
+        except OSError:
+            pass
+
+    for folder_name in ("Desktop", "桌面", "desktop"):
+        desktop_candidate = home_path / folder_name
+        if desktop_candidate.is_dir():
+            return home_path, desktop_candidate.resolve()
+
+    return home_path, (home_path / "Desktop").resolve()
 
 
 def create_app() -> Flask:
     package_root = Path(__file__).resolve().parent
     project_root = package_root.parent
     cpu_cache: dict[str, float] = {}
+    reference_download_jobs: dict[str, dict[str, object]] = {}
+    reference_download_lock = threading.Lock()
+    batch_import_precheck_cache: dict[str, dict[str, object]] = {}
     app = Flask(
         __name__,
         template_folder=str(package_root / "templates"),
         static_folder=str(package_root / "static"),
     )
     app.secret_key = "bac-analysis-portal-dev-key"
+    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+    app.config["ENABLE_KNOWLEDGE_BASE_TEST_PANEL"] = _env_flag("PORTAL_ENABLE_KNOWLEDGE_BASE_PANEL", default=True)
+    app.config["PROJECT_ROOT"] = str(project_root)
     task_manager = AnalysisTaskManager.from_project_root(project_root)
     store = PortalStore.from_project_root(project_root)
+    app.config["PORTAL_STORE"] = store
+
+    def _resolve_runtime_workspace_root() -> Path:
+        raw_value = str(store.get_setting("workspace_root", "") or "").strip()
+        if not raw_value:
+            return project_root
+        try:
+            candidate = Path(raw_value).expanduser().resolve()
+        except OSError:
+            return project_root
+        return candidate if candidate.is_dir() else project_root
+
+    def _sync_runtime_task_manager() -> None:
+        runtime_root = _resolve_runtime_workspace_root()
+        runtime_task_root = Path(os.environ.get("BAC_ANALYSIS_TASK_ROOT", runtime_root / "analysis_tasks")).expanduser()
+        runtime_task_root.mkdir(parents=True, exist_ok=True)
+        task_manager.project_root = runtime_root
+        task_manager.task_root = runtime_task_root
+
+    @app.get("/api/knowledge-base/summary")
+    @login_required
+    def knowledge_base_summary():
+        if not current_app.config.get("ENABLE_KNOWLEDGE_BASE_TEST_PANEL", False):
+            abort(404)
+        response = jsonify(load_knowledge_base_summary(str(_resolve_runtime_database_root())))
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+    @app.get("/api/knowledge-base/bundle")
+    @login_required
+    def knowledge_base_bundle():
+        if not current_app.config.get("ENABLE_KNOWLEDGE_BASE_TEST_PANEL", False):
+            abort(404)
+        response = jsonify(load_knowledge_base_bundle(str(_resolve_runtime_database_root())))
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+    @app.get("/api/report-templates/virus")
+    @login_required
+    def list_virus_report_templates():
+        response = jsonify({"items": _list_virus_report_templates(store)})
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        return response
+
+    @app.put("/api/report-templates/virus/<template_id>")
+    @login_required
+    def update_virus_report_template(template_id: str):
+        if str(session.get("role") or "") != "admin":
+            abort(403)
+        payload = request.get_json(force=True)
+        if not isinstance(payload, dict):
+            raise ValidationError("模板内容格式不正确")
+        item = _save_virus_report_template_override(store, str(template_id or "").strip(), payload, str(session.get("username") or ""))
+        return jsonify({"item": item, "items": _list_virus_report_templates(store)})
+
+    @app.delete("/api/report-templates/virus/<template_id>")
+    @login_required
+    def reset_virus_report_template(template_id: str):
+        if str(session.get("role") or "") != "admin":
+            abort(403)
+        item = _reset_virus_report_template_override(store, str(template_id or "").strip(), str(session.get("username") or ""))
+        return jsonify({"item": item, "items": _list_virus_report_templates(store)})
+
+    @app.post("/api/report-templates/virus/<template_id>/rollback")
+    @login_required
+    def rollback_virus_report_template(template_id: str):
+        if str(session.get("role") or "") != "admin":
+            abort(403)
+        payload = request.get_json(force=True)
+        if not isinstance(payload, dict):
+            raise ValidationError("回滚版本格式不正确")
+        event_id = str(payload.get("eventId") or "").strip()
+        if not event_id:
+            raise ValidationError("缺少回滚版本 ID")
+        item = _rollback_virus_report_template_override(store, str(template_id or "").strip(), event_id, str(session.get("username") or ""))
+        return jsonify({"item": item, "items": _list_virus_report_templates(store)})
+
+    def _sanitize_audit_payload(value: object, *, depth: int = 0) -> object:
+        if depth > 3:
+            return "..."
+        if isinstance(value, dict):
+            sanitized: dict[str, object] = {}
+            for key, item in value.items():
+                key_text = str(key)
+                if any(token in key_text.lower() for token in {"password", "token", "secret", "hash"}):
+                    sanitized[key_text] = "***"
+                else:
+                    sanitized[key_text] = _sanitize_audit_payload(item, depth=depth + 1)
+            return sanitized
+        if isinstance(value, list):
+            return [_sanitize_audit_payload(item, depth=depth + 1) for item in value[:30]]
+        if isinstance(value, tuple):
+            return [_sanitize_audit_payload(item, depth=depth + 1) for item in value[:30]]
+        text = str(value)
+        if len(text) > 240:
+            return f"{text[:240]}..."
+        return text
+
+    def _summarize_request_for_audit() -> str:
+        payload: dict[str, object] = {}
+        json_data = request.get_json(silent=True)
+        if isinstance(json_data, dict):
+            payload["json"] = _sanitize_audit_payload(json_data)
+        elif isinstance(json_data, list):
+            payload["json"] = _sanitize_audit_payload(json_data)
+        if request.form:
+            payload["form"] = _sanitize_audit_payload(request.form.to_dict(flat=True))
+        if request.files:
+            payload["files"] = [str(name or "") for name in request.files.keys()]
+        if request.args:
+            payload["args"] = _sanitize_audit_payload(request.args.to_dict(flat=True))
+        if not payload:
+            return ""
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+    def _summarize_response_for_audit(response: Response) -> str:
+        try:
+            if response.is_json:
+                data = response.get_json(silent=True)
+                if isinstance(data, dict):
+                    focus = {key: data.get(key) for key in ("status", "error", "message", "id", "username", "path") if key in data}
+                    return json.dumps(_sanitize_audit_payload(focus), ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return ""
+        return ""
+
+    def _resolve_audit_identity() -> tuple[str, str, str]:
+        actor = getattr(g, "audit_actor", None) or {}
+        username = str(actor.get("username") or session.get("username") or "").strip()
+        role = str(actor.get("role") or session.get("role") or "").strip()
+        group_name = str(actor.get("group_name") or session.get("group_name") or "").strip()
+        if username:
+            return username, role, group_name
+        json_data = request.get_json(silent=True)
+        if isinstance(json_data, dict):
+            fallback_username = str(json_data.get("username") or "").strip()
+            if fallback_username:
+                return fallback_username, role, group_name
+        fallback_username = str(request.form.get("username") or "").strip()
+        return fallback_username, role, group_name
+
+    def _resolve_audit_meta(path: str, method: str) -> tuple[str, str, str, str]:
+        segments = [segment for segment in path.split("/") if segment]
+        target_type = ""
+        target_id = ""
+        if "tasks" in segments:
+            module = "任务"
+            action = "任务操作"
+            task_index = segments.index("tasks")
+            if task_index + 1 < len(segments):
+                target_type = "task"
+                target_id = segments[task_index + 1]
+            if "database-import" in segments:
+                action = "导入数据库"
+            elif "pause" in segments:
+                action = "暂停任务"
+            elif "resume" in segments:
+                action = "恢复任务"
+            elif "stop" in segments:
+                action = "停止任务"
+            elif method == "POST" and segments[-1] == "tasks":
+                action = "创建任务"
+            elif method == "DELETE":
+                action = "删除任务"
+            elif "rerun" in segments:
+                action = "重新运行"
+            elif "rebuild" in segments:
+                action = "重建任务"
+            return module, action, target_type, target_id
+        if "database" in segments and "samples" in segments:
+            target_type = "sample"
+            try:
+                sample_index = segments.index("samples")
+                target_id = segments[sample_index + 1] if sample_index + 1 < len(segments) else ""
+            except ValueError:
+                target_id = ""
+            return "样本数据库", "样本库操作", target_type, target_id
+        if "host-database" in segments:
+            return "参考库", "宿主数据库操作", "reference", request.view_args.get("host_key", "") if request.view_args else ""
+        if "pathogen-database" in segments:
+            return "参考库", "病原数据库操作", "reference", request.view_args.get("host_key", "") if request.view_args else ""
+        if "admin" in segments:
+            if "users" in segments:
+                return "后台管理", "用户管理操作", "user", request.view_args.get("username", "") if request.view_args else ""
+            if "settings" in segments:
+                return "后台管理", "脚本设置修改", "setting", ""
+            if "update" in segments:
+                return "后台管理", "系统更新", "update", ""
+        if path == "/login":
+            return "会话", "登录", "session", ""
+        if path == "/logout":
+            return "会话", "退出登录", "session", ""
+        return "系统", "非查看操作", "", ""
+
+    @app.before_request
+    def _capture_audit_context() -> None:
+        g.audit_started_at = time.time()
+        g.audit_actor = {
+            "username": str(session.get("username") or "").strip(),
+            "role": str(session.get("role") or "").strip(),
+            "group_name": str(session.get("group_name") or "").strip(),
+        }
+
+    @app.after_request
+    def _write_audit_log(response: Response) -> Response:
+        if request.method in {"GET", "HEAD"}:
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        if request.method in {"GET", "HEAD", "OPTIONS"}:
+            return response
+        if request.path.startswith("/static/"):
+            return response
+        if request.path == "/maketree":
+            return response
+        try:
+            username, role, group_name = _resolve_audit_identity()
+            module, action, target_type, target_id = _resolve_audit_meta(request.path, request.method)
+            store.record_audit_log(
+                {
+                    "event_id": f"audit-{uuid.uuid4().hex}",
+                    "username": username,
+                    "role": role,
+                    "group_name": group_name,
+                    "method": request.method,
+                    "path": request.path,
+                    "endpoint": str(request.endpoint or ""),
+                    "module": module,
+                    "action": action,
+                    "target_type": target_type,
+                    "target_id": target_id,
+                    "status_code": int(response.status_code),
+                    "outcome": "success" if response.status_code < 400 else "failed",
+                    "ip_address": str(request.headers.get("X-Forwarded-For", request.remote_addr or "")).split(",")[0].strip(),
+                    "user_agent": str(request.user_agent.string or "").strip()[:255],
+                    "request_summary": _summarize_request_for_audit(),
+                    "response_summary": _summarize_response_for_audit(response),
+                    "created_at": datetime.utcnow().isoformat(),
+                }
+            )
+        except Exception:
+            app.logger.exception("audit logging failed")
+        return response
+
+    def _list_reference_download_jobs(category: str) -> list[dict[str, object]]:
+        cutoff = time.time() - 3600
+        with reference_download_lock:
+            expired = [
+                job_id for job_id, item in reference_download_jobs.items()
+                if item.get("status") in {"success", "failed"} and float(item.get("updated_ts") or 0.0) < cutoff
+            ]
+            for job_id in expired:
+                reference_download_jobs.pop(job_id, None)
+            items = [dict(item) for item in reference_download_jobs.values() if str(item.get("category") or "") == category]
+        return sorted(items, key=lambda item: float(item.get("updated_ts") or 0.0), reverse=True)
+
+    def _update_reference_download_job(job_id: str, **patch: object) -> None:
+        with reference_download_lock:
+            current = reference_download_jobs.get(job_id)
+            if current is None:
+                return
+            current.update(patch)
+            current["updated_ts"] = time.time()
+
+    def _finalize_reference_download_job(job_id: str, status: str, message: str = "") -> None:
+        _update_reference_download_job(job_id, status=status, message=message, progress_percent=100 if status != "failed" else 0)
+        if status == "success":
+            with reference_download_lock:
+                reference_download_jobs.pop(job_id, None)
+
+    def _delete_reference_download_job(job_id: str, category: str) -> None:
+        with reference_download_lock:
+            current = reference_download_jobs.get(job_id)
+            if current is None:
+                raise ValidationError("参考下载任务不存在或已清除")
+            if str(current.get("category") or "") != category:
+                raise ValidationError("参考下载任务分类不匹配")
+            status = str(current.get("status") or current.get("__jobStatus") or "").strip().lower()
+            if status in {"downloading", "importing"}:
+                raise ValidationError("任务仍在处理中，暂不支持直接删除")
+            reference_download_jobs.pop(job_id, None)
+
+    def _start_reference_download_job(*, category: str, payload: dict[str, object], owner: str) -> dict[str, object]:
+        provider = str(payload.get("provider") or "").strip().lower()
+        query = str(payload.get("query") or "").strip()
+        ncbi_mode = str(payload.get("ncbi_mode") or "datasets").strip().lower()
+        host_name = str(payload.get("host_name") or "").strip()
+        genome_name = str(payload.get("genome_name") or "").strip()
+        taxid = str(payload.get("taxid") or "").strip()
+        is_taxid_batch = category == "pathogen" and provider == "ncbi" and ncbi_mode == "taxid_refs"
+        effective_taxid = query if is_taxid_batch else taxid
+        source_label_default = "NCBI TaxID 精选" if is_taxid_batch else provider.upper()
+        source_label = str(payload.get("source_label") or source_label_default).strip()
+        description = str(payload.get("description") or "").strip()
+        job_id = f"refjob-{uuid.uuid4().hex[:12]}"
+        initial_name = genome_name or host_name or (f"TaxID {effective_taxid} 精选参考" if is_taxid_batch and effective_taxid else query)
+        job = {
+            "job_id": job_id,
+            "host_key": f"job:{job_id}",
+            "db_category": category,
+            "category": category,
+            "host_name": host_name,
+            "genome_name": initial_name,
+            "taxid": effective_taxid,
+            "source_type": provider,
+            "source_label": source_label,
+            "source_accession": query if query.startswith(("GCF_", "GCA_")) else "",
+            "status": "downloading",
+            "progress_percent": 1,
+            "message": "等待开始下载",
+            "owner": owner,
+            "created_ts": time.time(),
+            "updated_ts": time.time(),
+            "__pending": True,
+            "__jobStatus": "downloading",
+            "__jobPercent": 1,
+        }
+        with reference_download_lock:
+            reference_download_jobs[job_id] = job
+
+        def _worker() -> None:
+            try:
+                def progress_callback(stage: str, percent: int, message: str) -> None:
+                    mapped_status = "downloading" if stage == "downloading" else "importing"
+                    _update_reference_download_job(
+                        job_id,
+                        status=mapped_status,
+                        progress_percent=percent,
+                        message=message,
+                        __jobStatus=mapped_status,
+                        __jobPercent=percent,
+                    )
+
+                if is_taxid_batch:
+                    requested_count = int(payload.get("max_genomes") or 20)
+                    selected = _fetch_ncbi_taxid_reference_candidates(query, max_items=requested_count)
+                    if not selected:
+                        raise ValidationError(f"TaxID {query} 没有筛选出可下载的高质量参考基因组")
+                    _update_reference_download_job(
+                        job_id,
+                        host_name=str(selected[0].get("host_name") or "").strip(),
+                        genome_name=f"TaxID {query} 精选参考 ({len(selected)} 条)",
+                        message=f"已筛选出 {len(selected)} 条高质量、非冗余参考基因组，准备下载",
+                    )
+                    imported_records: list[dict[str, object]] = []
+                    total = len(selected)
+                    for index, item in enumerate(selected, start=1):
+                        accession = str(item.get("source_accession") or "").strip()
+                        display_name = str(item.get("genome_name") or accession).strip()
+
+                        def batch_progress_callback(stage: str, percent: int, message: str, *, current=index, current_name=display_name) -> None:
+                            mapped_status = "downloading" if stage == "downloading" else "importing"
+                            bounded = max(1, min(96, int(percent or 1)))
+                            overall_percent = int(((current - 1) * 96 + bounded) / max(total, 1))
+                            _update_reference_download_job(
+                                job_id,
+                                status=mapped_status,
+                                progress_percent=max(1, min(99, overall_percent)),
+                                message=f"[{current}/{total}] {current_name} · {message}",
+                                __jobStatus=mapped_status,
+                                __jobPercent=max(1, min(99, overall_percent)),
+                            )
+
+                        downloaded = _download_remote_host_genome(
+                            project_root=project_root,
+                            provider=provider,
+                            query=accession,
+                            host_name=display_name,
+                            category=category,
+                            ncbi_mode="datasets",
+                            progress_callback=batch_progress_callback,
+                        )
+                        batch_progress_callback("importing", 97, "下载完成，正在写入参考基因组数据库")
+                        imported_records.append(
+                            _register_reference_database_record(
+                                store=store,
+                                project_root=project_root,
+                                category=category,
+                                host_name=str(downloaded.get("host_name") or item.get("host_name") or "").strip(),
+                                genome_name=str(downloaded.get("genome_name") or item.get("genome_name") or accession).strip(),
+                                taxid=str(downloaded.get("taxid") or item.get("taxid") or query).strip(),
+                                source_type=provider,
+                                source_label=source_label,
+                                source_accession=str(downloaded.get("source_accession") or accession).strip(),
+                                source_url=str(downloaded.get("source_url") or "").strip(),
+                                source_fasta_path=Path(str(downloaded["fasta_path"])),
+                                description=description,
+                                owner=owner,
+                            )
+                        )
+                    _finalize_reference_download_job(job_id, "success", f"imported:{len(imported_records)}")
+                    return
+
+                downloaded = _download_remote_host_genome(
+                    project_root=project_root,
+                    provider=provider,
+                    query=query,
+                    host_name=genome_name or host_name,
+                    category=category,
+                    ncbi_mode=ncbi_mode,
+                    progress_callback=progress_callback,
+                )
+                progress_callback("importing", 96, "下载完成，正在写入参考基因组数据库")
+                record = _register_reference_database_record(
+                    store=store,
+                    project_root=project_root,
+                    category=category,
+                    host_name=str(payload.get("host_name") or downloaded.get("host_name") or "").strip(),
+                    genome_name=str(payload.get("genome_name") or downloaded.get("genome_name") or downloaded.get("host_name") or "").strip(),
+                    taxid=str(payload.get("taxid") or downloaded.get("taxid") or "").strip(),
+                    source_type=provider,
+                    source_label=source_label,
+                    source_accession=str(downloaded.get("source_accession") or query).strip(),
+                    source_url=str(downloaded.get("source_url") or "").strip(),
+                    source_fasta_path=Path(str(downloaded["fasta_path"])),
+                    description=description,
+                    owner=owner,
+                )
+                _finalize_reference_download_job(job_id, "success", str(record.get("host_key") or ""))
+            except Exception as exc:
+                _update_reference_download_job(
+                    job_id,
+                    status="failed",
+                    progress_percent=0,
+                    message=str(exc),
+                    __jobStatus="failed",
+                    __jobPercent=100,
+                )
+
+        threading.Thread(target=_worker, name=f"reference-download-{job_id}", daemon=True).start()
+        return job
+
+    def get_sample_library_manager() -> SampleLibraryManager:
+        return SampleLibraryManager(
+            store=store,
+            resolve_report_source=_resolve_report_source,
+            build_report_payload=_build_report_payload,
+            resolve_report_sample_name=_resolve_report_sample_name,
+            human_bp=_human_bp,
+        )
+
+    def maybe_auto_trigger_pathosource_for_meta_task(
+        task: dict[str, object],
+        payload: dict[str, object],
+        *,
+        selected_sample: str = "",
+    ) -> dict[str, object]:
+        params = task.get("params") if isinstance(task.get("params"), dict) else {}
+        workstation_key = str(params.get("workstation_key") or "").strip().lower()
+        method = str(params.get("method") or "").strip().lower()
+        if workstation_key != "metagenome" and method != "meta":
+            payload["auto_pathosource_trigger"] = {
+                "status": "skipped",
+                "reason": "当前任务不是宏基因组任务，未执行自动溯源判定。",
+            }
+            return payload
+        if str(task.get("status") or "").strip().upper() != "SUCCEEDED":
+            payload["auto_pathosource_trigger"] = {
+                "status": "skipped",
+                "reason": "任务尚未完成，当前不会自动派生溯源子任务。",
+            }
+            return payload
+        rules = _load_admin_pathosource_trigger_rules(store)
+        if not bool(rules.get("enabled")):
+            payload["auto_pathosource_trigger"] = {
+                "status": "disabled",
+                "reason": "后台未启用自动溯源触发规则。",
+            }
+            return payload
+
+        report_task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+        report_source = _resolve_report_source(task, selected_sample)
+        if not report_source.get("available"):
+            payload["auto_pathosource_trigger"] = {
+                "status": "skipped",
+                "reason": str(report_source.get("reason") or "当前报告尚未定位到服务器结果目录。").strip(),
+            }
+            return payload
+        report_dir = Path(report_source.get("report_dir") or "").expanduser().resolve() if report_source.get("report_dir") else None
+        sample_name = str(report_source.get("selected_sample") or report_task.get("sample_name") or selected_sample or "").strip()
+        report_output_dir = str(report_task.get("output_dir") or params.get("output_dir") or (str(report_dir) if report_dir else "")).strip()
+        if not sample_name or report_dir is None or not report_dir.is_dir():
+            payload["auto_pathosource_trigger"] = {
+                "status": "skipped",
+                "reason": "当前报告尚未定位到有效的样本名称或报告目录。",
+            }
+            return payload
+
+        trigger_key = f"{sample_name}::{selected_sample or sample_name}"
+        auto_pathosource_state = task.get("auto_pathosource") if isinstance(task.get("auto_pathosource"), dict) else {}
+        existing_state = auto_pathosource_state.get(trigger_key) if isinstance(auto_pathosource_state, dict) else None
+        if isinstance(existing_state, dict):
+            if str(existing_state.get("status") or "").strip() == "pending":
+                payload["auto_pathosource_trigger"] = {
+                    "status": "pending",
+                    "reason": str(existing_state.get("reason") or "正在创建自动溯源子任务，请稍后刷新。").strip(),
+                    "trigger_species": existing_state.get("trigger_species", ""),
+                }
+                return payload
+            child_task_id = str(existing_state.get("child_task_id") or "").strip()
+            if child_task_id:
+                try:
+                    child_task = task_manager.get_task(child_task_id, log_lines=0, owner=None)
+                except KeyError:
+                    child_task = None
+                if child_task is not None:
+                    payload["auto_pathosource_trigger"] = {
+                        "status": "linked",
+                        "reason": str(existing_state.get("reason") or "已存在自动创建的溯源子任务。").strip(),
+                        "child_task_id": child_task_id,
+                        "child_task_name": child_task.get("name"),
+                        "trigger_species": existing_state.get("trigger_species", ""),
+                        "history_count": existing_state.get("history_count", 0),
+                    }
+                    return payload
+
+        sections = payload.get("sections") if isinstance(payload.get("sections"), dict) else {}
+        taxonomy_section = sections.get("taxonomy") if isinstance(sections.get("taxonomy"), dict) else {}
+        species_taxonomy = taxonomy_section.get("species_taxonomy") if isinstance(taxonomy_section.get("species_taxonomy"), dict) else {"rows": []}
+        coverage_section = sections.get("coverage") if isinstance(sections.get("coverage"), dict) else {"points": []}
+        coverage_percent = _estimate_pathosource_trigger_coverage_percent(coverage_section)
+        sample_source = str(params.get("sample_source") or report_task.get("sample_source") or "").strip()
+        candidate, candidate_reason = _pick_auto_pathosource_candidate(
+            species_taxonomy,
+            rules,
+            coverage_percent=coverage_percent,
+            sample_source=sample_source,
+        )
+        if candidate is None:
+            payload["auto_pathosource_trigger"] = {
+                "status": "not_triggered",
+                "reason": candidate_reason,
+                "coverage_percent": coverage_percent,
+            }
+            return payload
+
+        current_fasta = _resolve_auto_pathosource_current_fasta(report_dir, sample_name)
+        if current_fasta is None:
+            payload["auto_pathosource_trigger"] = {
+                "status": "blocked",
+                "reason": "已命中自动溯源阈值，但当前报告目录中没有找到可用于 PathoSource 的 fasta 文件。",
+                "trigger_species": candidate.get("species_name", ""),
+            }
+            return payload
+
+        candidate_taxid = str(candidate.get("taxid") or "").strip()
+        if not candidate_taxid or candidate_taxid == "-":
+            payload["auto_pathosource_trigger"] = {
+                "status": "blocked",
+                "reason": "已命中自动溯源阈值，但当前候选物种缺少有效 TaxID，未创建子任务。",
+                "trigger_species": candidate.get("species_name", ""),
+            }
+            return payload
+
+        history_records = _select_auto_pathosource_history_records(
+            store,
+            candidate_taxid,
+            exclude_task_id=str(task.get("id") or ""),
+            max_items=int(rules.get("max_reference_genomes") or 30),
+        )
+        if not history_records:
+            payload["auto_pathosource_trigger"] = {
+                "status": "blocked",
+                "reason": f"已命中自动溯源阈值，但样本库中暂未找到 TaxID {candidate_taxid} 的历史 fasta，未创建子任务。",
+                "trigger_species": candidate.get("species_name", ""),
+                "trigger_taxid": candidate_taxid,
+            }
+            return payload
+
+        next_state = dict(auto_pathosource_state or {})
+        next_state[trigger_key] = {
+            "status": "pending",
+            "trigger_species": str(candidate.get("species_name") or ""),
+            "trigger_taxid": candidate_taxid,
+            "history_count": len(history_records),
+            "created_at": utc_now_iso(),
+            "reason": "已命中自动溯源阈值，正在创建 PathoSource 子任务。",
+        }
+        task_manager.update_task_fields(str(task.get("id") or ""), {"auto_pathosource": next_state}, owner=None)
+
+        cache_dir = _report_cache_dir(report_dir) / "auto_pathosource"
+        input_sheet = _write_auto_pathosource_input_sheet(
+            cache_dir,
+            sample_name,
+            current_fasta,
+            history_records,
+        )
+        preferred_msa_method = str(rules.get("msa_method") or "snippy").strip() or "snippy"
+        reference_path = str(history_records[0].get("final_fasta_path") or "").strip()
+        child_species_value = _pathosource_builtin_species_alias(str(candidate.get("species_name") or ""))
+        if preferred_msa_method == "snippy" and not reference_path:
+            preferred_msa_method = "ska"
+        child_output_dir = (Path(report_output_dir) / "auto_pathosource" / _sanitize_runtime_name(str(candidate.get("species_name") or sample_name), "pathosource")).resolve()
+        child_output_dir.mkdir(parents=True, exist_ok=True)
+        child_payload = {
+            "task_name": f"{task.get('name') or sample_name}_auto_trace_{_sanitize_runtime_name(str(candidate.get('species_name') or sample_name), 'species')}",
+            "input_path": str(input_sheet),
+            "output_dir": str(child_output_dir),
+            "thread": max(4, min(16, int(params.get("thread") or 8))),
+            "species": child_species_value,
+            "ref": reference_path if preferred_msa_method == "snippy" and reference_path else "False",
+            "pathosource_ref": reference_path if preferred_msa_method == "snippy" and reference_path else "False",
+            "pathosource_cgmlstana": "no",
+            "pathosource_gubbins": "yes",
+            "pathosource_msamethod": preferred_msa_method,
+            "pathosource_treemethod": str(rules.get("tree_method") or "ML"),
+            "pathosource_bootstrap": 1000,
+            "pathosource_mltype": "MFP",
+            "pathosource_mode": "P",
+            "pathosource_cgmlstversion": "none",
+            "workstation_key": "pathosource",
+        }
+        try:
+            child_task = task_manager.create_task(
+                child_payload,
+                owner=str(task.get("owner") or session.get("username") or ""),
+                owner_group=str(task.get("owner_group") or ""),
+                pipeline_script=str((project_root / "PathoSource.py").resolve()),
+                pipeline_python=_resolve_runtime_env_name(project_root, store.get_setting("pipeline_python", "base")),
+                database_root=str(_resolve_runtime_database_root()),
+                conda_root=_load_conda_root_setting(store),
+                max_concurrent_tasks=int(store.get_setting("max_concurrent_tasks", "2") or "2"),
+                conda_envs=_load_conda_env_settings(store),
+                extra_task_fields={
+                    "parent_task_id": str(task.get("id") or ""),
+                    "trigger_context": {
+                        "source": "metagenome_auto_pathosource",
+                        "sample_name": sample_name,
+                        "trigger_species": str(candidate.get("species_name") or ""),
+                        "trigger_taxid": candidate_taxid,
+                        "input_sheet": str(input_sheet),
+                        "history_count": len(history_records),
+                        "current_fasta": str(current_fasta),
+                    },
+                },
+            )
+        except Exception as exc:
+            next_state[trigger_key] = {
+                "status": "failed",
+                "trigger_species": str(candidate.get("species_name") or ""),
+                "trigger_taxid": candidate_taxid,
+                "history_count": len(history_records),
+                "created_at": utc_now_iso(),
+                "reason": f"自动创建 PathoSource 子任务失败：{exc}",
+            }
+            task_manager.update_task_fields(str(task.get("id") or ""), {"auto_pathosource": next_state}, owner=None)
+            payload["auto_pathosource_trigger"] = {
+                "status": "failed",
+                "reason": f"已命中自动溯源阈值，但创建 PathoSource 子任务失败：{exc}",
+                "trigger_species": candidate.get("species_name", ""),
+                "trigger_taxid": candidate_taxid,
+                "history_count": len(history_records),
+            }
+            return payload
+        next_state[trigger_key] = {
+            "status": "created",
+            "child_task_id": str(child_task.get("id") or ""),
+            "child_task_name": str(child_task.get("name") or ""),
+            "trigger_species": str(candidate.get("species_name") or ""),
+            "trigger_taxid": candidate_taxid,
+            "history_count": len(history_records),
+            "created_at": utc_now_iso(),
+            "reason": "命中宏基因组自动溯源阈值，已创建 PathoSource 子任务。",
+        }
+        task_manager.update_task_fields(str(task.get("id") or ""), {"auto_pathosource": next_state}, owner=None)
+        payload["auto_pathosource_trigger"] = {
+            "status": "created",
+            "reason": "已命中自动溯源阈值，并创建 PathoSource 子任务。",
+            "child_task_id": child_task.get("id"),
+            "child_task_name": child_task.get("name"),
+            "trigger_species": candidate.get("species_name", ""),
+            "trigger_taxid": candidate_taxid,
+            "history_count": len(history_records),
+            "coverage_percent": coverage_percent,
+        }
+        return payload
 
     @app.before_request
     def protect_routes():
+        _sync_runtime_task_manager()
         if request.endpoint in {"login", "login_post", "static"}:
             return None
         if not _is_logged_in():
@@ -48,13 +3577,22 @@ def create_app() -> Flask:
     @app.get("/login")
     def login():
         if _is_logged_in():
-            return redirect(url_for("index"))
+            user = store.get_user(str(session.get("username") or ""))
+            return redirect(url_for("index", module=_first_allowed_module(user)))
         return render_template("login.html")
 
     @app.post("/login")
     def login_post():
         payload = request.get_json(force=True) if request.is_json else request.form
-        user = store.authenticate(str(payload.get("username", "")).strip(), str(payload.get("password", "")))
+        username = str(payload.get("username", "")).strip()
+        password = str(payload.get("password", ""))
+        try:
+            existing_user = store.get_user(username)
+        except KeyError:
+            existing_user = None
+        if existing_user and existing_user.get("is_expired"):
+            raise ValidationError("账号已过有效期，请联系管理员续期")
+        user = store.authenticate(username, password)
         if user is None:
             raise ValidationError("用户名或密码错误")
         session["username"] = user["username"]
@@ -70,11 +3608,26 @@ def create_app() -> Flask:
 
     @app.get("/")
     @login_required
+    def launcher():
+        user = store.get_user(str(session.get("username") or ""))
+        return redirect(url_for("index", module=_first_allowed_module(user)))
+
+    @app.get("/workstation")
+    @login_required
     def index():
+        workstation = _resolve_workstation_module(request.args.get("module"))
+        user = store.get_user(str(session.get("username") or ""))
+        allowed_modules = user.get("allowed_modules") if isinstance(user, dict) else []
+        if workstation["key"] not in allowed_modules:
+            return redirect(url_for("index", module=_first_allowed_module(user)))
         return render_template(
             "index.html",
             project_root=str(project_root),
-            script_path=store.get_setting("pipeline_script", "Bac_assemble_260112_newformat.py"),
+            script_path=workstation["pipeline_script"],
+            workstation_key=workstation["key"],
+            workstation_label=workstation["label"],
+            workstation_subtitle=workstation["subtitle"],
+            knowledge_base_enabled=bool(app.config.get("ENABLE_KNOWLEDGE_BASE_TEST_PANEL", False)),
         )
 
     @app.get("/api/health")
@@ -96,8 +3649,9 @@ def create_app() -> Flask:
     @app.get("/api/tasks")
     @login_required
     def list_tasks():
+        task_manager.reconcile_queue(int(store.get_setting("max_concurrent_tasks", "2") or "2"))
         tasks = task_manager.list_tasks()
-        visible = [task for task in tasks if _can_view_task(task)]
+        visible = [task for task in tasks if _can_view_task(task) and not _is_portal_only_task(task)]
         return jsonify({"items": visible})
 
     @app.get("/api/asm-options")
@@ -109,6 +3663,1154 @@ def create_app() -> Flask:
     @login_required
     def server_status():
         return jsonify(_collect_server_status(project_root, cpu_cache))
+
+    @app.get("/api/database/samples")
+    @login_required
+    def list_database_samples():
+        scope = str(request.args.get("scope", "main") or "main").strip()
+        items = get_sample_library_manager().list_visible(
+            scope=scope,
+            role=str(session.get("role") or ""),
+            username=str(session.get("username") or ""),
+            group_name=str(session.get("group_name") or ""),
+        )
+        return jsonify({"items": items})
+
+    @app.get("/api/database/submissions")
+    @login_required
+    def list_database_submissions():
+        items = get_sample_library_manager().list_submissions(
+            role=str(session.get("role") or ""),
+            username=str(session.get("username") or ""),
+            group_name=str(session.get("group_name") or ""),
+        )
+        return jsonify({"items": items})
+
+    @app.get("/api/database/version-logs")
+    @login_required
+    def list_database_version_logs():
+        items = get_sample_library_manager().list_version_logs(
+            role=str(session.get("role") or ""),
+            username=str(session.get("username") or ""),
+            group_name=str(session.get("group_name") or ""),
+        )
+        return jsonify({"items": items})
+
+    @app.get("/api/database/releases")
+    @login_required
+    def list_database_releases():
+        items = get_sample_library_manager().list_release_versions(
+            role=str(session.get("role") or ""),
+            username=str(session.get("username") or ""),
+            group_name=str(session.get("group_name") or ""),
+        )
+        return jsonify({"items": items})
+
+    @app.get("/api/database/metadata-templates")
+    @login_required
+    def list_database_metadata_templates():
+        return jsonify({"items": get_sample_library_manager().list_metadata_templates()})
+
+    @app.get("/api/database/nextstrain-builds")
+    @login_required
+    def list_database_nextstrain_builds():
+        task_manager.reconcile_queue(int(store.get_setting("max_concurrent_tasks", "2") or "2"))
+        task_rows: list[dict[str, Any]] = []
+        for task_file in sorted(task_manager.task_root.glob("*/task.json"), key=lambda item: item.parent.name, reverse=True):
+            try:
+                task = read_json(task_file)
+            except Exception:
+                continue
+            if str(task.get("task_type") or "").strip() != NEXTSTRAIN_BUILD_TASK_TYPE:
+                continue
+            if not _can_view_task(task):
+                continue
+            task_rows.append(_serialize_nextstrain_build_task(project_root, task))
+        return jsonify({"items": task_rows})
+
+    @app.get("/api/database/auspice-uploads")
+    @login_required
+    def list_database_auspice_uploads():
+        upload_root = _uploaded_auspice_root(project_root)
+        metadata_dir = upload_root / "metadata"
+        items: list[dict[str, Any]] = []
+        if metadata_dir.is_dir():
+            for metadata_file in sorted(metadata_dir.glob("*.json"), key=lambda item: item.name, reverse=True):
+                try:
+                    metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(metadata, dict):
+                    continue
+                if not _can_view_uploaded_auspice(metadata):
+                    continue
+                items.append(_serialize_uploaded_auspice_dataset(project_root, metadata))
+        return jsonify({"items": items})
+
+    @app.post("/api/database/auspice-uploads")
+    @login_required
+    def create_database_auspice_upload():
+        upload = request.files.get("file")
+        if upload is None or not str(upload.filename or "").strip():
+            raise ValidationError("请先选择一个 Auspice JSON 文件")
+        original_filename = Path(str(upload.filename or "").strip()).name
+        if not original_filename.lower().endswith(".json"):
+            raise ValidationError("目前只支持上传 .json 格式的 Auspice 数据集")
+        raw_bytes = upload.read()
+        if not raw_bytes:
+            raise ValidationError("上传文件为空，请重新选择")
+        try:
+            payload = json.loads(raw_bytes.decode("utf-8"))
+        except Exception as exc:
+            raise ValidationError("上传文件不是有效的 JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValidationError("Auspice 数据集必须是 JSON 对象")
+
+        requested_name = str(request.form.get("name") or "").strip()
+        inferred_name = ""
+        meta_payload = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        if isinstance(meta_payload, dict):
+            inferred_name = str(meta_payload.get("title") or meta_payload.get("description") or "").strip()
+        upload_name = requested_name or inferred_name or Path(original_filename).stem
+        upload_id = f"auspice_upload_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        upload_root = _uploaded_auspice_root(project_root)
+        metadata_dir = upload_root / "metadata"
+        dataset_dir = upload_root / "datasets"
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        dataset_path = dataset_dir / f"{upload_id}.json"
+        metadata_path = metadata_dir / f"{upload_id}.json"
+        dataset_path.write_bytes(raw_bytes)
+        metadata = {
+            "id": upload_id,
+            "name": upload_name,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "owner": str(session.get("username") or "").strip(),
+            "owner_group": str(session.get("group_name") or "").strip(),
+            "original_filename": original_filename,
+            "species_name": "",
+            "sample_count": 0,
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        }
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        return jsonify({"item": _serialize_uploaded_auspice_dataset(project_root, metadata)})
+
+    @app.post("/api/database/auspice-uploads/<upload_id>/open-output")
+    @login_required
+    def open_database_auspice_upload_output(upload_id: str):
+        metadata = _load_uploaded_auspice_metadata(project_root, upload_id)
+        _ensure_can_view_uploaded_auspice(metadata)
+        target = _uploaded_auspice_dataset_path(project_root, upload_id).parent
+        if not target.exists():
+            raise ValidationError(f"上传目录不存在: {target}")
+        _open_in_file_manager(target)
+        return jsonify({"status": "opened", "path": str(target)})
+
+    @app.delete("/api/database/auspice-uploads/<upload_id>")
+    @login_required
+    def delete_database_auspice_upload(upload_id: str):
+        metadata = _load_uploaded_auspice_metadata(project_root, upload_id)
+        _ensure_can_view_uploaded_auspice(metadata)
+        metadata_path = _uploaded_auspice_metadata_path(project_root, upload_id)
+        dataset_path = _uploaded_auspice_dataset_path(project_root, upload_id)
+        if metadata_path.exists():
+            metadata_path.unlink()
+        if dataset_path.exists():
+            dataset_path.unlink()
+        return jsonify({"status": "deleted", "upload_id": upload_id})
+
+    @app.post("/api/database/nextstrain-builds")
+    @login_required
+    def create_database_nextstrain_build():
+        payload = request.get_json(force=True)
+        sample_keys = payload.get("sample_keys") if isinstance(payload.get("sample_keys"), list) else []
+        if len(sample_keys) < 2:
+            raise ValidationError("请至少勾选 2 个样本后再构建 Nextstrain 数据集")
+
+        reference_genbank = Path(str(payload.get("reference_genbank_path") or "").strip()).expanduser()
+        if not reference_genbank.is_file():
+            raise ValidationError("参考 GenBank 文件不存在，请重新选择")
+        if not NEXTSTRAIN_CLI_PATH.is_file():
+            raise ValidationError(f"Nextstrain CLI 不存在: {NEXTSTRAIN_CLI_PATH}")
+
+        visible_records: list[dict[str, Any]] = []
+        species_candidates: list[str] = []
+        for raw_key in sample_keys:
+            sample_key = str(raw_key or "").strip()
+            if not sample_key:
+                continue
+            try:
+                record = get_sample_library_manager().get_visible(
+                    sample_key,
+                    role=str(session.get("role") or ""),
+                    username=str(session.get("username") or ""),
+                    group_name=str(session.get("group_name") or ""),
+                )
+            except KeyError as exc:
+                raise ValidationError(f"样本不可见或不存在: {sample_key}") from exc
+            fasta_path = Path(str(record.get("final_fasta_path") or "").strip()).expanduser()
+            if not fasta_path.is_file():
+                raise ValidationError(f"样本缺少可读取的 final.fasta: {record.get('sample_name') or sample_key}")
+            visible_records.append(record)
+            species_name = str(record.get("species_name") or record.get("mlst_species_name") or "").strip()
+            if species_name and species_name not in species_candidates:
+                species_candidates.append(species_name)
+
+        if len(visible_records) < 2:
+            raise ValidationError("当前可用样本不足 2 个，无法构建时间树")
+        if len(species_candidates) > 1:
+            raise ValidationError(f"当前勾选样本混入了多个物种：{'、'.join(species_candidates[:4])}。请先按同一病原筛选后再构建")
+
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        build_name = str(payload.get("build_name") or "").strip() or f"{species_candidates[0] if species_candidates else 'nextstrain'}_{timestamp}"
+        build_slug = _sanitize_host_slug(build_name) or f"nextstrain_{timestamp}"
+        target_root = (project_root / "public" / "nextstrain-builds").resolve()
+        manifest_dir = target_root / "manifests"
+        workspace_dir = target_root / build_slug
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        workspace_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        manifest_payload = {
+            "build_name": build_name,
+            "species_name": species_candidates[0] if species_candidates else "",
+            "created_by": str(session.get("username") or ""),
+            "samples": [
+                {
+                    "sample_key": str(record.get("sample_key") or "").strip(),
+                    "sample_name": str(record.get("sample_name") or "").strip(),
+                    "final_fasta_path": str(record.get("final_fasta_path") or "").strip(),
+                    "species_name": str(record.get("species_name") or record.get("mlst_species_name") or "").strip(),
+                    "genome_id": str(record.get("genome_id") or "").strip(),
+                    "sample_alias": str(record.get("sample_alias") or "").strip(),
+                    "country": str(record.get("country") or "").strip(),
+                    "collection_date": str(record.get("collection_date") or "").strip(),
+                    "owner": str(record.get("owner") or "").strip(),
+                    "host_info": str(record.get("host_info") or "").strip(),
+                    "note": str(record.get("note") or "").strip(),
+                    "location": _parse_sample_location_json(record.get("location_json")),
+                }
+                for record in visible_records
+            ],
+        }
+        manifest_path = manifest_dir / f"{build_slug}.json"
+        manifest_path.write_text(json.dumps(manifest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        created = task_manager.create_task(
+            {
+                "task_name": build_name,
+                "input_path": str(manifest_path),
+                "output_dir": str(workspace_dir),
+                "analysis_target": "virus",
+                "inputtype": "fasta",
+                "thread": 1,
+                "method": "bwa",
+                "asm_type": "shortref",
+                "species": species_candidates[0] if species_candidates else "Virus",
+                "ref": str(reference_genbank.resolve()),
+                "runflow": "分型鉴定",
+                "workstation_key": "virus",
+            },
+            owner=str(session.get("username") or ""),
+            owner_group=str(session.get("group_name") or ""),
+            pipeline_script=str((project_root / "scripts" / "run_nextstrain_auspice_build.py").resolve()),
+            pipeline_python="base",
+            max_concurrent_tasks=int(store.get_setting("max_concurrent_tasks", "2") or "2"),
+            database_root=str(project_root / "database"),
+            conda_root=_load_conda_root_setting(store),
+            conda_envs=_load_conda_env_settings(store),
+            extra_task_fields={
+                "task_type": NEXTSTRAIN_BUILD_TASK_TYPE,
+                "nextstrain_cli": str(NEXTSTRAIN_CLI_PATH),
+            },
+        )
+        return jsonify(
+            {
+                "task": created,
+                "build": {
+                    "task_id": str(created.get("id") or "").strip(),
+                    "dataset_path": f"/nextstrain/{str(created.get('id') or '').strip()}",
+                    "workspace_dir": str(workspace_dir),
+                },
+            }
+        )
+
+    @app.put("/api/database/metadata-templates")
+    @login_required
+    def save_database_metadata_templates():
+        payload = request.get_json(force=True)
+        try:
+            items = get_sample_library_manager().save_metadata_templates(payload.get("items") or [])
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        return jsonify({"items": items})
+
+    @app.get("/api/database/samples/<path:sample_key>")
+    @login_required
+    def get_database_sample(sample_key: str):
+        try:
+            record = get_sample_library_manager().get_visible(
+                sample_key,
+                role=str(session.get("role") or ""),
+                username=str(session.get("username") or ""),
+                group_name=str(session.get("group_name") or ""),
+            )
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+        return jsonify(record)
+
+    @app.put("/api/database/samples/<path:sample_key>")
+    @login_required
+    def update_database_sample(sample_key: str):
+        payload = request.get_json(force=True)
+        try:
+            updated = get_sample_library_manager().update_visible(
+                sample_key,
+                role=str(session.get("role") or ""),
+                username=str(session.get("username") or ""),
+                group_name=str(session.get("group_name") or ""),
+                genome_id=payload.get("genome_id"),
+                pathogen_type=payload.get("pathogen_type"),
+                sample_alias=payload.get("sample_alias"),
+                taxid=payload.get("taxid"),
+                mlst_st=payload.get("mlst_st"),
+                serotype_result=payload.get("serotype_result"),
+                resistance_gene_hits=payload.get("resistance_gene_hits"),
+                virulence_gene_hits=payload.get("virulence_gene_hits"),
+                resistance_mge_hits=payload.get("resistance_mge_hits"),
+                virulence_mge_hits=payload.get("virulence_mge_hits"),
+                description=payload.get("description"),
+                sample_source=payload.get("sample_source"),
+                collection_date=payload.get("collection_date"),
+                gender=payload.get("gender"),
+                country=payload.get("country"),
+                host_info=payload.get("host_info"),
+                location_json=payload.get("location_json"),
+                sample_type=payload.get("sample_type"),
+                sequencing_method=payload.get("sequencing_method"),
+                genome_length=payload.get("genome_length"),
+                note=payload.get("note"),
+                visibility_scope=payload.get("visibility_scope"),
+                custom_metadata_json=payload.get("custom_metadata_json"),
+                metadata_templates=payload.get("metadata_templates"),
+            )
+        except (PermissionError, ValueError) as exc:
+            raise ValidationError(str(exc)) from exc
+        return jsonify(updated)
+
+    @app.post("/api/database/samples/batch-update")
+    @login_required
+    def batch_update_database_samples():
+        payload = request.get_json(force=True)
+        try:
+            updated = get_sample_library_manager().batch_update_visible(
+                payload.get("sample_keys") or [],
+                role=str(session.get("role") or ""),
+                username=str(session.get("username") or ""),
+                group_name=str(session.get("group_name") or ""),
+                custom_metadata_json=payload.get("custom_metadata_json"),
+                metadata_templates=payload.get("metadata_templates"),
+            )
+        except (PermissionError, ValueError) as exc:
+            raise ValidationError(str(exc)) from exc
+        return jsonify(updated)
+
+    @app.delete("/api/database/samples/<path:sample_key>")
+    @login_required
+    def delete_database_sample(sample_key: str):
+        try:
+            get_sample_library_manager().delete_visible(
+                sample_key,
+                role=str(session.get("role") or ""),
+                username=str(session.get("username") or ""),
+                group_name=str(session.get("group_name") or ""),
+            )
+        except PermissionError as exc:
+            raise ValidationError(str(exc)) from exc
+        return jsonify({"status": "deleted", "sample_key": sample_key})
+
+    @app.post("/api/database/samples/<path:sample_key>/submit")
+    @login_required
+    def submit_database_sample(sample_key: str):
+        try:
+            result = get_sample_library_manager().submit_personal_to_main(
+                sample_key,
+                role=str(session.get("role") or ""),
+                username=str(session.get("username") or ""),
+                group_name=str(session.get("group_name") or ""),
+            )
+        except PermissionError as exc:
+            raise ValidationError(str(exc)) from exc
+        return jsonify(result)
+
+    @app.post("/api/database/submissions/<request_id>/review")
+    @admin_required
+    def review_database_submission(request_id: str):
+        payload = request.get_json(force=True)
+        result = get_sample_library_manager().review_submission(
+            request_id,
+            action=str(payload.get("action") or "").strip(),
+            admin_username=str(session.get("username") or ""),
+            note=str(payload.get("note") or "").strip(),
+        )
+        return jsonify(result)
+
+    @app.post("/api/database/releases")
+    @admin_required
+    def publish_database_release():
+        payload = request.get_json(force=True)
+        try:
+            result = get_sample_library_manager().publish_release_version(
+                version_label=str(payload.get("version_label") or "").strip(),
+                note=str(payload.get("note") or "").strip(),
+                role=str(session.get("role") or ""),
+                username=str(session.get("username") or ""),
+                group_name=str(session.get("group_name") or ""),
+            )
+        except (PermissionError, ValueError) as exc:
+            raise ValidationError(str(exc)) from exc
+        return jsonify(result)
+
+    @app.post("/api/database/local-import")
+    @login_required
+    def import_local_sample_to_database():
+        payload = request.get_json(force=True)
+        requested_scope = str(payload.get("library_scope") or "").strip()
+        is_admin = str(session.get("role") or "") == "admin"
+        library_scope = requested_scope if is_admin and requested_scope in {"main", "personal"} else ("main" if is_admin else "personal")
+        imported = get_sample_library_manager().import_local_sample(
+            owner=str(session.get("username") or ""),
+            owner_group=str(session.get("group_name") or ""),
+            library_scope=library_scope,
+            sample_name=str(payload.get("sample_name") or "").strip(),
+            final_fasta_path=_resolve_optional_existing_path(project_root, payload.get("final_fasta_path")),
+            pathogen_type=str(payload.get("pathogen_type") or "").strip(),
+            species_name=str(payload.get("species_name") or "").strip(),
+            mlst_species_name=str(payload.get("mlst_species_name") or "").strip(),
+            mlst_st=str(payload.get("mlst_st") or "").strip(),
+            serotype_result=str(payload.get("serotype_result") or "").strip(),
+            q20_rate=str(payload.get("q20_rate") or "").strip(),
+            q30_rate=str(payload.get("q30_rate") or "").strip(),
+            completeness=str(payload.get("completeness") or "").strip(),
+            contamination=str(payload.get("contamination") or "").strip(),
+            contig_count=str(payload.get("contig_count") or "").strip(),
+            plasmid_count=str(payload.get("plasmid_count") or "").strip(),
+            resistance_count=str(payload.get("resistance_count") or "").strip(),
+            virulence_count=str(payload.get("virulence_count") or "").strip(),
+            resistance_gene_hits=str(payload.get("resistance_gene_hits") or "").strip(),
+            virulence_gene_hits=str(payload.get("virulence_gene_hits") or "").strip(),
+            resistance_mge_hits=str(payload.get("resistance_mge_hits") or "").strip(),
+            virulence_mge_hits=str(payload.get("virulence_mge_hits") or "").strip(),
+            genome_id=str(payload.get("genome_id") or "").strip(),
+            taxid=str(payload.get("taxid") or "").strip(),
+            description=str(payload.get("description") or "").strip(),
+            sample_source=str(payload.get("sample_source") or "").strip(),
+            collection_date=str(payload.get("collection_date") or "").strip(),
+            gender=str(payload.get("gender") or "").strip(),
+            country=str(payload.get("country") or "").strip(),
+            host_info=str(payload.get("host_info") or "").strip(),
+            location_json=str(payload.get("location_json") or "").strip(),
+            sample_type=str(payload.get("sample_type") or "").strip(),
+            sequencing_method=str(payload.get("sequencing_method") or "").strip(),
+            note=str(payload.get("note") or "").strip(),
+            custom_metadata_json=json.dumps(payload.get("custom_metadata_json") or [], ensure_ascii=False),
+        )
+        return jsonify(imported)
+
+    @app.post("/api/database/batch-import")
+    @login_required
+    def import_batch_samples_to_database():
+        if not str(request.form.get("precheck_id") or "").strip():
+            raise ValidationError("请先完成批量导入预检，通过后再开始正式导入")
+        precheck_payload = _load_batch_import_precheck(
+            batch_import_precheck_cache,
+            precheck_id=str(request.form.get("precheck_id") or ""),
+            kind="database",
+            category="sample",
+            owner=str(session.get("username") or ""),
+        )
+        if precheck_payload is None:
+            raise ValidationError("请先完成批量导入预检，通过后再开始正式导入")
+        import_filename, import_content, batch_id = precheck_payload
+        rows = _parse_database_batch_upload(import_filename, import_content)
+        requested_scope = str(request.form.get("library_scope") or request.args.get("library_scope") or "").strip()
+        is_admin = str(session.get("role") or "") == "admin"
+        library_scope = requested_scope if is_admin and requested_scope in {"main", "personal"} else ("main" if is_admin else "personal")
+        imported_items: list[dict[str, object]] = []
+        skipped: list[dict[str, str]] = []
+        sample_library_manager = get_sample_library_manager()
+        metadata_templates = sample_library_manager.list_metadata_templates()
+        for index, row in enumerate(rows, start=2):
+            sample_name = str(row.get("sample_name") or "").strip()
+            final_fasta_path = str(row.get("final_fasta_path") or "").strip()
+            if not sample_name and not final_fasta_path:
+                continue
+            try:
+                province = str(row.get("province") or "").strip()
+                city = str(row.get("city") or "").strip()
+                district = str(row.get("district") or "").strip()
+                location_detail = str(row.get("location_detail") or "").strip()
+                country = str(row.get("country") or "").strip()
+                if not country and any([province, city, district]):
+                    country = "中国"
+                metadata_items = _build_database_import_metadata_items(row, metadata_templates)
+                sample_library_manager.validate_metadata_items(metadata_items)
+                result = sample_library_manager.import_local_sample(
+                    owner=str(session.get("username") or ""),
+                    owner_group=str(session.get("group_name") or ""),
+                    library_scope=library_scope,
+                    sample_name=sample_name,
+                    final_fasta_path=_resolve_optional_existing_path(project_root, final_fasta_path),
+                    pathogen_type=str(row.get("pathogen_type") or "").strip(),
+                    species_name=str(row.get("species_name") or "").strip(),
+                    mlst_species_name=str(row.get("mlst_species_name") or "").strip(),
+                    mlst_st=str(row.get("mlst_st") or "").strip(),
+                    serotype_result=str(row.get("serotype_result") or "").strip(),
+                    q20_rate=str(row.get("q20_rate") or "").strip(),
+                    q30_rate=str(row.get("q30_rate") or "").strip(),
+                    completeness=str(row.get("completeness") or "").strip(),
+                    contamination=str(row.get("contamination") or "").strip(),
+                    contig_count=str(row.get("contig_count") or "").strip(),
+                    plasmid_count=str(row.get("plasmid_count") or "").strip(),
+                    resistance_count=str(row.get("resistance_count") or "").strip(),
+                    virulence_count=str(row.get("virulence_count") or "").strip(),
+                    resistance_gene_hits=str(row.get("resistance_gene_hits") or "").strip(),
+                    virulence_gene_hits=str(row.get("virulence_gene_hits") or "").strip(),
+                    resistance_mge_hits=str(row.get("resistance_mge_hits") or "").strip(),
+                    virulence_mge_hits=str(row.get("virulence_mge_hits") or "").strip(),
+                    genome_id=str(row.get("genome_id") or "").strip(),
+                    taxid=str(row.get("taxid") or "").strip(),
+                    description=str(row.get("description") or "").strip(),
+                    sample_source=str(row.get("sample_source") or "").strip(),
+                    collection_date=str(row.get("collection_date") or "").strip(),
+                    gender=str(row.get("gender") or "").strip(),
+                    country=country,
+                    host_info=str(row.get("host_info") or "").strip(),
+                    location_json=json.dumps(
+                        {
+                            "province": province,
+                            "city": city,
+                            "district": district,
+                            "detail": location_detail,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    sample_type=str(row.get("sample_type") or "").strip(),
+                    sequencing_method=str(row.get("sequencing_method") or "").strip(),
+                    note=str(row.get("note") or "").strip(),
+                    custom_metadata_json=json.dumps(metadata_items, ensure_ascii=False),
+                )
+                imported_items.extend(result.get("items") or [])
+            except Exception as exc:
+                skipped.append(
+                    {
+                        "row": str(index),
+                        "sample_name": sample_name or "-",
+                        "reason": str(exc),
+                    }
+                )
+        response_payload = {
+            "status": "ok",
+            "batch_id": batch_id,
+            "imported_count": len(imported_items),
+            "skipped_count": len(skipped),
+            "items": imported_items,
+            "skipped": skipped,
+        }
+        if batch_id:
+            store.update_batch_import_run(
+                batch_id,
+                {
+                    "status": "completed_with_skips" if skipped else "completed",
+                    "result": response_payload,
+                    "imported_count": len(imported_items),
+                    "skipped_count": len(skipped),
+                    "issue_count": len(skipped),
+                    "completed_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                },
+            )
+        return jsonify(response_payload)
+
+    @app.post("/api/database/batch-import/precheck")
+    @login_required
+    def precheck_batch_samples_to_database():
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            raise ValidationError("请先选择批量导入文件")
+        filename = str(upload.filename or "")
+        content = upload.read()
+        result = _precheck_database_batch_upload(
+            project_root=project_root,
+            sample_library_manager=get_sample_library_manager(),
+            filename=filename,
+            content=content,
+        )
+        batch_id = f"batch-{uuid.uuid4().hex}"
+        store.create_batch_import_run(
+            {
+                "batch_id": batch_id,
+                "import_type": "database",
+                "category": "sample",
+                "filename": filename,
+                "operator": str(session.get("username") or ""),
+                "role": str(session.get("role") or ""),
+                "group_name": str(session.get("group_name") or ""),
+                "status": "precheck_passed" if result.get("can_import") else "precheck_failed",
+                "precheck": result,
+                "issue_count": int(result.get("issue_count") or 0),
+                "content_hash": hashlib.sha256(content).hexdigest(),
+            }
+        )
+        result["batch_id"] = batch_id
+        result = _store_batch_import_precheck(
+            batch_import_precheck_cache,
+            kind="database",
+            category="sample",
+            owner=str(session.get("username") or ""),
+            filename=filename,
+            content=content,
+            result=result,
+            batch_id=batch_id,
+        )
+        return jsonify(result)
+
+    @app.get("/api/database/import-template")
+    @login_required
+    def download_database_import_template():
+        file_format = str(request.args.get("format", "xlsx") or "xlsx").strip().lower()
+        if file_format not in {"xlsx", "csv", "tsv"}:
+            raise ValidationError("模板格式只支持 xlsx、csv 或 tsv")
+        metadata_templates = get_sample_library_manager().list_metadata_templates()
+        if file_format == "xlsx":
+            content = _build_database_import_template_xlsx(metadata_templates)
+            mimetype = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            suffix = "xlsx"
+        else:
+            delimiter = "," if file_format == "csv" else "\t"
+            content = _build_database_import_template_text(delimiter).encode("utf-8-sig")
+            mimetype = "text/csv" if file_format == "csv" else "text/tab-separated-values"
+            suffix = file_format
+        return Response(
+            content,
+            mimetype=mimetype,
+            headers={
+                "Content-Disposition": f'attachment; filename="sample_database_import_template.{suffix}"'
+            },
+        )
+
+    @app.get("/api/batch-import-runs")
+    @login_required
+    def list_batch_import_runs():
+        import_type = str(request.args.get("import_type") or "").strip()
+        category = str(request.args.get("category") or "").strip()
+        limit = request.args.get("limit", default=100, type=int)
+        items = store.list_batch_import_runs(import_type=import_type, category=category, limit=limit)
+        if str(session.get("role") or "") != "admin":
+            username = str(session.get("username") or "")
+            items = [item for item in items if str(item.get("operator") or "") == username]
+        for item in items:
+            for key in ("precheck_json", "result_json"):
+                raw_value = str(item.get(key) or "").strip()
+                try:
+                    item[key[:-5]] = json.loads(raw_value) if raw_value else {}
+                except json.JSONDecodeError:
+                    item[key[:-5]] = {}
+        return jsonify({"items": items})
+
+    @app.get("/api/reference-database/import-template")
+    @login_required
+    def download_reference_database_import_template():
+        category = str(request.args.get("category", "host") or "host").strip().lower()
+        if category not in {"host", "pathogen"}:
+            raise ValidationError("category 只支持 host 或 pathogen")
+        file_format = str(request.args.get("format", "xlsx") or "xlsx").strip().lower()
+        if file_format not in {"xlsx", "csv", "tsv"}:
+            raise ValidationError("模板格式只支持 xlsx、csv 或 tsv")
+        if file_format == "xlsx":
+            content = _build_reference_import_template_xlsx(category)
+            mimetype = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            suffix = "xlsx"
+        else:
+            delimiter = "," if file_format == "csv" else "\t"
+            content = _build_reference_import_template_text(category, delimiter).encode("utf-8-sig")
+            mimetype = "text/csv" if file_format == "csv" else "text/tab-separated-values"
+            suffix = file_format
+        filename = "host_reference_import_template" if category == "host" else "pathogen_reference_import_template"
+        return Response(
+            content,
+            mimetype=mimetype,
+            headers={"Content-Disposition": f'attachment; filename="{filename}.{suffix}"'},
+        )
+
+    @app.get("/api/host-database/records")
+    @login_required
+    def list_host_database_records():
+        return jsonify({"items": store.list_host_database("host")})
+
+    @app.get("/api/host-database/remote-import-jobs")
+    @login_required
+    def list_host_database_remote_import_jobs():
+        return jsonify({"items": _list_reference_download_jobs("host")})
+
+    @app.delete("/api/host-database/remote-import-jobs/<job_id>")
+    @login_required
+    def delete_host_database_remote_import_job(job_id: str):
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护宿主数据库")
+        _delete_reference_download_job(job_id, "host")
+        return jsonify({"status": "deleted", "job_id": job_id})
+
+    @app.get("/api/host-database/records/<path:host_key>")
+    @login_required
+    def get_host_database_record(host_key: str):
+        return jsonify(store.get_host_database_record(host_key))
+
+    @app.get("/api/pathogen-database/records")
+    @login_required
+    def list_pathogen_database_records():
+        return jsonify({"items": store.list_host_database("pathogen")})
+
+    @app.get("/api/pathogen-database/remote-import-jobs")
+    @login_required
+    def list_pathogen_database_remote_import_jobs():
+        return jsonify({"items": _list_reference_download_jobs("pathogen")})
+
+    @app.delete("/api/pathogen-database/remote-import-jobs/<job_id>")
+    @login_required
+    def delete_pathogen_database_remote_import_job(job_id: str):
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护病原基因组数据库")
+        _delete_reference_download_job(job_id, "pathogen")
+        return jsonify({"status": "deleted", "job_id": job_id})
+
+    @app.get("/api/pathogen-database/records/<path:host_key>")
+    @login_required
+    def get_pathogen_database_record(host_key: str):
+        return jsonify(store.get_host_database_record(host_key))
+
+    @app.post("/api/task-references/upload")
+    @login_required
+    def upload_task_reference():
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            raise ValidationError("请先上传参考 FASTA 文件")
+        saved_path = _save_uploaded_task_reference(
+            project_root=project_root,
+            upload=upload,
+            owner=str(session.get("username") or ""),
+        )
+        return jsonify(
+            {
+                "status": "ok",
+                "path": str(saved_path),
+                "name": Path(str(upload.filename or "")).name,
+            }
+        )
+
+    @app.get("/api/pathogen-database/cgmlst-panels")
+    @login_required
+    def list_pathogen_cgmlst_panels():
+        return jsonify({"items": store.list_reference_panels("pathogen", "cgmlst")})
+
+    @app.post("/api/host-database/local-import")
+    @login_required
+    def import_local_host_genome():
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护宿主数据库")
+        payload = request.get_json(force=True)
+        imported = _import_reference_records_from_source(
+            store=store,
+            project_root=project_root,
+            category="host",
+            host_name=str(payload.get("host_name") or "").strip(),
+            genome_name=str(payload.get("genome_name") or "").strip(),
+            taxid=str(payload.get("taxid") or "").strip(),
+            source_type="local",
+            source_label=str(payload.get("source_label") or "本地导入").strip(),
+            source_accession=str(payload.get("source_accession") or "").strip(),
+            source_url="",
+            source_path_value=payload.get("fasta_path"),
+            description=str(payload.get("description") or "").strip(),
+            owner=str(session.get("username") or ""),
+        )
+        return jsonify(imported)
+
+    @app.post("/api/host-database/upload-import")
+    @login_required
+    def upload_local_host_genome():
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护宿主数据库")
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            raise ValidationError("请先上传宿主 FASTA 文件")
+        uploaded_path = _save_uploaded_reference_genome(project_root=project_root, category="host", upload=upload)
+        imported = _register_reference_database_record(
+            store=store,
+            project_root=project_root,
+            category="host",
+            host_name=str(request.form.get("host_name") or "").strip(),
+            genome_name=str(request.form.get("genome_name") or "").strip() or Path(upload.filename).stem,
+            taxid=str(request.form.get("taxid") or "").strip(),
+            source_type="local",
+            source_label=str(request.form.get("source_label") or "本地上传").strip(),
+            source_accession=str(request.form.get("source_accession") or "").strip(),
+            source_url="",
+            source_fasta_path=uploaded_path,
+            description=str(request.form.get("description") or "").strip(),
+            owner=str(session.get("username") or ""),
+        )
+        return jsonify(imported)
+
+    @app.post("/api/host-database/batch-import")
+    @login_required
+    def import_batch_host_genomes():
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护宿主数据库")
+        if not str(request.form.get("precheck_id") or "").strip():
+            raise ValidationError("请先完成批量导入预检，通过后再开始正式导入")
+        precheck_payload = _load_batch_import_precheck(
+            batch_import_precheck_cache,
+            precheck_id=str(request.form.get("precheck_id") or ""),
+            kind="reference",
+            category="host",
+            owner=str(session.get("username") or ""),
+        )
+        if precheck_payload is None:
+            raise ValidationError("请先完成批量导入预检，通过后再开始正式导入")
+        import_filename, import_content, batch_id = precheck_payload
+        result = _batch_import_reference_records(
+            store=store,
+            project_root=project_root,
+            category="host",
+            owner=str(session.get("username") or ""),
+            filename=import_filename,
+            content=import_content,
+        )
+        result["batch_id"] = batch_id
+        if batch_id:
+            store.update_batch_import_run(
+                batch_id,
+                {
+                    "status": "completed_with_skips" if int(result.get("skipped_count") or 0) else "completed",
+                    "result": result,
+                    "imported_count": int(result.get("imported_count") or 0),
+                    "skipped_count": int(result.get("skipped_count") or 0),
+                    "issue_count": int(result.get("skipped_count") or 0),
+                    "completed_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                },
+            )
+        return jsonify(result)
+
+    @app.post("/api/reference-database/batch-import/precheck")
+    @login_required
+    def precheck_batch_reference_genomes():
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护参考基因组数据库")
+        category = str(request.form.get("category") or request.args.get("category") or "host").strip().lower()
+        if category not in {"host", "pathogen"}:
+            raise ValidationError("category 只支持 host 或 pathogen")
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            raise ValidationError("请先选择批量导入文件")
+        filename = str(upload.filename or "")
+        content = upload.read()
+        result = _precheck_reference_batch_upload(
+            project_root=project_root,
+            category=category,
+            filename=filename,
+            content=content,
+        )
+        batch_id = f"batch-{uuid.uuid4().hex}"
+        store.create_batch_import_run(
+            {
+                "batch_id": batch_id,
+                "import_type": "reference",
+                "category": category,
+                "filename": filename,
+                "operator": str(session.get("username") or ""),
+                "role": str(session.get("role") or ""),
+                "group_name": str(session.get("group_name") or ""),
+                "status": "precheck_passed" if result.get("can_import") else "precheck_failed",
+                "precheck": result,
+                "issue_count": int(result.get("issue_count") or 0),
+                "content_hash": hashlib.sha256(content).hexdigest(),
+            }
+        )
+        result["batch_id"] = batch_id
+        result = _store_batch_import_precheck(
+            batch_import_precheck_cache,
+            kind="reference",
+            category=category,
+            owner=str(session.get("username") or ""),
+            filename=filename,
+            content=content,
+            result=result,
+            batch_id=batch_id,
+        )
+        return jsonify(result)
+
+    @app.post("/api/host-database/remote-import")
+    @login_required
+    def import_remote_host_genome():
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护宿主数据库")
+        payload = request.get_json(force=True)
+        provider = str(payload.get("provider") or "").strip().lower()
+        if provider not in {"ncbi", "ensembl"}:
+            raise ValidationError("provider 只支持 ncbi 或 ensembl")
+        ncbi_mode = str(payload.get("ncbi_mode") or "datasets").strip().lower()
+        if ncbi_mode not in {"datasets", "api"}:
+            raise ValidationError("ncbi_mode 只支持 datasets 或 api")
+        query = str(payload.get("query") or "").strip()
+        if not query:
+            raise ValidationError("请填写 accession 或下载链接")
+        job = _start_reference_download_job(category="host", payload=payload, owner=str(session.get("username") or ""))
+        return jsonify({"status": "queued", "job": job})
+
+    @app.post("/api/host-database/build-index")
+    @login_required
+    def build_host_database_index():
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护宿主数据库")
+        result = _build_reference_database_index(store=store, project_root=project_root, category="host")
+        return jsonify(result)
+
+    @app.put("/api/host-database/records/<path:host_key>")
+    @login_required
+    def update_host_database_record(host_key: str):
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护宿主数据库")
+        if request.files:
+            payload = dict(request.form)
+            upload = request.files.get("file")
+            if upload is not None and upload.filename:
+                uploaded_path = _save_uploaded_reference_genome(project_root=project_root, category="host", upload=upload)
+                payload["uploaded_fasta_path"] = str(uploaded_path)
+        else:
+            payload = request.get_json(force=True)
+        record = _update_reference_database_record(
+            store=store,
+            project_root=project_root,
+            host_key=host_key,
+            category="host",
+            payload=payload,
+        )
+        return jsonify(record)
+
+    @app.post("/api/host-database/records/<path:host_key>/build-index")
+    @login_required
+    def build_single_host_database_index(host_key: str):
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护宿主数据库")
+        result = _build_single_reference_index(store=store, project_root=project_root, category="host", host_key=host_key)
+        return jsonify(result)
+
+    @app.delete("/api/host-database/records/<path:host_key>")
+    @login_required
+    def delete_host_database_record(host_key: str):
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护宿主数据库")
+        result = _delete_reference_database_record(store=store, project_root=project_root, host_key=host_key, category="host")
+        return jsonify(result)
+
+    @app.post("/api/pathogen-database/local-import")
+    @login_required
+    def import_local_pathogen_genome():
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护病原基因组数据库")
+        payload = request.get_json(force=True)
+        imported = _import_reference_records_from_source(
+            store=store,
+            project_root=project_root,
+            category="pathogen",
+            host_name=str(payload.get("host_name") or "").strip(),
+            genome_name=str(payload.get("genome_name") or "").strip(),
+            taxid=str(payload.get("taxid") or "").strip(),
+            source_type="local",
+            source_label=str(payload.get("source_label") or "本地导入").strip(),
+            source_accession=str(payload.get("source_accession") or "").strip(),
+            source_url="",
+            source_path_value=payload.get("fasta_path"),
+            description=str(payload.get("description") or "").strip(),
+            owner=str(session.get("username") or ""),
+        )
+        return jsonify(imported)
+
+    @app.post("/api/pathogen-database/upload-import")
+    @login_required
+    def upload_local_pathogen_genome():
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护病原基因组数据库")
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            raise ValidationError("请先上传病原 FASTA 文件")
+        uploaded_path = _save_uploaded_reference_genome(project_root=project_root, category="pathogen", upload=upload)
+        imported = _register_reference_database_record(
+            store=store,
+            project_root=project_root,
+            category="pathogen",
+            host_name=str(request.form.get("host_name") or "").strip(),
+            genome_name=str(request.form.get("genome_name") or "").strip() or Path(upload.filename).stem,
+            taxid=str(request.form.get("taxid") or "").strip(),
+            source_type="local",
+            source_label=str(request.form.get("source_label") or "本地上传").strip(),
+            source_accession=str(request.form.get("source_accession") or "").strip(),
+            source_url="",
+            source_fasta_path=uploaded_path,
+            description=str(request.form.get("description") or "").strip(),
+            owner=str(session.get("username") or ""),
+        )
+        return jsonify(imported)
+
+    @app.post("/api/pathogen-database/batch-import")
+    @login_required
+    def import_batch_pathogen_genomes():
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护病原基因组数据库")
+        if not str(request.form.get("precheck_id") or "").strip():
+            raise ValidationError("请先完成批量导入预检，通过后再开始正式导入")
+        precheck_payload = _load_batch_import_precheck(
+            batch_import_precheck_cache,
+            precheck_id=str(request.form.get("precheck_id") or ""),
+            kind="reference",
+            category="pathogen",
+            owner=str(session.get("username") or ""),
+        )
+        if precheck_payload is None:
+            raise ValidationError("请先完成批量导入预检，通过后再开始正式导入")
+        import_filename, import_content, batch_id = precheck_payload
+        result = _batch_import_reference_records(
+            store=store,
+            project_root=project_root,
+            category="pathogen",
+            owner=str(session.get("username") or ""),
+            filename=import_filename,
+            content=import_content,
+        )
+        result["batch_id"] = batch_id
+        if batch_id:
+            store.update_batch_import_run(
+                batch_id,
+                {
+                    "status": "completed_with_skips" if int(result.get("skipped_count") or 0) else "completed",
+                    "result": result,
+                    "imported_count": int(result.get("imported_count") or 0),
+                    "skipped_count": int(result.get("skipped_count") or 0),
+                    "issue_count": int(result.get("skipped_count") or 0),
+                    "completed_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                },
+            )
+        return jsonify(result)
+
+    @app.post("/api/pathogen-database/remote-import")
+    @login_required
+    def import_remote_pathogen_genome():
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护病原基因组数据库")
+        payload = request.get_json(force=True)
+        provider = str(payload.get("provider") or "").strip().lower()
+        if provider not in {"ncbi", "gtdb"}:
+            raise ValidationError("provider 只支持 ncbi 或 gtdb")
+        ncbi_mode = str(payload.get("ncbi_mode") or "datasets").strip().lower()
+        if ncbi_mode not in {"datasets", "api", "taxid_refs"}:
+            raise ValidationError("ncbi_mode 只支持 datasets、api 或 taxid_refs")
+        query = str(payload.get("query") or "").strip()
+        if not query:
+            raise ValidationError("请填写 accession 或下载链接")
+        if provider == "ncbi" and ncbi_mode == "taxid_refs":
+            if not query.isdigit():
+                raise ValidationError("TaxID 下载模式下请输入纯数字 TaxID")
+            payload["taxid"] = query
+            try:
+                payload["max_genomes"] = max(1, min(200, int(payload.get("max_genomes") or 20)))
+            except (TypeError, ValueError):
+                raise ValidationError("最多导入参考数必须是 1-200 的整数")
+        job = _start_reference_download_job(category="pathogen", payload=payload, owner=str(session.get("username") or ""))
+        return jsonify({"status": "queued", "job": job})
+
+    @app.post("/api/pathogen-database/build-index")
+    @login_required
+    def build_pathogen_database_index():
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护病原基因组数据库")
+        payload = request.get_json(silent=True) or {}
+        host_keys = payload.get("host_keys") or []
+        if host_keys:
+            built_items = [
+                _build_single_reference_index(
+                    store=store,
+                    project_root=project_root,
+                    category="pathogen",
+                    host_key=str(host_key or "").strip(),
+                )
+                for host_key in host_keys
+                if str(host_key or "").strip()
+            ]
+            result = {
+                "status": "built",
+                "message": f"已完成 {len(built_items)} 条选中病原参考的索引构建",
+                "built_items": built_items,
+                "items": store.list_host_database("pathogen"),
+            }
+        else:
+            result = _build_reference_database_index(store=store, project_root=project_root, category="pathogen")
+        return jsonify(result)
+
+    @app.post("/api/pathogen-database/cgmlst-panels/build")
+    @login_required
+    def build_pathogen_cgmlst_panels():
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护病原基因组数据库")
+        payload = request.get_json(force=True) or {}
+        host_keys = payload.get("host_keys") or []
+        threshold = str(payload.get("threshold") or "0.95").strip() or "0.95"
+        threads = max(1, int(payload.get("threads") or 8))
+        result = _queue_pathogen_cgmlst_panels(
+            store=store,
+            project_root=project_root,
+            host_keys=host_keys,
+            threshold=threshold,
+            threads=threads,
+            owner=str(session.get("username") or ""),
+        )
+        return jsonify(result)
+
+    @app.put("/api/pathogen-database/records/<path:host_key>")
+    @login_required
+    def update_pathogen_database_record(host_key: str):
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护病原基因组数据库")
+        if request.files:
+            payload = dict(request.form)
+            upload = request.files.get("file")
+            if upload is not None and upload.filename:
+                uploaded_path = _save_uploaded_reference_genome(project_root=project_root, category="pathogen", upload=upload)
+                payload["uploaded_fasta_path"] = str(uploaded_path)
+        else:
+            payload = request.get_json(force=True)
+        record = _update_reference_database_record(
+            store=store,
+            project_root=project_root,
+            host_key=host_key,
+            category="pathogen",
+            payload=payload,
+        )
+        return jsonify(record)
+
+    @app.post("/api/pathogen-database/records/<path:host_key>/build-index")
+    @login_required
+    def build_single_pathogen_database_index(host_key: str):
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护病原基因组数据库")
+        result = _build_single_reference_index(store=store, project_root=project_root, category="pathogen", host_key=host_key)
+        return jsonify(result)
+
+    @app.delete("/api/pathogen-database/records/<path:host_key>")
+    @login_required
+    def delete_pathogen_database_record(host_key: str):
+        if str(session.get("role") or "") != "admin":
+            raise PermissionError("仅管理员可维护病原基因组数据库")
+        result = _delete_reference_database_record(store=store, project_root=project_root, host_key=host_key, category="pathogen")
+        return jsonify(result)
 
     @app.get("/api/filesystem")
     @login_required
@@ -127,11 +4829,16 @@ def create_app() -> Flask:
             item_type = "directory" if child.is_dir() else "file"
             if selector == "output" and item_type != "directory":
                 continue
+            try:
+                modified_at = child.stat().st_mtime
+            except OSError:
+                modified_at = None
             items.append(
                 {
                     "name": child.name,
                     "type": item_type,
                     "path": _to_browser_path(base_root, child),
+                    "modified_at": modified_at,
                 }
             )
 
@@ -139,12 +4846,15 @@ def create_app() -> Flask:
         if current_path != current_path.parent:
             parent_relative = _to_browser_path(base_root, current_path.parent)
 
+        home_path, desktop_path = _resolve_home_and_desktop_paths()
         return jsonify(
             {
                 "root": str(base_root),
                 "current_path": str(current_path),
                 "relative_path": _to_browser_path(base_root, current_path),
                 "parent_relative_path": parent_relative,
+                "home_path": str(home_path),
+                "desktop_path": str(desktop_path),
                 "selector": selector,
                 "within_root": _is_within_root(base_root, current_path),
                 "items": items,
@@ -165,8 +4875,10 @@ def create_app() -> Flask:
         if any(token in name for token in ["/", "\\"]):
             raise ValidationError("文件夹名称不能包含路径分隔符")
         target = (parent / name).resolve()
-        _assert_within_root(base_root, target)
-        target.mkdir(exist_ok=False)
+        try:
+            target.mkdir(exist_ok=False)
+        except PermissionError as exc:
+            raise ValidationError(f"没有写入目录权限: {parent}") from exc
         return jsonify({"status": "ok", "path": _to_browser_path(base_root, target)})
 
     @app.post("/api/filesystem/rename")
@@ -194,8 +4906,9 @@ def create_app() -> Flask:
         task = task_manager.get_task(task_id, log_lines=log_lines, owner=None)
         _ensure_can_view_task(task)
         result_html = _resolve_task_result_html(task)
-        task["result_exists"] = result_html is not None
-        task["result_url"] = url_for("task_result_view", task_id=task_id) if result_html else ""
+        embedded_result = _task_has_embedded_result(task)
+        task["result_exists"] = result_html is not None or embedded_result
+        task["result_url"] = url_for("task_result_view", task_id=task_id) if (result_html or embedded_result) else ""
         task["result_name"] = result_html.name if result_html else ""
         return jsonify(task)
 
@@ -207,6 +4920,86 @@ def create_app() -> Flask:
         task_manager.delete_task(task_id, owner=None)
         return jsonify({"status": "deleted", "id": task_id})
 
+    @app.post("/api/tasks/<task_id>/pause")
+    @login_required
+    def pause_task(task_id: str):
+        task = task_manager.get_task(task_id, log_lines=0, owner=None)
+        _ensure_can_control_task(task)
+        updated = task_manager.pause_task(
+            task_id,
+            owner=None,
+            max_concurrent_tasks=int(store.get_setting("max_concurrent_tasks", "2") or "2"),
+        )
+        return jsonify(updated)
+
+    @app.post("/api/tasks/<task_id>/resume")
+    @login_required
+    def resume_task(task_id: str):
+        task = task_manager.get_task(task_id, log_lines=0, owner=None)
+        _ensure_can_control_task(task)
+        updated = task_manager.resume_task(
+            task_id,
+            owner=None,
+            max_concurrent_tasks=int(store.get_setting("max_concurrent_tasks", "2") or "2"),
+        )
+        return jsonify(updated)
+
+    @app.post("/api/tasks/<task_id>/stop")
+    @login_required
+    def stop_task(task_id: str):
+        task = task_manager.get_task(task_id, log_lines=0, owner=None)
+        _ensure_can_control_task(task)
+        updated = task_manager.stop_task(
+            task_id,
+            owner=None,
+            max_concurrent_tasks=int(store.get_setting("max_concurrent_tasks", "2") or "2"),
+        )
+        return jsonify(updated)
+
+    @app.post("/api/tasks/<task_id>/open-output")
+    @login_required
+    def open_task_output(task_id: str):
+        task = task_manager.get_task(task_id, log_lines=0, owner=None)
+        _ensure_can_view_task(task)
+        output_dir = str((task.get("params") or {}).get("output_dir", "") or "").strip()
+        if not output_dir:
+            raise ValidationError("当前任务没有输出目录")
+        target = Path(output_dir).expanduser().resolve()
+        if not target.exists():
+            raise ValidationError(f"输出目录不存在: {target}")
+        _open_in_file_manager(target)
+        return jsonify({"status": "opened", "path": str(target)})
+
+    @app.post("/api/tasks/<task_id>/database-import")
+    @login_required
+    def import_task_to_database(task_id: str):
+        task = task_manager.get_task(task_id, log_lines=0, owner=None)
+        _ensure_can_view_task(task)
+        payload = request.get_json(silent=True) or {}
+        requested_scope = str(payload.get("library_scope") or "").strip()
+        is_admin = str(session.get("role") or "") == "admin"
+        library_scope = requested_scope if is_admin and requested_scope in {"main", "personal"} else ("main" if is_admin else "personal")
+        if str((task.get("params") or {}).get("method") or "").strip().lower() == "meta":
+            selected_bins = payload.get("selected_bins") or []
+            imported = get_sample_library_manager().import_meta_task_bins(
+                task,
+                selected_bins=selected_bins if isinstance(selected_bins, list) else [],
+                library_scope=library_scope,
+            )
+        else:
+            imported = get_sample_library_manager().import_task_samples(task, library_scope=library_scope)
+        return jsonify(imported)
+
+    @app.get("/api/tasks/<task_id>/database-import-preview")
+    @login_required
+    def preview_task_database_import(task_id: str):
+        task = task_manager.get_task(task_id, log_lines=0, owner=None)
+        _ensure_can_view_task(task)
+        if str((task.get("params") or {}).get("method") or "").strip().lower() != "meta":
+            raise ValidationError("当前只有 meta 任务需要预览 bin 导入清单")
+        preview = get_sample_library_manager().preview_meta_task_bins(task)
+        return jsonify(preview)
+
     @app.get("/api/tasks/<task_id>/result-view")
     @login_required
     def task_result_view(task_id: str):
@@ -214,6 +5007,9 @@ def create_app() -> Flask:
         _ensure_can_view_task(task)
         result_html = _resolve_task_result_html(task)
         if result_html is None or not result_html.is_file():
+            if _is_community_report_task(task):
+                payload = _build_report_payload(task)
+                return render_template("community_result_view.html", report=payload)
             raise KeyError(f"Result not found for task: {task_id}")
         html = result_html.read_text(encoding="utf-8", errors="ignore")
         html = _inject_result_preview_style(html)
@@ -224,14 +5020,257 @@ def create_app() -> Flask:
     def task_result_page(task_id: str):
         task = task_manager.get_task(task_id, log_lines=0, owner=None)
         _ensure_can_view_task(task)
-        return render_template("result_report.html", task=task)
+        selected_sample = str(request.args.get("sample", "") or "").strip()
+        return render_template(
+            "result_report.html",
+            task=task,
+            selected_sample=selected_sample,
+            report_static_version=REPORT_CACHE_VERSION,
+        )
+
+    @app.get("/public/<path:filename>")
+    @login_required
+    def public_asset(filename: str):
+        public_root = (project_root / "public").resolve()
+        response = send_from_directory(str(public_root), filename)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+    @app.get("/auspice")
+    @app.get("/auspice/")
+    @login_required
+    def local_auspice_page():
+        build_root = (project_root / "public" / "auspice-us" / "dist").resolve()
+        index_path = build_root / "index.html"
+        if not index_path.is_file():
+            abort(503, description="本地 Auspice 构建尚未就绪。")
+        html = index_path.read_text(encoding="utf-8", errors="ignore")
+        html = html.replace("/favicon.png", url_for("static", filename="app_icon.png"))
+        return _add_no_cache_headers(Response(html, mimetype="text/html"))
+
+    @app.get("/uploaded/<upload_id>")
+    @app.get("/uploaded/<upload_id>/")
+    @app.get("/auspice/uploaded/<upload_id>")
+    @app.get("/auspice/uploaded/<upload_id>/")
+    @login_required
+    def uploaded_auspice_page(upload_id: str):
+        metadata = _load_uploaded_auspice_metadata(project_root, upload_id)
+        _ensure_can_view_uploaded_auspice(metadata)
+        dataset_path = _uploaded_auspice_dataset_path(project_root, upload_id)
+        if not dataset_path.is_file():
+            abort(404)
+        build_root = (project_root / "public" / "auspice-us" / "dist").resolve()
+        index_path = build_root / "index.html"
+        if not index_path.is_file():
+            abort(503, description="本地 Auspice 构建尚未就绪。")
+        html = index_path.read_text(encoding="utf-8", errors="ignore")
+        html = html.replace("/favicon.png", url_for("static", filename="app_icon.png"))
+        return _add_no_cache_headers(Response(html, mimetype="text/html"))
+
+    @app.get("/nextstrain/<task_id>")
+    @app.get("/nextstrain/<task_id>/")
+    @login_required
+    def nextstrain_dataset_page(task_id: str):
+        task_file = task_manager.task_root / task_id / "task.json"
+        if not task_file.is_file():
+            abort(404)
+        task = read_json(task_file)
+        if str(task.get("task_type") or "").strip() != NEXTSTRAIN_BUILD_TASK_TYPE:
+            abort(404)
+        _ensure_can_view_task(task)
+        build_root = (project_root / "public" / "auspice-us" / "dist").resolve()
+        index_path = build_root / "index.html"
+        if not index_path.is_file():
+            abort(503, description="本地 Auspice 构建尚未就绪。")
+        html = index_path.read_text(encoding="utf-8", errors="ignore")
+        html = html.replace("/favicon.png", url_for("static", filename="app_icon.png"))
+        return _add_no_cache_headers(Response(html, mimetype="text/html"))
+
+    @app.get("/dist/<path:filename>")
+    @login_required
+    def local_auspice_asset(filename: str):
+        build_root = (project_root / "public" / "auspice-us" / "dist").resolve()
+        return _add_no_cache_headers(send_from_directory(str(build_root), filename))
+
+    def _local_auspice_available_response():
+        prefix = str(request.args.get("prefix", "") or "").strip()
+        resolved = _normalize_nextstrain_dataset_prefix(prefix)
+        if not resolved:
+            return jsonify({"datasets": []})
+        resolved_type, dataset_id = resolved
+        if resolved_type == "task":
+            task_file = task_manager.task_root / dataset_id / "task.json"
+            if not task_file.is_file():
+                return jsonify({"datasets": []})
+            task = read_json(task_file)
+            if str(task.get("task_type") or "").strip() != NEXTSTRAIN_BUILD_TASK_TYPE:
+                return jsonify({"datasets": []})
+            _ensure_can_view_task(task)
+            dataset_json = _resolve_nextstrain_dataset_main_json(project_root, task)
+            normalized_prefix = f"nextstrain/{dataset_id}"
+        elif resolved_type == "uploaded":
+            metadata = _load_uploaded_auspice_metadata(project_root, dataset_id)
+            _ensure_can_view_uploaded_auspice(metadata)
+            dataset_json = _uploaded_auspice_dataset_path(project_root, dataset_id)
+            normalized_prefix = f"uploaded/{dataset_id}"
+        else:
+            return jsonify({"datasets": []})
+        if not dataset_json.is_file():
+            return jsonify({"datasets": []})
+        return jsonify({"datasets": [{"request": normalized_prefix, "build": normalized_prefix}]})
+
+    @app.get("/getAvailable")
+    @app.get("/charon/getAvailable")
+    @login_required
+    def local_auspice_available():
+        return _local_auspice_available_response()
+
+    def _local_auspice_dataset_response():
+        prefix = str(request.args.get("prefix", "") or "").strip()
+        dataset_type = str(request.args.get("type", "") or "").strip().lower()
+        resolved = _normalize_nextstrain_dataset_prefix(prefix)
+        if not resolved:
+            abort(404)
+        resolved_type, dataset_id = resolved
+        if resolved_type == "task":
+            task_file = task_manager.task_root / dataset_id / "task.json"
+            if not task_file.is_file():
+                abort(404)
+            task = read_json(task_file)
+            if str(task.get("task_type") or "").strip() != NEXTSTRAIN_BUILD_TASK_TYPE:
+                abort(404)
+            _ensure_can_view_task(task)
+            dataset_path = _resolve_nextstrain_dataset_sidecar(project_root, task, dataset_type)
+        elif resolved_type == "uploaded":
+            metadata = _load_uploaded_auspice_metadata(project_root, dataset_id)
+            _ensure_can_view_uploaded_auspice(metadata)
+            dataset_path = _uploaded_auspice_dataset_path(project_root, dataset_id)
+        else:
+            abort(404)
+        if not dataset_path.is_file():
+            abort(404)
+        response = send_file(str(dataset_path), mimetype="application/json", conditional=True)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+    @app.get("/getDataset")
+    @app.get("/charon/getDataset")
+    @login_required
+    def local_auspice_dataset():
+        return _local_auspice_dataset_response()
 
     @app.get("/api/tasks/<task_id>/report-data")
     @login_required
     def task_report_data(task_id: str):
         task = task_manager.get_task(task_id, log_lines=0, owner=None)
         _ensure_can_view_task(task)
-        return jsonify(_build_report_payload(task))
+        selected_sample = str(request.args.get("sample", "") or "").strip()
+        payload = _build_report_payload(task, selected_sample=selected_sample)
+        payload = maybe_auto_trigger_pathosource_for_meta_task(task, payload, selected_sample=selected_sample)
+        return jsonify(payload)
+
+    @app.get("/api/tasks/<task_id>/analytics-snapshot")
+    @login_required
+    def task_analytics_snapshot(task_id: str):
+        task = task_manager.get_task(task_id, log_lines=0, owner=None)
+        _ensure_can_view_task(task)
+        task_dir = task_manager.task_root / str(task_id)
+        cached = read_task_analytics_snapshot(task_dir)
+        if cached:
+            return jsonify(cached)
+        if str(task.get("status") or "").upper() != "SUCCEEDED":
+            return jsonify(build_pending_queue_analytics_snapshot(task))
+        payload = _build_report_payload(task)
+        snapshot = build_queue_analytics_snapshot(payload)
+        write_task_analytics_snapshot(task_dir, snapshot)
+        return jsonify(snapshot)
+
+    @app.get("/api/tasks/<task_id>/report-asset/<path:asset_name>")
+    @login_required
+    def task_report_asset(task_id: str, asset_name: str):
+        task = task_manager.get_task(task_id, log_lines=0, owner=None)
+        _ensure_can_view_task(task)
+        selected_sample = str(request.args.get("sample", "") or "").strip()
+        render_as = str(request.args.get("render_as", "") or "").strip().lower()
+        report_source = _resolve_report_source(task, selected_sample)
+        if not report_source.get("available"):
+            raise ValidationError(str(report_source.get("reason") or "服务器结果目录尚未就绪。"))
+        report_dir = Path(report_source["report_dir"]).resolve()
+        database_root = _resolve_runtime_database_root()
+        if asset_name == "__ncov_ref.fna":
+            ncov_ref = database_root / "virus" / "ncov" / "ref.fna"
+            if not ncov_ref.is_file():
+                abort(404)
+            response = send_file(str(ncov_ref), mimetype="text/plain; charset=utf-8", conditional=True)
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            return response
+        if asset_name == "__ncov_ref.fna.fai":
+            ncov_ref_fai = database_root / "virus" / "ncov" / "ref.fna.fai"
+            if not ncov_ref_fai.is_file():
+                abort(404)
+            response = send_file(str(ncov_ref_fai), mimetype="text/plain; charset=utf-8", conditional=True)
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            return response
+        if asset_name == "__ncov_genomic.gff":
+            ncov_gff = database_root / "virus" / "ncov" / "genomic.gff"
+            if not ncov_gff.is_file():
+                abort(404)
+            response = send_file(str(ncov_gff), mimetype="text/plain; charset=utf-8", conditional=True)
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            return response
+        if asset_name == "__hmpxv_genome_annotation.gff3":
+            hmpxv_db_root = database_root / "virus" / "nextclade" / "hMPXV"
+            if not hmpxv_db_root.is_dir():
+                hmpxv_db_root = database_root / "nextclade_db" / "hMPXV"
+            hmpxv_gff = hmpxv_db_root / "genome_annotation.gff3"
+            if not hmpxv_gff.is_file():
+                abort(404)
+            response = send_file(str(hmpxv_gff), mimetype="text/plain; charset=utf-8", conditional=True)
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            return response
+        target = (report_dir / asset_name).resolve()
+        if report_dir not in target.parents or not target.is_file():
+            abort(404)
+        target_suffix = target.suffix.lower()
+        if target_suffix == ".gbk":
+            if render_as == "cgview-json":
+                try:
+                    target = _build_cgview_json_from_gbk(report_dir, target, target.stem)
+                except RuntimeError as exc:
+                    raise ValidationError(f"CGView 图谱构建失败: {exc}") from exc
+                response = send_file(str(target), mimetype="application/json")
+            else:
+                response = send_file(str(target), mimetype="text/plain; charset=utf-8")
+        elif target_suffix == ".json":
+            response = send_file(str(target), mimetype="application/json")
+        elif target_suffix in {".bam", ".bai", ".fa", ".fasta", ".fai", ".gff", ".gff3", ".vcf", ".html", ".js", ".svg", ".png", ".csv", ".tsv"}:
+            mimetype = {
+                ".bam": "application/octet-stream",
+                ".bai": "application/octet-stream",
+                ".fa": "text/plain; charset=utf-8",
+                ".fasta": "text/plain; charset=utf-8",
+                ".fai": "text/plain; charset=utf-8",
+                ".gff": "text/plain; charset=utf-8",
+                ".gff3": "text/plain; charset=utf-8",
+                ".vcf": "text/plain; charset=utf-8",
+                ".html": "text/html; charset=utf-8",
+                ".js": "application/javascript; charset=utf-8",
+                ".svg": "image/svg+xml",
+                ".png": "image/png",
+                ".csv": "text/csv; charset=utf-8",
+                ".tsv": "text/tab-separated-values; charset=utf-8",
+            }.get(target_suffix, "application/octet-stream")
+            response = send_file(str(target), mimetype=mimetype, conditional=True)
+        else:
+            abort(403)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     @app.post("/api/export/table")
     @login_required
@@ -241,6 +5280,7 @@ def create_app() -> Flask:
         export_format = str(payload.get("format", "csv")).strip().lower()
         columns = _normalize_export_columns(payload.get("columns", []))
         rows = _normalize_export_rows(payload.get("rows", []))
+        sheets = _normalize_export_sheets(payload.get("sheets", []))
         filename_root = _sanitize_export_filename(str(payload.get("filename", "")).strip() or title)
 
         if export_format == "csv":
@@ -252,7 +5292,7 @@ def create_app() -> Flask:
             mimetype = "text/tab-separated-values; charset=utf-8"
             extension = "tsv"
         elif export_format == "xlsx":
-            content = _build_xlsx_bytes(title, columns, rows)
+            content = _build_xlsx_workbook_bytes(sheets) if sheets else _build_xlsx_bytes(title, columns, rows)
             mimetype = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             extension = "xlsx"
         else:
@@ -272,26 +5312,126 @@ def create_app() -> Flask:
     @login_required
     def create_task():
         payload = request.get_json(force=True)
+        requested_workstation = _resolve_workstation_module(payload.get("workstation_key"))
+        user = store.get_user(str(session.get("username") or ""))
+        if requested_workstation["key"] not in (user.get("allowed_modules") or []):
+            return jsonify({"error": "当前账号未开通该分析模块权限"}), 403
+        if requested_workstation["key"] == "community" and str(payload.get("community_input_source") or "").strip() == "merge_tasks":
+            group_column = str(payload.get("community_group_column") or "Group").strip() or "Group"
+            merge_items = _parse_community_merge_items(payload.get("community_merge_tasks"))
+            merge_entries: list[dict[str, Any]] = []
+            for item in merge_items:
+                task = task_manager.get_task(item["task_id"], log_lines=0, owner=None)
+                _ensure_can_view_task(task)
+                if not _is_metagenome_task_record(task):
+                    raise ValidationError(f"任务 {task.get('name') or item['task_id']} 不是宏基因组任务，不能用于群落汇总")
+                merge_entries.append({"task": task, "group": item["group"]})
+            payload = {
+                **payload,
+                **_build_community_merge_bundle(
+                    project_root=project_root,
+                    task_name=str(payload.get("task_name") or "community_merge").strip(),
+                    group_column=group_column,
+                    merge_entries=merge_entries,
+                ),
+            }
+        analysis_target = str(payload.get("analysis_target") or "").strip().lower()
+        if requested_workstation["key"] == "virus" or analysis_target == "virus":
+            _ensure_user_has_virus_permission(user, _resolve_requested_virus_permission(payload.get("species")))
         workspace_root = Path(store.get_setting("workspace_root", str(project_root))).expanduser().resolve()
+        pipeline_script_value = str(payload.get("pipeline_script") or "").strip() or store.get_setting(
+            "pipeline_script",
+            requested_workstation["pipeline_script"],
+        )
         created = task_manager.create_task(
             payload,
             owner=session["username"],
             owner_group=str(session.get("group_name", "") or ""),
             pipeline_script=_resolve_pipeline_script(
                 workspace_root,
-                store.get_setting("pipeline_script", "Bac_assemble_260112_newformat.py"),
+                pipeline_script_value,
             ),
-            pipeline_python=_resolve_runtime_python_path(
+            pipeline_python=_resolve_runtime_env_name(
                 workspace_root,
-                store.get_setting("pipeline_python", sys.executable),
+                store.get_setting("pipeline_python", "base"),
             ),
+            database_root=str(_resolve_runtime_database_root()),
+            conda_root=_load_conda_root_setting(store),
+            max_concurrent_tasks=int(store.get_setting("max_concurrent_tasks", "2") or "2"),
+            conda_envs=_load_conda_env_settings(store),
         )
         return jsonify(created), 201
+
+    @app.post("/api/tasks/<task_id>/rerun")
+    @login_required
+    def rerun_task(task_id: str):
+        payload = request.get_json(force=True)
+        task = task_manager.get_task(task_id, log_lines=0, owner=None)
+        _ensure_can_modify_task(task)
+        if str(payload.get("workstation_key") or (task.get("params") or {}).get("workstation_key") or "").strip() == "community" and str(payload.get("community_input_source") or "").strip() == "merge_tasks":
+            group_column = str(payload.get("community_group_column") or "Group").strip() or "Group"
+            merge_items = _parse_community_merge_items(payload.get("community_merge_tasks"))
+            merge_entries: list[dict[str, Any]] = []
+            for item in merge_items:
+                selected_task = task_manager.get_task(item["task_id"], log_lines=0, owner=None)
+                _ensure_can_view_task(selected_task)
+                if not _is_metagenome_task_record(selected_task):
+                    raise ValidationError(f"任务 {selected_task.get('name') or item['task_id']} 不是宏基因组任务，不能用于群落汇总")
+                merge_entries.append({"task": selected_task, "group": item["group"]})
+            payload = {
+                **payload,
+                **_build_community_merge_bundle(
+                    project_root=project_root,
+                    task_name=str(payload.get("task_name") or task.get("name") or "community_merge").strip(),
+                    group_column=group_column,
+                    merge_entries=merge_entries,
+                ),
+            }
+        workspace_root = Path(store.get_setting("workspace_root", str(project_root))).expanduser().resolve()
+        pipeline_script_value = str(payload.get("pipeline_script") or task.get("pipeline_script") or "").strip() or store.get_setting(
+            "pipeline_script",
+            "Bac_assemble_260112_newformat.py",
+        )
+        updated = task_manager.rerun_task(
+            task_id,
+            payload,
+            owner=None,
+            owner_group=str(session.get("group_name", "") or ""),
+            pipeline_script=_resolve_pipeline_script(
+                workspace_root,
+                pipeline_script_value,
+            ),
+            pipeline_python=_resolve_runtime_env_name(
+                workspace_root,
+                store.get_setting("pipeline_python", "base"),
+            ),
+            database_root=str(_resolve_runtime_database_root()),
+            conda_root=_load_conda_root_setting(store),
+            max_concurrent_tasks=int(store.get_setting("max_concurrent_tasks", "2") or "2"),
+            conda_envs=_load_conda_env_settings(store),
+        )
+        return jsonify(updated), 200
 
     @app.post("/api/tasks/demo")
     @login_required
     def create_demo_task():
-        created = task_manager.create_demo_task(owner=session["username"], owner_group=str(session.get("group_name", "") or ""))
+        payload = request.get_json(silent=True) or {}
+        user = store.get_user(str(session.get("username") or ""))
+        demo_type = str(payload.get("demo_type") or "fastq").strip().lower()
+        demo_virus_key = DEMO_TYPE_TO_VIRUS_PERMISSION.get(demo_type, "")
+        if demo_virus_key:
+            if "virus" not in (user.get("allowed_modules") or []):
+                return jsonify({"error": "当前账号未开通该分析模块权限"}), 403
+            _ensure_user_has_virus_permission(user, demo_virus_key)
+        workspace_root = Path(store.get_setting("workspace_root", str(project_root))).expanduser().resolve()
+        database_root = _resolve_runtime_database_root()
+        created = task_manager.create_demo_task(
+            owner=session["username"],
+            owner_group=str(session.get("group_name", "") or ""),
+            demo_type=demo_type,
+            workspace_root=workspace_root,
+            database_root=database_root,
+        )
         return jsonify(created), 201
 
     @app.post("/api/batch-inputs")
@@ -323,7 +5463,7 @@ def create_app() -> Flask:
         target = batch_dir / filename
         with target.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle, delimiter="	")
-            writer.writerow(["sample_name", "third_gen", "short_left", "short_right", "species"])
+            writer.writerow(BATCH_INPUT_HEADERS_ZH)
             writer.writerows(normalized_rows)
 
         return jsonify(
@@ -334,17 +5474,229 @@ def create_app() -> Flask:
             }
         ), 201
 
+    @app.post("/api/batch-inputs/fastq-single")
+    @login_required
+    def create_fastq_single_batch_input():
+        payload = request.get_json(force=True)
+        task_name = str(payload.get("task_name", "") or "").strip()
+        species = "nolevel"
+        short_left = _resolve_optional_existing_path(project_root, payload.get("short_left"))
+        short_right = _resolve_optional_existing_path(project_root, payload.get("short_right"))
+        if not short_left:
+            raise ValidationError("请先填写二代左端输入路径")
+
+        left_path = Path(short_left)
+        normalized_rows = (
+            _scan_fastq_directory_for_batch_rows(left_path, species)
+            if left_path.is_dir()
+            else [[task_name or f"sample_{datetime.now().strftime('%Y%m%d%H%M%S')}", "", short_left, short_right, species]]
+        )
+        if not normalized_rows:
+            raise ValidationError(f"目录中未识别到可组成样本的 fastq 文件: {left_path}")
+
+        batch_dir = project_root / "generated_batch_inputs"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"batch_input_{datetime.now().strftime('%Y%m%d%H%M%S')}.tsv"
+        target = batch_dir / filename
+        with target.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle, delimiter="	")
+            writer.writerow(BATCH_INPUT_HEADERS_ZH)
+            writer.writerows(normalized_rows)
+
+        return jsonify(
+            {
+                "path": _to_browser_path(project_root.resolve(), target.resolve()),
+                "absolute_path": str(target.resolve()),
+                "rows": len(normalized_rows),
+                "scanned_directory": str(left_path) if left_path.is_dir() else "",
+            }
+        ), 201
+
+    @app.get("/api/batch-inputs/download")
+    @login_required
+    def download_batch_input():
+        batch_path = _resolve_browser_path(project_root.resolve(), request.args.get("path", default="", type=str))
+        generated_root = (project_root / "generated_batch_inputs").resolve()
+        _assert_within_root(generated_root, batch_path)
+        if not batch_path.is_file():
+            raise ValidationError(f"批量输入表不存在: {batch_path}")
+        return send_file(str(batch_path), mimetype="text/tab-separated-values; charset=utf-8", as_attachment=False)
+
     @app.get("/api/admin/settings")
     @admin_required
     def admin_settings():
+        conda_envs = _load_conda_env_settings(store)
+        detected_conda_root = _detect_conda_root()
+        conda_root_value = str(store.get_setting("conda_root", str(detected_conda_root) if detected_conda_root else "") or "").strip()
+        conda_root_path = Path(conda_root_value).expanduser().resolve() if conda_root_value else detected_conda_root
+        pathosource_trigger_rules = _load_admin_pathosource_trigger_rules(store)
         return jsonify(
             {
                 "workspace_root": store.get_setting("workspace_root", str(project_root)),
                 "pipeline_script": store.get_setting("pipeline_script", "Bac_assemble_260112_newformat.py"),
-                "pipeline_python": store.get_setting("pipeline_python", sys.executable),
+                "pipeline_python": _resolve_runtime_env_name(project_root, store.get_setting("pipeline_python", "base")),
+                "conda_root": str(conda_root_path) if conda_root_path else "",
+                "detected_conda_envs": _list_conda_env_names(conda_root_path),
+                "database_root": store.get_setting("database_root", str(project_root)),
                 "max_concurrent_tasks": int(store.get_setting("max_concurrent_tasks", "2") or "2"),
+                "conda_envs": conda_envs,
+                "conda_env_fields": CONDA_ENV_SETTINGS,
+                "pathosource_trigger_rules": pathosource_trigger_rules,
             }
         )
+
+    @app.get("/api/admin/conda-envs")
+    @admin_required
+    def admin_conda_envs():
+        root_value = str(request.args.get("root", "") or "").strip()
+        conda_root = Path(root_value).expanduser().resolve() if root_value else _detect_conda_root()
+        if conda_root is None or not conda_root.is_dir():
+            raise ValidationError(f"Conda 安装路径不存在: {root_value or conda_root or ''}")
+        return jsonify(
+            {
+                "conda_root": str(conda_root),
+                "detected_conda_envs": _list_conda_env_names(conda_root),
+            }
+        )
+
+    @app.get("/api/admin/pathosource-trigger-rules")
+    @admin_required
+    def admin_pathosource_trigger_rules():
+        return jsonify(_load_admin_pathosource_trigger_rules(store))
+
+    @app.put("/api/admin/pathosource-trigger-rules")
+    @admin_required
+    def update_admin_pathosource_trigger_rules():
+        payload = request.get_json(force=True)
+        if not isinstance(payload, dict):
+            raise ValidationError("触发规则配置格式不正确")
+        normalized = _validate_admin_pathosource_trigger_rules(payload)
+        store.set_setting("admin_pathosource_trigger_rules", json.dumps(normalized, ensure_ascii=False))
+        return jsonify(normalized)
+
+    @app.get("/api/admin/audit-logs")
+    @admin_required
+    def admin_audit_logs():
+        username = str(request.args.get("username", "") or "").strip()
+        module = str(request.args.get("module", "") or "").strip()
+        action = str(request.args.get("action", "") or "").strip()
+        outcome = str(request.args.get("outcome", "") or "").strip()
+        search = str(request.args.get("search", "") or "").strip()
+        limit = request.args.get("limit", default=500, type=int)
+        items = store.list_audit_logs(
+            username=username,
+            module=module,
+            action=action,
+            outcome=outcome,
+            search=search,
+            limit=limit,
+        )
+        today_prefix = datetime.utcnow().date().isoformat()
+        summary = {
+            "total": len(items),
+            "failed": sum(1 for item in items if str(item.get("outcome") or "") == "failed"),
+            "today": sum(1 for item in items if str(item.get("created_at") or "").startswith(today_prefix)),
+            "users": len({str(item.get("username") or "") for item in items if str(item.get("username") or "").strip()}),
+        }
+        return jsonify(
+            {
+                "items": items,
+                "summary": summary,
+                "facets": {
+                    "modules": sorted({str(item.get("module") or "") for item in items if str(item.get("module") or "").strip()}),
+                    "actions": sorted({str(item.get("action") or "") for item in items if str(item.get("action") or "").strip()}),
+                    "users": sorted({str(item.get("username") or "") for item in items if str(item.get("username") or "").strip()}),
+                },
+            }
+        )
+
+    @app.post("/api/admin/watch-tasks")
+    @admin_required
+    def create_admin_watch_tasks():
+        payload = request.get_json(force=True)
+        monitor_name = str(payload.get("monitor_name", "") or "").strip()
+        input_path_text = str(payload.get("input_path", "") or "").strip()
+        output_root_text = str(payload.get("output_root", "") or "").strip()
+        input_path = Path(input_path_text).expanduser().resolve() if input_path_text else None
+        output_root = Path(output_root_text).expanduser().resolve() if output_root_text else None
+        modules = payload.get("modules") if isinstance(payload.get("modules"), list) else []
+        if not modules:
+            raise ValidationError("请至少选择一个需要运行的模块")
+        if input_path_text and (input_path is None or not input_path.is_dir()):
+            raise ValidationError(f"默认测序下机目录不存在: {input_path}")
+        if output_root_text and (output_root is None or not output_root.is_dir()):
+            raise ValidationError(f"默认分析输出根目录不存在: {output_root}")
+
+        try:
+            watch_stable_minutes = max(1, int(payload.get("watch_stable_minutes", 30)))
+            watch_poll_minutes = max(1, int(payload.get("watch_poll_minutes", 5)))
+            watch_max_samples = max(0, int(payload.get("watch_max_samples", 0)))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("监听时长、轮询间隔和样本上限必须是整数") from exc
+
+        workspace_root = Path(store.get_setting("workspace_root", str(project_root))).expanduser().resolve()
+        pipeline_python = _resolve_runtime_env_name(
+            workspace_root,
+            store.get_setting("pipeline_python", "base"),
+        )
+        conda_envs = _load_conda_env_settings(store)
+        created_items: list[dict[str, object]] = []
+        owner = str(session.get("username") or "admin")
+        owner_group = str(session.get("group_name", "") or "")
+
+        for module in modules:
+            if not isinstance(module, dict):
+                continue
+            module_key = str(module.get("key", "") or "").strip().lower()
+            preset_key = str(module.get("preset", "") or "").strip()
+            preset_overrides = module.get("preset_overrides") if isinstance(module.get("preset_overrides"), dict) else {}
+            module_input_text = str(module.get("input_path", "") or "").strip()
+            module_output_text = str(module.get("output_root", "") or "").strip()
+            resolved_input = Path(module_input_text).expanduser().resolve() if module_input_text else input_path
+            resolved_output = Path(module_output_text).expanduser().resolve() if module_output_text else output_root
+            if resolved_input is None or not resolved_input.is_dir():
+                raise ValidationError(f"{_resolve_workstation_module(module_key)['label']} 未配置有效的监控目录")
+            if resolved_output is None or not resolved_output.is_dir():
+                raise ValidationError(f"{_resolve_workstation_module(module_key)['label']} 未配置有效的输出目录")
+            monitor_payload = _build_admin_realtime_monitor_payload(
+                module_key=module_key,
+                preset_key=preset_key,
+                preset_overrides=preset_overrides,
+                monitor_name=monitor_name,
+                input_path=resolved_input,
+                output_root=resolved_output,
+                watch_stable_minutes=watch_stable_minutes,
+                watch_poll_minutes=watch_poll_minutes,
+                watch_max_samples=watch_max_samples,
+            )
+            workstation = _resolve_workstation_module(module_key)
+            pipeline_script_value = store.get_setting("pipeline_script", workstation["pipeline_script"])
+            created = task_manager.create_task(
+                monitor_payload,
+                owner=owner,
+                owner_group=owner_group,
+                pipeline_script=_resolve_pipeline_script(
+                    workspace_root,
+                    str(pipeline_script_value or workstation["pipeline_script"]),
+                ),
+                pipeline_python=pipeline_python,
+                database_root=str(_resolve_runtime_database_root()),
+                conda_root=_load_conda_root_setting(store),
+                max_concurrent_tasks=int(store.get_setting("max_concurrent_tasks", "2") or "2"),
+                conda_envs=conda_envs,
+            )
+            created_items.append(
+                {
+                    "id": created.get("id"),
+                    "name": created.get("name"),
+                    "workstation_key": module_key,
+                    "watch_label": ((created.get("watch") or {}) if isinstance(created.get("watch"), dict) else {}).get("label") or "监听中 · 等待测序数据写入",
+                }
+            )
+
+        if not created_items:
+            raise ValidationError("没有生成任何实时监控任务")
+        return jsonify({"items": created_items}), 201
 
     @app.get("/api/admin/filesystem")
     @admin_required
@@ -369,21 +5721,47 @@ def create_app() -> Flask:
             item_type = "directory" if child.is_dir() else "file"
             if selector == "workspace_root" and item_type != "directory":
                 continue
-            items.append({"name": child.name, "type": item_type, "path": str(child.resolve())})
+            try:
+                modified_at = child.stat().st_mtime
+            except OSError:
+                modified_at = None
+            items.append({"name": child.name, "type": item_type, "path": str(child.resolve()), "modified_at": modified_at})
 
         parent_path = ""
         if current_path != browse_root:
             parent_path = str(current_path.parent.resolve())
 
+        home_path, desktop_path = _resolve_home_and_desktop_paths()
         return jsonify(
             {
                 "root": str(browse_root),
                 "current_path": str(current_path),
                 "parent_path": parent_path,
+                "home_path": str(home_path),
+                "desktop_path": str(desktop_path),
                 "selector": selector,
                 "items": items,
             }
         )
+
+    @app.post("/api/admin/filesystem/mkdir")
+    @admin_required
+    def admin_filesystem_mkdir():
+        payload = request.get_json(force=True)
+        current_path = Path(str(payload.get("path", "")).strip() or "/").expanduser().resolve()
+        name = str(payload.get("name", "")).strip()
+        if not name:
+            raise ValidationError("文件夹名称不能为空")
+        if "/" in name or "\\" in name:
+            raise ValidationError("文件夹名称不能包含路径分隔符")
+        if not current_path.is_dir():
+            raise ValidationError(f"目录不存在: {current_path}")
+        target = current_path / name
+        try:
+            target.mkdir(exist_ok=False)
+        except PermissionError as exc:
+            raise ValidationError(f"没有写入目录权限: {current_path}") from exc
+        return jsonify({"status": "created", "path": str(target.resolve())}), 201
 
     @app.put("/api/admin/settings")
     @admin_required
@@ -392,38 +5770,90 @@ def create_app() -> Flask:
         workspace_root = str(payload.get("workspace_root", "")).strip()
         script_path = str(payload.get("pipeline_script", "")).strip()
         pipeline_python = str(payload.get("pipeline_python", "")).strip()
+        conda_root = str(payload.get("conda_root", "")).strip()
+        database_root = str(payload.get("database_root", "")).strip()
         max_concurrent_tasks = str(payload.get("max_concurrent_tasks", "")).strip() or "2"
+        raw_conda_envs = payload.get("conda_envs") or {}
         if not workspace_root:
             raise ValidationError("部署基准目录不能为空")
         if not script_path:
             raise ValidationError("脚本路径不能为空")
         if not pipeline_python:
-            raise ValidationError("运行环境 Python 路径不能为空")
+            raise ValidationError("运行环境 Conda 环境名不能为空")
+        if not database_root:
+            raise ValidationError("数据库部署目录不能为空")
         try:
             max_task_count = max(1, int(max_concurrent_tasks))
         except ValueError as exc:
             raise ValidationError("最大同时运行任务数量必须是整数") from exc
         workspace_root_path = Path(workspace_root).expanduser().resolve()
+        conda_root_path = Path(conda_root).expanduser().resolve() if conda_root else _detect_conda_root()
+        database_root_path = _normalize_database_root_path(Path(database_root))
         if not workspace_root_path.is_dir():
             raise ValidationError(f"部署基准目录不存在: {workspace_root_path}")
+        if conda_root and (conda_root_path is None or not conda_root_path.is_dir()):
+            raise ValidationError(f"Conda 安装路径不存在: {conda_root_path}")
+        if not database_root_path.is_dir():
+            raise ValidationError(f"数据库部署目录不存在: {database_root_path}")
         candidate = Path(_resolve_pipeline_script(workspace_root_path, script_path))
-        runtime_python = Path(_resolve_runtime_python_path(workspace_root_path, pipeline_python))
+        runtime_env = _resolve_runtime_env_name(workspace_root_path, pipeline_python)
+        conda_envs: dict[str, str] = {}
+        for item in CONDA_ENV_SETTINGS:
+            key = item["key"]
+            raw_value = str(
+                raw_conda_envs.get(
+                    key,
+                    store.get_setting(f"conda_env_{key}", item["default"]),
+                ) or ""
+            ).strip()
+            if not raw_value:
+                raise ValidationError(f"{item['label']} 环境名不能为空")
+            conda_envs[key] = _resolve_runtime_env_name(workspace_root_path, raw_value)
         if not candidate.is_file():
             raise ValidationError(f"脚本路径不存在: {candidate}")
-        if not runtime_python.is_file():
-            raise ValidationError(f"运行环境 Python 不存在: {runtime_python}")
         store.set_setting("workspace_root", str(workspace_root_path))
         store.set_setting("pipeline_script", str(candidate.relative_to(workspace_root_path)))
-        store.set_setting("pipeline_python", str(runtime_python))
+        store.set_setting("pipeline_python", runtime_env)
+        store.set_setting("conda_root", str(conda_root_path) if conda_root_path else "")
+        store.set_setting("database_root", database_root)
         store.set_setting("max_concurrent_tasks", str(max_task_count))
+        for key, value in conda_envs.items():
+            store.set_setting(f"conda_env_{key}", value)
         return jsonify(
             {
                 "workspace_root": str(workspace_root_path),
                 "pipeline_script": str(candidate.relative_to(workspace_root_path)),
-                "pipeline_python": str(runtime_python),
+                "pipeline_python": runtime_env,
+                "conda_root": str(conda_root_path) if conda_root_path else "",
+                "detected_conda_envs": _list_conda_env_names(conda_root_path),
+                "database_root": database_root,
                 "max_concurrent_tasks": max_task_count,
+                "conda_envs": conda_envs,
+                "conda_env_fields": CONDA_ENV_SETTINGS,
             }
         )
+
+    @app.get("/api/admin/update/sources")
+    @admin_required
+    def admin_update_sources():
+        workspace_root = Path(store.get_setting("workspace_root", str(project_root))).expanduser().resolve()
+        return jsonify({"items": _detect_offline_update_sources(workspace_root)})
+
+    @app.post("/api/admin/update/online")
+    @admin_required
+    def admin_online_update():
+        workspace_root = Path(store.get_setting("workspace_root", str(project_root))).expanduser().resolve()
+        result = _run_online_update(workspace_root)
+        return jsonify(result)
+
+    @app.post("/api/admin/update/offline")
+    @admin_required
+    def admin_offline_update():
+        payload = request.get_json(force=True)
+        workspace_root = Path(store.get_setting("workspace_root", str(project_root))).expanduser().resolve()
+        source_path = Path(str(payload.get("source_path", "")).strip()).expanduser().resolve()
+        result = _run_offline_update(workspace_root, source_path)
+        return jsonify(result)
 
     @app.get("/api/admin/users")
     @admin_required
@@ -445,6 +5875,10 @@ def create_app() -> Flask:
             role=role,
             display_name=str(payload.get("display_name", "")).strip(),
             group_name=str(payload.get("group_name", "")).strip(),
+            allowed_viruses=payload.get("allowed_viruses") if isinstance(payload.get("allowed_viruses"), list) else None,
+            module_expirations=payload.get("module_expirations") if isinstance(payload.get("module_expirations"), dict) else None,
+            account_expires_at=str(payload.get("account_expires_at", "")).strip() or None,
+            allowed_modules=payload.get("allowed_modules") if isinstance(payload.get("allowed_modules"), list) else None,
         )
         return jsonify(created), 201
 
@@ -461,6 +5895,10 @@ def create_app() -> Flask:
             group_name=str(payload.get("group_name", "")).strip() if "group_name" in payload else None,
             display_name=str(payload.get("display_name", "")).strip() if "display_name" in payload else None,
             new_password=str(payload.get("password", "")).strip() or None,
+            allowed_viruses=payload.get("allowed_viruses") if isinstance(payload.get("allowed_viruses"), list) else None,
+            module_expirations=payload.get("module_expirations") if isinstance(payload.get("module_expirations"), dict) else None,
+            account_expires_at=str(payload.get("account_expires_at", "")).strip() if "account_expires_at" in payload else None,
+            allowed_modules=payload.get("allowed_modules") if isinstance(payload.get("allowed_modules"), list) else None,
         )
         if session.get("username") == username:
             session["username"] = updated["username"]
@@ -492,8 +5930,27 @@ def create_app() -> Flask:
 
     @app.errorhandler(Exception)
     def handle_unknown(error: Exception):
+        if isinstance(error, HTTPException):
+            return error
         app.logger.exception("Bac analysis portal error")
         return jsonify({"error": str(error)}), 500
+
+    def _start_queue_watch_daemon() -> None:
+        def _worker() -> None:
+            while True:
+                try:
+                    task_manager.refresh_monitored_tasks()
+                    task_manager.reconcile_queue(
+                        max(1, int(store.get_setting("max_concurrent_tasks", "2") or "2"))
+                    )
+                except Exception:
+                    app.logger.exception("Queue watch daemon error")
+                time.sleep(60)
+
+        threading.Thread(target=_worker, name="task-queue-watch-daemon", daemon=True).start()
+
+    if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        _start_queue_watch_daemon()
 
     return app
 
@@ -521,17 +5978,46 @@ def admin_required(view_func):
 
 
 def _is_logged_in() -> bool:
-    return bool(session.get("username") and session.get("role"))
+    username = str(session.get("username") or "").strip()
+    if not (username and session.get("role")):
+        return False
+    store = _get_store()
+    try:
+        user = store.get_user(username)
+    except KeyError:
+        session.clear()
+        return False
+    if user.get("is_expired"):
+        session.clear()
+        return False
+    return True
+
+
+def _get_store() -> PortalStore:
+    store = current_app.config.get("PORTAL_STORE")
+    if not isinstance(store, PortalStore):
+        raise RuntimeError("Portal store is not configured")
+    return store
 
 
 def _can_view_task(task: dict) -> bool:
     role = str(session.get("role") or "")
     group_name = str(session.get("group_name") or "")
+    username = str(session.get("username") or "")
     if role == "admin":
+        return True
+    if username and str(task.get("owner") or "") == username:
         return True
     if group_name and str(task.get("owner_group") or "") == group_name:
         return str(task.get("owner_group") or "") == group_name and bool(group_name)
     return False
+
+
+def _add_no_cache_headers(response: Response) -> Response:
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 def _ensure_can_view_task(task: dict) -> None:
@@ -547,6 +6033,19 @@ def _ensure_can_modify_task(task: dict) -> None:
     if role == "group_admin" and group_name and str(task.get("owner_group") or "") == group_name:
         return
     raise ValidationError("只有管理员或 group 管理可以删除组内任务")
+
+
+def _ensure_can_control_task(task: dict) -> None:
+    role = str(session.get("role") or "")
+    group_name = str(session.get("group_name") or "")
+    username = str(session.get("username") or "")
+    if role == "admin":
+        return
+    if role == "group_admin" and group_name and str(task.get("owner_group") or "") == group_name:
+        return
+    if username and username == str(task.get("owner") or ""):
+        return
+    raise ValidationError("只有任务本人、管理员或 group 管理可以控制任务")
 
 
 def _resolve_browser_path(base_root: Path, path_arg: str) -> Path:
@@ -592,6 +6091,161 @@ def _resolve_optional_existing_path(project_root: Path, raw_value: object) -> st
     return str(candidate)
 
 
+def _scan_fastq_directory_for_batch_rows(input_dir: Path, species: str) -> list[list[str]]:
+    if not input_dir.is_dir():
+        raise ValidationError(f"二代测序目录不存在: {input_dir}")
+    groups: dict[str, dict[str, str]] = {}
+    for path in sorted(input_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        lower_name = path.name.lower()
+        if not lower_name.endswith((".fastq", ".fq", ".fastq.gz", ".fq.gz")):
+            continue
+        sample_name, field = _classify_fastq_for_batch(path)
+        record = groups.setdefault(sample_name, {"sample_name": sample_name, "third_gen": "", "short_left": "", "short_right": ""})
+        record[field] = str(path.resolve())
+    rows: list[list[str]] = []
+    for sample_name in sorted(groups):
+        record = groups[sample_name]
+        if not any([record["third_gen"], record["short_left"], record["short_right"]]):
+            continue
+        rows.append([sample_name, record["third_gen"], record["short_left"], record["short_right"], species])
+    return rows
+
+
+def _classify_fastq_for_batch(path: Path) -> tuple[str, str]:
+    name = path.name
+    lower_name = name.lower()
+    for suffix in (".fastq.gz", ".fq.gz", ".fastq", ".fq"):
+        if lower_name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    field = "third_gen"
+    sample_name = name
+    if SHORT_READ_R1_RE.search(name):
+        field = "short_left"
+        sample_name = SHORT_READ_R1_RE.sub("_", name)
+    elif SHORT_READ_R2_RE.search(name):
+        field = "short_right"
+        sample_name = SHORT_READ_R2_RE.sub("_", name)
+    sample_name = re.sub(r"[._-]+$", "", sample_name).strip() or path.stem
+    return sample_name, field
+
+
+def _looks_like_fasta_path(path: Path) -> bool:
+    return path.name.lower().endswith((".fa", ".fasta", ".fna", ".fa.gz", ".fasta.gz", ".fna.gz"))
+
+
+def _strip_fasta_suffix(name: str) -> str:
+    lowered = name.lower()
+    for suffix in (".fa.gz", ".fasta.gz", ".fna.gz", ".fasta", ".fna", ".fa", ".gz"):
+        if lowered.endswith(suffix):
+            trimmed = name[: -len(suffix)]
+            return trimmed or name
+    return Path(name).stem
+
+
+def _collect_reference_import_sources(project_root: Path, raw_value: object) -> list[Path]:
+    resolved = _resolve_optional_existing_path(project_root, raw_value)
+    if not resolved:
+        raise ValidationError("请提供参考基因组路径")
+    candidate = Path(resolved)
+    if candidate.is_file() and _looks_like_fasta_path(candidate):
+        return [candidate]
+    if candidate.is_dir():
+        fasta_paths = sorted(
+            [item for item in candidate.rglob("*") if item.is_file() and _looks_like_fasta_path(item)],
+            key=lambda item: str(item).lower(),
+        )
+        if not fasta_paths:
+            raise ValidationError(f"目录中未找到 FASTA 文件: {candidate}")
+        return fasta_paths
+    if candidate.is_file() and candidate.name.lower().endswith(".txt"):
+        fasta_paths: list[Path] = []
+        for raw_line in candidate.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            item = Path(line).expanduser()
+            item = item.resolve() if item.is_absolute() else (project_root / item).resolve()
+            if not item.exists():
+                raise ValidationError(f"list.txt 中路径不存在: {item}")
+            if not item.is_file() or not _looks_like_fasta_path(item):
+                raise ValidationError(f"list.txt 中存在非 FASTA 文件: {item}")
+            fasta_paths.append(item)
+        if not fasta_paths:
+            raise ValidationError(f"list.txt 中未找到有效 FASTA 路径: {candidate}")
+        return fasta_paths
+    raise ValidationError("仅支持单个 FASTA、包含 FASTA 的目录，或每行一个 FASTA 路径的 list.txt")
+
+
+def _import_reference_records_from_source(
+    *,
+    store: PortalStore,
+    project_root: Path,
+    category: str,
+    host_name: str,
+    genome_name: str,
+    taxid: str,
+    source_type: str,
+    source_label: str,
+    source_accession: str,
+    source_url: str,
+    source_path_value: object,
+    description: str,
+    owner: str,
+) -> dict[str, object]:
+    fasta_paths = _collect_reference_import_sources(project_root, source_path_value)
+    if len(fasta_paths) == 1 and _looks_like_fasta_path(fasta_paths[0]):
+        record = _register_reference_database_record(
+            store=store,
+            project_root=project_root,
+            category=category,
+            host_name=host_name,
+            genome_name=genome_name or _strip_fasta_suffix(fasta_paths[0].name),
+            taxid=taxid,
+            source_type=source_type,
+            source_label=source_label,
+            source_accession=source_accession,
+            source_url=source_url,
+            source_fasta_path=fasta_paths[0],
+            description=description,
+            owner=owner,
+        )
+        return {
+            "status": "ok",
+            "imported_count": 1,
+            "items": [record],
+            "source_mode": "single",
+        }
+
+    items: list[dict[str, object]] = []
+    for fasta_path in fasta_paths:
+        items.append(
+            _register_reference_database_record(
+                store=store,
+                project_root=project_root,
+                category=category,
+                host_name=host_name,
+                genome_name=_strip_fasta_suffix(fasta_path.name),
+                taxid=taxid,
+                source_type=source_type,
+                source_label=source_label,
+                source_accession=source_accession,
+                source_url=source_url,
+                source_fasta_path=fasta_path,
+                description=description,
+                owner=owner,
+            )
+        )
+    return {
+        "status": "ok",
+        "imported_count": len(items),
+        "items": items,
+        "source_mode": "multi",
+    }
+
+
 def _resolve_task_result_html(task: dict) -> Path | None:
     input_path = str((task.get("params") or {}).get("input_path", "")).strip()
     if not input_path:
@@ -600,17 +6254,39 @@ def _resolve_task_result_html(task: dict) -> Path | None:
     search_dir = candidate if candidate.is_dir() else candidate.parent
     if not search_dir.is_dir():
         return None
-    matches = sorted(search_dir.glob("*_bacgenome.html"))
-    return matches[0] if matches else None
+    html_candidates = sorted(search_dir.glob("*_bacgenome.html"))
+    return html_candidates[0] if html_candidates else None
 
 
-def _resolve_runtime_python_path(project_root: Path, python_path: str) -> str:
-    raw = str(python_path or "").strip()
+def _task_has_embedded_result(task: dict) -> bool:
+    return _is_community_report_task(task)
+
+
+def _resolve_runtime_env_name(project_root: Path, raw_value: str) -> str:
+    raw = str(raw_value or "").strip()
     if not raw:
-        raise ValidationError("运行环境 Python 路径不能为空")
+        raise ValidationError("运行环境 Conda 环境名不能为空")
+    if "/" not in raw and "\\" not in raw:
+        return raw
+
     candidate = Path(raw).expanduser()
     candidate = candidate.resolve() if candidate.is_absolute() else (project_root / candidate).resolve()
-    return str(candidate)
+    name_lower = candidate.name.lower()
+    if name_lower.endswith(".py") or "bac_assemble_260112_newformat.py" in name_lower:
+        raise ValidationError("运行环境应填写 Conda 环境名，或选择该环境中的 python 可执行文件，不能填写分析脚本路径")
+
+    parts = list(candidate.parts)
+    if "envs" in parts:
+        env_index = parts.index("envs")
+        if env_index + 1 < len(parts):
+            return parts[env_index + 1]
+
+    if candidate.name.lower().startswith("python"):
+        return "base"
+
+    if parts:
+        return parts[-1]
+    raise ValidationError("无法识别运行环境，请填写 Conda 环境名，或选择 envs/<环境名>/bin/python")
 
 
 def _resolve_pipeline_script(project_root: Path, script_path: str) -> str:
@@ -638,6 +6314,1077 @@ def _resolve_admin_path(root: Path, path_arg: str) -> Path:
         return root
     candidate = Path(raw).expanduser()
     return candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+
+
+DATABASE_IMPORT_COLUMNS: list[tuple[str, str]] = [
+    ("sample_name", "样本名称"),
+    ("genome_id", "Genome ID"),
+    ("taxid", "TaxID"),
+    ("final_fasta_path", "Final FASTA 路径"),
+    ("species_name", "物种预估"),
+    ("mlst_species_name", "MLST 物种名称"),
+    ("mlst_st", "MLST ST"),
+    ("serotype_result", "血清型"),
+    ("q20_rate", "Q20"),
+    ("q30_rate", "Q30"),
+    ("completeness", "完整性"),
+    ("contamination", "污染率"),
+    ("contig_count", "Contig 数"),
+    ("plasmid_count", "质粒数"),
+    ("resistance_count", "耐药条目数"),
+    ("virulence_count", "毒力条目数"),
+    ("resistance_gene_hits", "耐药基因摘要"),
+    ("virulence_gene_hits", "毒力基因摘要"),
+    ("resistance_mge_hits", "耐药基因-MGE"),
+    ("virulence_mge_hits", "毒力基因-MGE"),
+    ("sample_source", "样本来源"),
+    ("collection_date", "采样日期"),
+    ("gender", "性别"),
+    ("country", "国家 / 地区"),
+    ("host_info", "宿主 / 样本背景"),
+    ("province", "省 / Province"),
+    ("city", "市 / City"),
+    ("district", "区县 / District"),
+    ("location_detail", "位置详情"),
+    ("sample_type", "输入类型"),
+    ("sequencing_method", "测序 / 组装方法"),
+    ("description", "描述"),
+    ("note", "备注"),
+    ("case_id", "病例/事件编号"),
+    ("patient_id", "患者/个案编号"),
+    ("surveillance_source", "监测来源"),
+    ("suspected_syndrome", "疑似症候群"),
+    ("submitting_unit", "送检单位"),
+    ("collection_unit", "采样单位"),
+    ("ward_department", "科室/病区"),
+    ("specimen_category", "标本类别"),
+    ("cluster_status", "聚集性状态"),
+    ("epidemiology_link", "流行病学关联"),
+    ("traditional_result", "传统检测结果"),
+]
+
+
+def _database_import_example_row() -> dict[str, str]:
+    return {
+        "sample_name": "Men-IGT",
+        "genome_id": "Men-IGT",
+        "taxid": "",
+        "final_fasta_path": "/path/to/Men-IGT.final.fasta",
+        "species_name": "Neisseria meningitidis",
+        "mlst_species_name": "neisseria",
+        "mlst_st": "ST4821",
+        "serotype_result": "B",
+        "q20_rate": "96.49%",
+        "q30_rate": "94.07%",
+        "completeness": "82.47%",
+        "contamination": "10.42%",
+        "contig_count": "613",
+        "plasmid_count": "71",
+        "resistance_count": "8",
+        "virulence_count": "82",
+        "resistance_gene_hits": "OXA-23、blaADC-25、aph(3')-Ia",
+        "virulence_gene_hits": "ompA、bap、csuE",
+        "resistance_mge_hits": "OXA-23（转座子）",
+        "virulence_mge_hits": "bap（质粒）",
+        "sample_source": "血液",
+        "collection_date": "2026-03-23",
+        "gender": "",
+        "country": "China",
+        "host_info": "人源",
+        "province": "浙江",
+        "city": "杭州",
+        "district": "西湖区",
+        "location_detail": "某医院",
+        "sample_type": "fastq",
+        "sequencing_method": "spades",
+        "description": "示例样本",
+        "note": "可按需补充",
+        "case_id": "HP-CDC-2026-001",
+        "patient_id": "PID-20260323-01",
+        "surveillance_source": "ICU",
+        "suspected_syndrome": "脑膜炎/脑膜脑炎",
+        "submitting_unit": "黄浦区疾控中心",
+        "collection_unit": "某三甲医院神经内科",
+        "ward_department": "ICU",
+        "specimen_category": "脑脊液",
+        "cluster_status": "待判定",
+        "epidemiology_link": "与 2026 春季 ICU 监测事件关联",
+        "traditional_result": "培养/PCR结果待补录",
+    }
+
+
+def _database_import_headers() -> list[str]:
+    return [item[0] for item in DATABASE_IMPORT_COLUMNS]
+
+
+REFERENCE_IMPORT_COLUMNS = [
+    ("host_name", "物种名称"),
+    ("genome_name", "基因组名称"),
+    ("taxid", "TaxID"),
+    ("source_accession", "NCBI编号"),
+    ("source_label", "来源标签"),
+    ("fasta_path", "FASTA路径"),
+    ("description", "备注"),
+]
+
+
+def _reference_import_headers() -> list[str]:
+    return [item[0] for item in REFERENCE_IMPORT_COLUMNS]
+
+
+def _reference_import_example_row(category: str) -> dict[str, str]:
+    if category == "host":
+        return {
+            "host_name": "Homo sapiens",
+            "genome_name": "GRCh38",
+            "taxid": "9606",
+            "source_accession": "GCF_000001405.40",
+            "source_label": "本地库 / 人源参考",
+            "fasta_path": "/data/reference/human/GRCh38.fa",
+            "description": "用于去宿主分析",
+        }
+    return {
+        "host_name": "Mycobacterium tuberculosis",
+        "genome_name": "H37Rv",
+        "taxid": "1773",
+        "source_accession": "GCF_000195955.2",
+        "source_label": "本地库 / 参考菌株",
+        "fasta_path": "/data/reference/pathogen/H37Rv.fa",
+        "description": "病原参考基因组示例",
+    }
+
+
+def _reference_import_labels(category: str) -> list[str]:
+    species_label = "宿主名称" if category == "host" else "病原名称"
+    return [species_label if key == "host_name" else label for key, label in REFERENCE_IMPORT_COLUMNS]
+
+
+def _build_reference_import_template_text(category: str, delimiter: str) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=delimiter, lineterminator="\n")
+    headers = _reference_import_headers()
+    labels = _reference_import_labels(category)
+    example = _reference_import_example_row(category)
+    writer.writerow(headers)
+    writer.writerow(labels)
+    writer.writerow([example.get(header, "") for header in headers])
+    return output.getvalue()
+
+
+def _build_reference_import_template_xlsx(category: str) -> bytes:
+    headers = _reference_import_headers()
+    labels = _reference_import_labels(category)
+    example = _reference_import_example_row(category)
+    rows = [headers, labels, [example.get(header, "") for header in headers]]
+
+    def build_sheet_xml() -> str:
+        row_xml: list[str] = []
+        for row_index, row in enumerate(rows, start=1):
+            cell_xml: list[str] = []
+            for col_index, value in enumerate(row, start=1):
+                ref = f"{_xlsx_column_name(col_index)}{row_index}"
+                text = xml_escape(str(value or ""))
+                cell_xml.append(f'<c r="{ref}" t="inlineStr"><is><t>{text}</t></is></c>')
+            row_xml.append(f'<row r="{row_index}">{"".join(cell_xml)}</row>')
+        return (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            "<sheetData>"
+            + "".join(row_xml)
+            + "</sheetData></worksheet>"
+        )
+
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<sheets><sheet name="references" sheetId="1" r:id="rId1"/></sheets></workbook>'
+    )
+    workbook_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+        'Target="worksheets/sheet1.xml"/>'
+        '<Relationship Id="rId2" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
+        'Target="styles.xml"/>'
+        '</Relationships>'
+    )
+    root_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="xl/workbook.xml"/>'
+        '<Relationship Id="rId2" '
+        'Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" '
+        'Target="docProps/core.xml"/>'
+        '<Relationship Id="rId3" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" '
+        'Target="docProps/app.xml"/>'
+        '</Relationships>'
+    )
+    content_types_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '<Override PartName="/xl/styles.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        '<Override PartName="/docProps/core.xml" '
+        'ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+        '<Override PartName="/docProps/app.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
+        '</Types>'
+    )
+    styles_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>'
+        '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
+        '<borders count="1"><border/></borders>'
+        '<cellStyleXfs count="1"><xf/></cellStyleXfs>'
+        '<cellXfs count="1"><xf xfId="0"/></cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        '</styleSheet>'
+    )
+    now = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    core_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+        'xmlns:dcterms="http://purl.org/dc/terms/" '
+        'xmlns:dcmitype="http://purl.org/dc/dcmitype/" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+        '<dc:title>reference_database_import_template</dc:title>'
+        '<dc:creator>bac_analysis_portal</dc:creator>'
+        f'<dcterms:created xsi:type="dcterms:W3CDTF">{now}</dcterms:created>'
+        f'<dcterms:modified xsi:type="dcterms:W3CDTF">{now}</dcterms:modified>'
+        '</cp:coreProperties>'
+    )
+    app_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" '
+        'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+        '<Application>bac_analysis_portal</Application>'
+        '</Properties>'
+    )
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types_xml)
+        archive.writestr("_rels/.rels", root_rels_xml)
+        archive.writestr("xl/workbook.xml", workbook_xml)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+        archive.writestr("xl/worksheets/sheet1.xml", build_sheet_xml())
+        archive.writestr("xl/styles.xml", styles_xml)
+        archive.writestr("docProps/core.xml", core_xml)
+        archive.writestr("docProps/app.xml", app_xml)
+    return buffer.getvalue()
+
+
+def _build_database_import_template_text(delimiter: str) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=delimiter, lineterminator="\n")
+    headers = _database_import_headers()
+    labels = [item[1] for item in DATABASE_IMPORT_COLUMNS]
+    example = _database_import_example_row()
+    writer.writerow(headers)
+    writer.writerow(labels)
+    writer.writerow([example.get(header, "") for header in headers])
+    return output.getvalue()
+
+
+def _xlsx_column_name(index: int) -> str:
+    result = ""
+    current = index
+    while current > 0:
+        current, remainder = divmod(current - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+
+def _build_database_import_template_guide_rows(metadata_templates: list[dict[str, Any]] | None = None) -> list[list[str]]:
+    template_map = {
+        str(item.get("key") or "").strip(): item
+        for item in (metadata_templates or [])
+        if str(item.get("key") or "").strip()
+    }
+    rows: list[list[str]] = [
+        ["模块", "字段 key", "显示名称", "填写要求", "标准词表/推荐项", "填写说明", "示例"],
+        ["模板说明", "-", "-", "-", "-", "XLSX 模板包含两页：samples 为可直接导入的数据页；说明与词表示例 为填写说明页。", "-"],
+        ["模板说明", "-", "-", "-", "-", "CSV/TSV 模板保持纯数据结构，适合程序批量生成或脚本处理。", "-"],
+        ["模板说明", "-", "-", "-", "-", "导入时至少保证 sample_name、final_fasta_path 以及主档必填字段有效。", "-"],
+        ["模板说明", "-", "-", "-", "-", "采样地点请分别填写 province/city/district/location_detail；location_detail 优先选标准点位。", "-"],
+    ]
+    example_row = _database_import_example_row()
+    for key, label in DATABASE_IMPORT_COLUMNS:
+        template = template_map.get(key, {})
+        requirement = str(template.get("requirement") or "").strip()
+        requirement_text = "必填" if requirement == "required" else "推荐" if requirement == "recommended" else "选填"
+        options = template.get("options") if isinstance(template.get("options"), list) else []
+        option_text = "；".join([str(item).strip() for item in options if str(item).strip()][:8])
+        dictionary_name = str(template.get("dictionary_name") or "").strip()
+        help_text = str(template.get("help_text") or "").strip()
+        if dictionary_name:
+            option_text = f"{dictionary_name}{'：' if option_text else ''}{option_text}"
+        rows.append([
+            "字段说明",
+            key,
+            label,
+            requirement_text,
+            option_text or "-",
+            help_text or "-",
+            str(example_row.get(key, "") or "-"),
+        ])
+    return rows
+
+
+def _build_database_import_template_xlsx(metadata_templates: list[dict[str, Any]] | None = None) -> bytes:
+    headers = _database_import_headers()
+    labels = [item[1] for item in DATABASE_IMPORT_COLUMNS]
+    example = _database_import_example_row()
+    rows = [headers, labels, [example.get(header, "") for header in headers]]
+    guide_rows = _build_database_import_template_guide_rows(metadata_templates)
+
+    def build_sheet_xml(sheet_rows: list[list[str]]) -> str:
+        row_xml: list[str] = []
+        for row_index, row in enumerate(sheet_rows, start=1):
+            cell_xml: list[str] = []
+            for col_index, value in enumerate(row, start=1):
+                ref = f"{_xlsx_column_name(col_index)}{row_index}"
+                text = xml_escape(str(value or ""))
+                cell_xml.append(
+                    f'<c r="{ref}" t="inlineStr"><is><t>{text}</t></is></c>'
+                )
+            row_xml.append(f'<row r="{row_index}">{"".join(cell_xml)}</row>')
+        return (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            "<sheetData>"
+            + "".join(row_xml)
+            + "</sheetData></worksheet>"
+        )
+
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<sheets>'
+        '<sheet name="samples" sheetId="1" r:id="rId1"/>'
+        '<sheet name="说明与词表示例" sheetId="2" r:id="rId2"/>'
+        '</sheets></workbook>'
+    )
+    workbook_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+        'Target="worksheets/sheet1.xml"/>'
+        '<Relationship Id="rId2" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+        'Target="worksheets/sheet2.xml"/>'
+        '<Relationship Id="rId3" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
+        'Target="styles.xml"/>'
+        '</Relationships>'
+    )
+    root_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="xl/workbook.xml"/>'
+        '<Relationship Id="rId2" '
+        'Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" '
+        'Target="docProps/core.xml"/>'
+        '<Relationship Id="rId3" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" '
+        'Target="docProps/app.xml"/>'
+        '</Relationships>'
+    )
+    content_types_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet2.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '<Override PartName="/xl/styles.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        '<Override PartName="/docProps/core.xml" '
+        'ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+        '<Override PartName="/docProps/app.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
+        '</Types>'
+    )
+    styles_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>'
+        '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
+        '<borders count="1"><border/></borders>'
+        '<cellStyleXfs count="1"><xf/></cellStyleXfs>'
+        '<cellXfs count="1"><xf xfId="0"/></cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        '</styleSheet>'
+    )
+    now = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    core_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+        'xmlns:dcterms="http://purl.org/dc/terms/" '
+        'xmlns:dcmitype="http://purl.org/dc/dcmitype/" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+        '<dc:title>sample_database_import_template</dc:title>'
+        '<dc:creator>bac_analysis_portal</dc:creator>'
+        f'<dcterms:created xsi:type="dcterms:W3CDTF">{now}</dcterms:created>'
+        f'<dcterms:modified xsi:type="dcterms:W3CDTF">{now}</dcterms:modified>'
+        '</cp:coreProperties>'
+    )
+    app_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" '
+        'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+        '<Application>bac_analysis_portal</Application>'
+        '</Properties>'
+    )
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types_xml)
+        archive.writestr("_rels/.rels", root_rels_xml)
+        archive.writestr("xl/workbook.xml", workbook_xml)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+        archive.writestr("xl/worksheets/sheet1.xml", build_sheet_xml(rows))
+        archive.writestr("xl/worksheets/sheet2.xml", build_sheet_xml(guide_rows))
+        archive.writestr("xl/styles.xml", styles_xml)
+        archive.writestr("docProps/core.xml", core_xml)
+        archive.writestr("docProps/app.xml", app_xml)
+    return buffer.getvalue()
+
+
+def _build_database_import_metadata_items(
+    row: dict[str, str],
+    metadata_templates: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    template_map = {
+        str(item.get("key") or "").strip(): item
+        for item in metadata_templates
+        if isinstance(item, dict) and str(item.get("key") or "").strip()
+    }
+    items: list[dict[str, object]] = []
+    for key in (
+        "case_id",
+        "patient_id",
+        "surveillance_source",
+        "suspected_syndrome",
+        "submitting_unit",
+        "collection_unit",
+        "ward_department",
+        "specimen_category",
+        "cluster_status",
+        "epidemiology_link",
+        "traditional_result",
+    ):
+        value = str(row.get(key) or "").strip()
+        if not value:
+            continue
+        template = template_map.get(key) or {}
+        items.append(
+            {
+                "key": key,
+                "label": str(template.get("label") or key).strip(),
+                "type": str(template.get("type") or "text").strip() or "text",
+                "options": template.get("options") or [],
+                "value": value,
+            }
+        )
+
+    province = str(row.get("province") or "").strip()
+    city = str(row.get("city") or "").strip()
+    district = str(row.get("district") or "").strip()
+    detail = str(row.get("location_detail") or "").strip()
+    if any([province, city, district, detail]):
+        template = template_map.get("collection_site") or {}
+        items.append(
+            {
+                "key": "collection_site",
+                "label": str(template.get("label") or "采样地点").strip(),
+                "type": "location",
+                "options": [],
+                "value": {
+                    "province": province,
+                    "city": city,
+                    "district": district,
+                    "detail": detail,
+                },
+            }
+        )
+    return items
+
+
+def _parse_database_batch_upload(filename: str, content: bytes) -> list[dict[str, str]]:
+    suffix = Path(str(filename or "")).suffix.lower()
+    if suffix == ".csv":
+        return _parse_database_text_table(content.decode("utf-8-sig", errors="ignore"), ",")
+    if suffix == ".tsv":
+        return _parse_database_text_table(content.decode("utf-8-sig", errors="ignore"), "\t")
+    if suffix == ".xlsx":
+        return _parse_database_xlsx_table(content)
+    raise ValidationError("批量导入只支持 xlsx、csv 或 tsv")
+
+
+def _extract_batch_upload_headers(filename: str, content: bytes) -> list[str]:
+    suffix = Path(str(filename or "")).suffix.lower()
+    if suffix in {".csv", ".tsv"}:
+        delimiter = "," if suffix == ".csv" else "\t"
+        reader = csv.reader(io.StringIO(content.decode("utf-8-sig", errors="ignore")), delimiter=delimiter)
+        for row in reader:
+            headers = [str(item or "").strip().replace("\ufeff", "") for item in row]
+            if any(headers):
+                return [item for item in headers if item]
+        return []
+    if suffix == ".xlsx":
+        namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            try:
+                sheet_xml = archive.read("xl/worksheets/sheet1.xml")
+            except KeyError as exc:
+                raise ValidationError("xlsx 模板缺少第一个工作表") from exc
+            shared_strings: list[str] = []
+            try:
+                shared_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                for item in shared_root.findall("main:si", namespace):
+                    shared_strings.append("".join(node.text or "" for node in item.iterfind(".//main:t", namespace)))
+            except KeyError:
+                shared_strings = []
+            root = ET.fromstring(sheet_xml)
+            first_row = root.find(".//main:sheetData/main:row", namespace)
+            if first_row is None:
+                return []
+            headers: list[str] = []
+            for cell in first_row.findall("main:c", namespace):
+                cell_type = cell.attrib.get("t", "")
+                if cell_type == "inlineStr":
+                    value = "".join(node.text or "" for node in cell.iterfind(".//main:t", namespace))
+                else:
+                    raw = cell.findtext("main:v", default="", namespaces=namespace)
+                    if cell_type == "s" and raw:
+                        try:
+                            value = shared_strings[int(raw)]
+                        except (ValueError, IndexError):
+                            value = raw
+                    else:
+                        value = raw or ""
+                headers.append(str(value or "").strip())
+            return [item for item in headers if item]
+    raise ValidationError("批量导入只支持 xlsx、csv 或 tsv")
+
+
+def _parse_database_text_table(text: str, delimiter: str) -> list[dict[str, str]]:
+    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+    if not reader.fieldnames:
+        raise ValidationError("导入文件缺少表头")
+    return [
+        {str(key or "").strip(): str(value or "").strip() for key, value in row.items()}
+        for row in reader
+    ]
+
+
+def _parse_database_xlsx_table(content: bytes) -> list[dict[str, str]]:
+    namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        try:
+            sheet_xml = archive.read("xl/worksheets/sheet1.xml")
+        except KeyError as exc:
+            raise ValidationError("xlsx 模板缺少第一个工作表") from exc
+        shared_strings: list[str] = []
+        try:
+            shared_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            for item in shared_root.findall("main:si", namespace):
+                text = "".join(node.text or "" for node in item.iterfind(".//main:t", namespace))
+                shared_strings.append(text)
+        except KeyError:
+            shared_strings = []
+        root = ET.fromstring(sheet_xml)
+        rows: list[list[str]] = []
+        for row in root.findall(".//main:sheetData/main:row", namespace):
+            current: list[str] = []
+            for cell in row.findall("main:c", namespace):
+                cell_type = cell.attrib.get("t", "")
+                value = ""
+                if cell_type == "inlineStr":
+                    value = "".join(node.text or "" for node in cell.iterfind(".//main:t", namespace))
+                else:
+                    raw = cell.findtext("main:v", default="", namespaces=namespace)
+                    if cell_type == "s" and raw:
+                        try:
+                            value = shared_strings[int(raw)]
+                        except (ValueError, IndexError):
+                            value = raw
+                    else:
+                        value = raw or ""
+                current.append(str(value).strip())
+            rows.append(current)
+    if not rows:
+        raise ValidationError("xlsx 文件为空")
+    headers = [str(item or "").strip() for item in rows[0]]
+    if not any(headers):
+        raise ValidationError("xlsx 文件缺少表头")
+    parsed_rows: list[dict[str, str]] = []
+    for raw_row in rows[1:]:
+        padded = raw_row + [""] * max(0, len(headers) - len(raw_row))
+        parsed_rows.append({headers[i]: str(padded[i] or "").strip() for i in range(len(headers)) if headers[i]})
+    if parsed_rows and parsed_rows[0].get("sample_name") == "样本名称":
+        parsed_rows = parsed_rows[1:]
+    return parsed_rows
+
+
+def _build_precheck_summary(
+    *,
+    filename: str,
+    headers: list[str],
+    rows: list[dict[str, str]],
+    required_columns: list[str],
+    valid_rows: int,
+    empty_rows: int,
+    issues: list[dict[str, str]],
+) -> dict[str, object]:
+    missing_columns = [column for column in required_columns if column not in headers]
+    issue_limit = 20
+    can_import = not missing_columns and valid_rows > 0 and not issues
+    status = "ok" if can_import else ("error" if missing_columns or valid_rows == 0 else "warning")
+    return {
+        "status": status,
+        "can_import": can_import,
+        "filename": filename,
+        "headers": headers,
+        "required_columns": required_columns,
+        "missing_columns": missing_columns,
+        "total_rows": len(rows),
+        "valid_rows": valid_rows,
+        "empty_rows": empty_rows,
+        "issue_count": len(issues),
+        "issues": issues[:issue_limit],
+        "truncated": len(issues) > issue_limit,
+    }
+
+
+def _prune_batch_import_precheck_cache(cache: dict[str, dict[str, object]]) -> None:
+    now = time.time()
+    expired_ids = [
+        precheck_id
+        for precheck_id, entry in cache.items()
+        if now - float(entry.get("created_at") or 0) > BATCH_IMPORT_PRECHECK_TTL_SECONDS
+    ]
+    for precheck_id in expired_ids:
+        cache.pop(precheck_id, None)
+
+
+def _store_batch_import_precheck(
+    cache: dict[str, dict[str, object]],
+    *,
+    kind: str,
+    category: str,
+    owner: str,
+    filename: str,
+    content: bytes,
+    result: dict[str, object],
+    batch_id: str = "",
+) -> dict[str, object]:
+    _prune_batch_import_precheck_cache(cache)
+    if not result.get("can_import"):
+        return result
+    precheck_id = uuid.uuid4().hex
+    cache[precheck_id] = {
+        "kind": kind,
+        "category": category,
+        "owner": owner,
+        "filename": filename,
+        "content": content,
+        "created_at": time.time(),
+        "content_hash": hashlib.sha256(content).hexdigest(),
+        "result": result,
+        "batch_id": batch_id,
+    }
+    enriched = dict(result)
+    enriched["precheck_id"] = precheck_id
+    if batch_id:
+        enriched["batch_id"] = batch_id
+    enriched["precheck_ttl_seconds"] = BATCH_IMPORT_PRECHECK_TTL_SECONDS
+    return enriched
+
+
+def _load_batch_import_precheck(
+    cache: dict[str, dict[str, object]],
+    *,
+    precheck_id: str,
+    kind: str,
+    category: str,
+    owner: str,
+) -> tuple[str, bytes, str] | None:
+    normalized_id = str(precheck_id or "").strip()
+    if not normalized_id:
+        return None
+    _prune_batch_import_precheck_cache(cache)
+    entry = cache.get(normalized_id)
+    if not entry:
+        raise ValidationError("预检结果已过期，请重新选择文件完成预检")
+    if str(entry.get("kind") or "") != kind:
+        raise ValidationError("预检结果与当前导入类型不匹配，请重新预检")
+    if str(entry.get("category") or "") != category:
+        raise ValidationError("预检结果与当前数据库类型不匹配，请重新预检")
+    if str(entry.get("owner") or "") != owner:
+        raise PermissionError("不能使用其他用户生成的预检结果")
+    result = entry.get("result")
+    if not isinstance(result, dict) or not result.get("can_import"):
+        raise ValidationError("预检未通过，不能进入正式导入")
+    return str(entry.get("filename") or ""), bytes(entry.get("content") or b""), str(entry.get("batch_id") or "")
+
+
+def _precheck_database_batch_upload(
+    *,
+    project_root: Path,
+    sample_library_manager: SampleLibraryManager,
+    filename: str,
+    content: bytes,
+) -> dict[str, object]:
+    headers = _extract_batch_upload_headers(filename, content)
+    rows = _parse_database_batch_upload(filename, content)
+    required_columns = ["sample_name", "final_fasta_path"]
+    metadata_templates = sample_library_manager.list_metadata_templates()
+    valid_rows = 0
+    empty_rows = 0
+    issues: list[dict[str, str]] = []
+    for index, row in enumerate(rows, start=2):
+        sample_name = str(row.get("sample_name") or "").strip()
+        final_fasta_path = str(row.get("final_fasta_path") or "").strip()
+        if sample_name == "样本名称":
+            continue
+        if not sample_name and not final_fasta_path:
+            empty_rows += 1
+            continue
+        row_errors: list[str] = []
+        if not sample_name:
+            row_errors.append("缺少 sample_name")
+        if not final_fasta_path:
+            row_errors.append("缺少 final_fasta_path")
+        if final_fasta_path:
+            try:
+                _resolve_optional_existing_path(project_root, final_fasta_path)
+            except Exception as exc:
+                row_errors.append(str(exc))
+        try:
+            metadata_items = _build_database_import_metadata_items(row, metadata_templates)
+            sample_library_manager.validate_metadata_items(metadata_items)
+        except Exception as exc:
+            row_errors.append(str(exc))
+        if row_errors:
+            issues.append({"row": str(index), "name": sample_name or "-", "reason": "；".join(row_errors)})
+        else:
+            valid_rows += 1
+    return _build_precheck_summary(
+        filename=filename,
+        headers=headers,
+        rows=rows,
+        required_columns=required_columns,
+        valid_rows=valid_rows,
+        empty_rows=empty_rows,
+        issues=issues,
+    )
+
+
+def _precheck_reference_batch_upload(
+    *,
+    project_root: Path,
+    category: str,
+    filename: str,
+    content: bytes,
+) -> dict[str, object]:
+    headers = _extract_batch_upload_headers(filename, content)
+    rows = _parse_database_batch_upload(filename, content)
+    required_columns = ["host_name", "genome_name", "fasta_path"]
+    valid_rows = 0
+    empty_rows = 0
+    issues: list[dict[str, str]] = []
+    display_name = "宿主" if category == "host" else "病原"
+    for index, row in enumerate(rows, start=2):
+        host_name = str(row.get("host_name") or "").strip()
+        genome_name = str(row.get("genome_name") or "").strip()
+        fasta_path = str(row.get("fasta_path") or "").strip()
+        if host_name in {"宿主名称", "病原名称", "物种名称"} and genome_name == "基因组名称":
+            continue
+        if not host_name and not genome_name and not fasta_path:
+            empty_rows += 1
+            continue
+        row_errors: list[str] = []
+        if not host_name:
+            row_errors.append(f"缺少{display_name}名称")
+        if not genome_name:
+            row_errors.append("缺少 genome_name")
+        if not fasta_path:
+            row_errors.append("缺少 fasta_path")
+        else:
+            try:
+                _resolve_optional_existing_path(project_root, fasta_path)
+            except Exception as exc:
+                row_errors.append(str(exc))
+        if row_errors:
+            issues.append({"row": str(index), "name": host_name or "-", "reason": "；".join(row_errors)})
+        else:
+            valid_rows += 1
+    return _build_precheck_summary(
+        filename=filename,
+        headers=headers,
+        rows=rows,
+        required_columns=required_columns,
+        valid_rows=valid_rows,
+        empty_rows=empty_rows,
+        issues=issues,
+    )
+
+
+def _normalize_batch_input_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    normalized_rows: list[dict[str, str]] = []
+    for row in rows:
+        normalized: dict[str, str] = {}
+        for raw_key, raw_value in row.items():
+            key = BATCH_INPUT_HEADER_MAP.get(str(raw_key or "").strip())
+            if not key:
+                continue
+            normalized[key] = str(raw_value or "").strip()
+        if normalized:
+            normalized_rows.append(normalized)
+    return normalized_rows
+
+
+def _open_in_file_manager(target: Path) -> None:
+    system_name = platform.system().lower()
+    if system_name == "darwin":
+        command = ["open", str(target)]
+    elif system_name == "windows":
+        command = ["explorer", str(target)]
+    else:
+        command = ["xdg-open", str(target)]
+    try:
+        subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise ValidationError("当前系统缺少可用的文件管理器打开命令") from exc
+    except OSError as exc:
+        raise ValidationError(f"无法打开分析文件夹: {target}") from exc
+
+
+UPDATE_REPO_URL = "https://github.com/muguading/metagenomic.git"
+UPDATE_EXCLUDE_DIRS = {
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".venv",
+    ".venv_web",
+    ".venv_genome_db_test",
+    "analysis_tasks",
+    "generated_batch_inputs",
+    "node_modules",
+}
+UPDATE_EXCLUDE_FILES = {
+    "bac_analysis_portal.sqlite3",
+    ".DS_Store",
+}
+
+
+def _detect_offline_update_sources(workspace_root: Path) -> list[dict]:
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    for mount_root in _iter_removable_roots():
+        for candidate in _scan_update_candidates(mount_root):
+            key = str(candidate)
+            if key in seen or candidate == workspace_root:
+                continue
+            seen.add(key)
+            diff = _calculate_update_diff(candidate, workspace_root)
+            label = f"{mount_root.name} · {candidate.name} · 新增{diff['added_files']} / 更新{diff['changed_files']}"
+            candidates.append(
+                {
+                    "path": key,
+                    "label": label,
+                    "mount_root": str(mount_root),
+                    "added_files": diff["added_files"],
+                    "changed_files": diff["changed_files"],
+                    "skipped_files": diff["skipped_files"],
+                }
+            )
+    return candidates
+
+
+def _iter_removable_roots() -> list[Path]:
+    roots: list[Path] = []
+    for base in [Path("/Volumes"), Path("/media"), Path("/run/media"), Path("/mnt")]:
+        if not base.is_dir():
+            continue
+        try:
+            children = [child.resolve() for child in base.iterdir() if child.is_dir()]
+        except OSError:
+            continue
+        if base.name == "media" and children:
+            nested: list[Path] = []
+            for child in children:
+                try:
+                    nested.extend([grand.resolve() for grand in child.iterdir() if grand.is_dir()])
+                except OSError:
+                    continue
+            roots.extend(nested or children)
+        else:
+            roots.extend(children)
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(root)
+    return unique
+
+
+def _scan_update_candidates(mount_root: Path) -> list[Path]:
+    results: list[Path] = []
+    queue: list[tuple[Path, int]] = [(mount_root, 0)]
+    while queue:
+        current, depth = queue.pop(0)
+        if _is_update_candidate_root(current):
+            results.append(current)
+            continue
+        if depth >= 3:
+            continue
+        try:
+            children = [child for child in current.iterdir() if child.is_dir() and not child.name.startswith(".")]
+        except OSError:
+            continue
+        for child in children:
+            queue.append((child, depth + 1))
+    return results
+
+
+def _is_update_candidate_root(path: Path) -> bool:
+    try:
+        if not path.is_dir():
+            return False
+        return (path / "Bac_assemble_260112_newformat.py").is_file() and (path / "bac_analysis_portal").is_dir()
+    except PermissionError:
+        return False
+    except OSError:
+        return False
+
+
+def _run_online_update(workspace_root: Path) -> dict:
+    with tempfile.TemporaryDirectory(prefix="metagenomic_update_") as tmpdir:
+        clone_root = Path(tmpdir) / "repo"
+        completed = subprocess.run(
+            ["git", "clone", "--depth", "1", UPDATE_REPO_URL, str(clone_root)],
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            stderr = (completed.stderr or completed.stdout or "").strip()
+            raise ValidationError(f"在线更新失败: {stderr or 'git clone 执行失败'}")
+        if not _is_update_candidate_root(clone_root):
+            raise ValidationError("在线更新源不包含有效的部署目录结构")
+        result = _apply_update_tree(clone_root, workspace_root)
+        result.update({"mode": "online", "source_path": str(clone_root), "repo_url": UPDATE_REPO_URL})
+        return result
+
+
+def _run_offline_update(workspace_root: Path, source_path: Path) -> dict:
+    if not source_path.is_dir():
+        raise ValidationError(f"离线更新源不存在: {source_path}")
+    if not _is_update_candidate_root(source_path):
+        raise ValidationError("离线更新源不包含有效的部署目录结构")
+    result = _apply_update_tree(source_path, workspace_root)
+    result.update({"mode": "offline", "source_path": str(source_path)})
+    return result
+
+
+def _apply_update_tree(source_root: Path, target_root: Path) -> dict:
+    if not target_root.is_dir():
+        raise ValidationError(f"部署目录不存在: {target_root}")
+    diff = _calculate_update_diff(source_root, target_root)
+    for relative_path in diff["copy_files"]:
+        source_file = source_root / relative_path
+        target_file = target_root / relative_path
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_file, target_file)
+    return {
+        "target_path": str(target_root),
+        "added_files": diff["added_files"],
+        "changed_files": diff["changed_files"],
+        "skipped_files": diff["skipped_files"],
+        "restart_required": True,
+    }
+
+
+def _calculate_update_diff(source_root: Path, target_root: Path) -> dict:
+    source_files = _collect_update_files(source_root)
+    added_files = 0
+    changed_files = 0
+    skipped_files = 0
+    copy_files: list[str] = []
+    for relative_path in sorted(source_files):
+        source_file = source_root / relative_path
+        target_file = target_root / relative_path
+        if not target_file.exists():
+            added_files += 1
+            copy_files.append(relative_path)
+            continue
+        if _file_sha256(source_file) != _file_sha256(target_file):
+            changed_files += 1
+            copy_files.append(relative_path)
+        else:
+            skipped_files += 1
+    return {
+        "added_files": added_files,
+        "changed_files": changed_files,
+        "skipped_files": skipped_files,
+        "copy_files": copy_files,
+    }
+
+
+def _collect_update_files(root: Path) -> list[str]:
+    files: list[str] = []
+    for current_root, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in UPDATE_EXCLUDE_DIRS]
+        for filename in filenames:
+            if filename in UPDATE_EXCLUDE_FILES or filename.endswith((".pyc", ".pyo")):
+                continue
+            path = Path(current_root) / filename
+            relative_path = str(path.relative_to(root))
+            files.append(relative_path)
+    return files
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _collect_server_status(project_root: Path, cpu_cache: dict[str, float]) -> dict:
@@ -737,6 +7484,11 @@ def _read_memory_status() -> dict:
         except OSError:
             pass
 
+    if platform.system() == "Darwin":
+        darwin_memory = _read_memory_status_darwin()
+        if darwin_memory is not None:
+            return darwin_memory
+
     total = _read_total_memory_fallback()
     return {
         "total": total,
@@ -747,6 +7499,61 @@ def _read_memory_status() -> dict:
         "used_human": _human_bytes(0),
         "free_human": _human_bytes(total),
     }
+
+
+def _read_memory_status_darwin() -> dict | None:
+    total = _read_total_memory_fallback()
+    if total <= 0:
+        return None
+
+    try:
+        vm_stat_output = subprocess.check_output(["vm_stat"], text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    page_size = _read_vm_stat_page_size(vm_stat_output) or os.sysconf("SC_PAGE_SIZE")
+    page_values: dict[str, int] = {}
+    for raw_line in vm_stat_output.splitlines():
+        line = raw_line.strip()
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        digits = "".join(ch for ch in value if ch.isdigit())
+        if digits:
+            page_values[key.strip()] = int(digits)
+
+    free = (
+        page_values.get("Pages free", 0)
+        + page_values.get("Pages inactive", 0)
+        + page_values.get("Pages speculative", 0)
+    ) * int(page_size)
+    free = max(0, min(free, total))
+    used = max(total - free, 0)
+    percent = round(used / total * 100.0, 1) if total else None
+    return {
+        "total": total,
+        "used": used,
+        "free": free,
+        "percent": percent,
+        "total_human": _human_bytes(total),
+        "used_human": _human_bytes(used),
+        "free_human": _human_bytes(free),
+    }
+
+
+def _read_vm_stat_page_size(vm_stat_output: str) -> int | None:
+    for raw_line in vm_stat_output.splitlines():
+        line = raw_line.strip()
+        if "page size of" not in line:
+            continue
+        start = line.find("page size of")
+        if start < 0:
+            continue
+        suffix = line[start + len("page size of") :]
+        digits = "".join(ch for ch in suffix if ch.isdigit())
+        if digits:
+            return int(digits)
+    return None
 
 
 def _read_total_memory_fallback() -> int:
@@ -785,6 +7592,1190 @@ def _human_bytes(value: int | float) -> str:
     return "0 B"
 
 
+def _reference_database_root(project_root: Path, category: str) -> Path:
+    category_name = "host_database" if category == "host" else "pathogen_database"
+    return project_root / category_name
+
+
+def _sanitize_host_slug(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        text = "host_genome"
+    normalized = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in text)
+    while "__" in normalized:
+        normalized = normalized.replace("__", "_")
+    return normalized.strip("._") or "host_genome"
+
+
+def _normalize_ncbi_accession(value: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith(("GCF_", "GCA_")) and "." not in text:
+        parts = text.rsplit("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            return f"{parts[0]}.{parts[1]}"
+    return text
+
+
+def _resolve_datasets_binary(project_root: Path) -> Path | None:
+    scripts_dir = project_root / "scripts"
+    system_name = platform.system().lower()
+    candidates: list[Path] = []
+    if system_name == "linux":
+        candidates.append(scripts_dir / "datasets_linux")
+    elif system_name == "darwin":
+        candidates.append(scripts_dir / "datasets_macos")
+    candidates.append(scripts_dir / "datasets")
+    which_path = shutil.which("datasets")
+    if which_path:
+        candidates.append(Path(which_path))
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            mode = candidate.stat().st_mode
+            if not os.access(candidate, os.X_OK):
+                candidate.chmod(mode | 0o111)
+        except OSError:
+            pass
+        if os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _save_uploaded_reference_genome(*, project_root: Path, category: str, upload) -> Path:
+    filename = Path(str(upload.filename or "").strip()).name
+    if not filename:
+        raise ValidationError("上传文件名不能为空")
+    lowered = filename.lower()
+    if not lowered.endswith((".fa", ".fasta", ".fna", ".fa.gz", ".fasta.gz", ".fna.gz")):
+        raise ValidationError("仅支持 .fa / .fasta / .fna 及其 gz 压缩文件")
+    target_root = _reference_database_root(project_root, category) / "uploads"
+    target_root.mkdir(parents=True, exist_ok=True)
+    stem = _sanitize_host_slug(Path(filename).stem)
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    suffixes = "".join(Path(filename).suffixes) or Path(filename).suffix or ".fa"
+    target = target_root / f"{stem}_{timestamp}{suffixes}"
+    upload.save(target)
+    return target
+
+
+def _save_uploaded_task_reference(*, project_root: Path, upload, owner: str) -> Path:
+    filename = Path(str(upload.filename or "").strip()).name
+    if not filename:
+        raise ValidationError("上传文件名不能为空")
+    lowered = filename.lower()
+    if not lowered.endswith((".fa", ".fasta", ".fna", ".fa.gz", ".fasta.gz", ".fna.gz")):
+        raise ValidationError("仅支持 .fa / .fasta / .fna 及其 gz 压缩文件")
+    owner_slug = _sanitize_host_slug(str(owner or "anonymous")) or "anonymous"
+    target_root = project_root / "analysis_tasks" / "_task_reference_uploads" / owner_slug
+    target_root.mkdir(parents=True, exist_ok=True)
+    stem = _sanitize_host_slug(Path(filename).stem) or "reference"
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    suffixes = "".join(Path(filename).suffixes) or Path(filename).suffix or ".fa"
+    target = target_root / f"{stem}_{timestamp}{suffixes}"
+    upload.save(target)
+    return target
+
+
+def _resolve_reference_fasta_for_update(project_root: Path, category: str, current_record: dict[str, object], payload: dict[str, object]) -> str | None:
+    uploaded_fasta_path = str(payload.get("uploaded_fasta_path") or "").strip()
+    if uploaded_fasta_path:
+        source_path = Path(uploaded_fasta_path)
+        host_root = _reference_database_root(project_root, category)
+        target = host_root / "genomes" / f"{_sanitize_host_slug(str(payload.get('genome_name') or payload.get('host_name') or current_record.get('genome_name') or current_record.get('host_name') or current_record.get('host_key') or 'reference'))}.fa"
+        _write_normalized_fasta(source_path, target)
+        return str(target)
+    if "fasta_path" not in payload:
+        return None
+    raw_path = str(payload.get("fasta_path") or "").strip()
+    if not raw_path:
+        return str(current_record.get("fasta_path") or "")
+    source_path = Path(_resolve_optional_existing_path(project_root, raw_path))
+    host_root = _reference_database_root(project_root, category)
+    target = host_root / "genomes" / f"{_sanitize_host_slug(str(payload.get('genome_name') or payload.get('host_name') or current_record.get('genome_name') or current_record.get('host_name') or current_record.get('host_key') or 'reference'))}.fa"
+    _write_normalized_fasta(source_path, target)
+    return str(target)
+
+
+def _write_normalized_fasta(source_path: Path, destination_path: Path) -> None:
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    if source_path.resolve() == destination_path.resolve():
+        return
+    if source_path.suffix.lower() == ".gz":
+        with gzip.open(source_path, "rt", encoding="utf-8", errors="ignore") as src, destination_path.open("w", encoding="utf-8") as dest:
+            shutil.copyfileobj(src, dest)
+        return
+    try:
+        if destination_path.exists():
+            destination_path.unlink()
+        os.link(source_path, destination_path)
+    except OSError:
+        shutil.copy2(source_path, destination_path)
+
+
+def _register_reference_database_record(
+    *,
+    store: PortalStore,
+    project_root: Path,
+    category: str,
+    host_name: str,
+    genome_name: str,
+    taxid: str,
+    source_type: str,
+    source_label: str,
+    source_accession: str,
+    source_url: str,
+    source_fasta_path: Path,
+    description: str,
+    owner: str,
+) -> dict[str, object]:
+    host_name = str(host_name or "").strip()
+    genome_name = str(genome_name or "").strip()
+    if category == "host" and not host_name:
+        raise ValidationError("宿主名称不能为空")
+    if category == "pathogen" and not host_name:
+        raise ValidationError("病原名称不能为空")
+    if not genome_name:
+        raise ValidationError("基因组名称不能为空")
+    if not source_fasta_path.is_file():
+        raise ValidationError(f"宿主基因组文件不存在: {source_fasta_path}")
+    slug = _sanitize_host_slug(genome_name)
+    host_root = _reference_database_root(project_root, category)
+    genomes_dir = host_root / "genomes"
+    fasta_target = genomes_dir / f"{slug}.fa"
+    _write_normalized_fasta(source_fasta_path, fasta_target)
+    record = store.upsert_host_database_record(
+        {
+            "host_key": slug,
+            "db_category": category,
+            "host_name": host_name,
+            "genome_name": genome_name,
+            "taxid": str(taxid or "").strip(),
+            "source_type": source_type,
+            "source_label": source_label,
+            "source_accession": source_accession,
+            "source_url": source_url,
+            "description": description,
+            "fasta_path": str(fasta_target),
+            "index_prefix": str(host_root / "index" / slug / "reference"),
+            "index_status": "pending",
+            "index_message": "已导入，等待构建索引",
+            "owner": owner,
+        }
+    )
+    return record
+
+
+def _batch_import_reference_records(
+    *,
+    store: PortalStore,
+    project_root: Path,
+    category: str,
+    owner: str,
+    filename: str,
+    content: bytes,
+) -> dict[str, object]:
+    rows = _parse_database_batch_upload(filename, content)
+    imported_items: list[dict[str, object]] = []
+    skipped: list[dict[str, str]] = []
+    display_name = "宿主" if category == "host" else "病原"
+    for index, row in enumerate(rows, start=2):
+        host_name = str(row.get("host_name") or "").strip()
+        genome_name = str(row.get("genome_name") or "").strip()
+        fasta_path = str(row.get("fasta_path") or "").strip()
+        if host_name in {"宿主名称", "病原名称", "物种名称"} and genome_name == "基因组名称":
+            continue
+        if not host_name and not genome_name and not fasta_path:
+            continue
+        try:
+            imported = _register_reference_database_record(
+                store=store,
+                project_root=project_root,
+                category=category,
+                host_name=host_name,
+                genome_name=genome_name,
+                taxid=str(row.get("taxid") or "").strip(),
+                source_type="local",
+                source_label=str(row.get("source_label") or "批量导入").strip(),
+                source_accession=str(row.get("source_accession") or "").strip(),
+                source_url="",
+                source_fasta_path=Path(_resolve_optional_existing_path(project_root, fasta_path)),
+                description=str(row.get("description") or "").strip(),
+                owner=owner,
+            )
+            imported_items.append(imported)
+        except Exception as exc:
+            skipped.append(
+                {
+                    "row": str(index),
+                    "host_name": host_name or f"{display_name}名称缺失",
+                    "genome_name": genome_name or "-",
+                    "reason": str(exc),
+                }
+            )
+    return {
+        "status": "ok",
+        "imported_count": len(imported_items),
+        "skipped_count": len(skipped),
+        "items": imported_items,
+        "skipped": skipped,
+    }
+
+
+def _extract_ncbi_taxid(raw: object) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, (str, int)):
+        text = str(raw).strip()
+        return text if text.isdigit() else ""
+    if isinstance(raw, dict):
+        for key in ("tax_id", "taxid", "taxonomy_id"):
+            value = _extract_ncbi_taxid(raw.get(key))
+            if value:
+                return value
+        for value in raw.values():
+            found = _extract_ncbi_taxid(value)
+            if found:
+                return found
+    if isinstance(raw, list):
+        for item in raw:
+            found = _extract_ncbi_taxid(item)
+            if found:
+                return found
+    return ""
+
+
+def _find_nested_text(raw: object, keys: tuple[str, ...]) -> str:
+    if isinstance(raw, dict):
+        for key in keys:
+            value = raw.get(key)
+            text = str(value or "").strip()
+            if text:
+                return text
+        for value in raw.values():
+            found = _find_nested_text(value, keys)
+            if found:
+                return found
+    if isinstance(raw, list):
+        for item in raw:
+            found = _find_nested_text(item, keys)
+            if found:
+                return found
+    return ""
+
+
+def _extract_ncbi_organism_name(report: dict[str, object]) -> str:
+    candidates = [
+        report.get("organism", {}).get("organism_name") if isinstance(report.get("organism"), dict) else None,
+        report.get("organism", {}).get("scientific_name") if isinstance(report.get("organism"), dict) else None,
+        report.get("organism_name"),
+        report.get("scientific_name"),
+        report.get("current_organism_name"),
+    ]
+    for value in candidates:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return _find_nested_text(report, ("organism_name", "scientific_name", "current_organism_name"))
+
+
+def _extract_ncbi_assembly_name(report: dict[str, object]) -> str:
+    strain_name = _find_nested_text(
+        report,
+        (
+            "strain",
+            "isolate",
+            "cultivar",
+            "breed",
+            "ecotype",
+            "serovar",
+            "bioproject_lineage",
+        ),
+    )
+    if strain_name:
+        return strain_name
+    assembly_info = report.get("assembly_info")
+    if isinstance(assembly_info, dict):
+        for key in ("assembly_name", "assembly_level", "assembly_type"):
+            text = str(assembly_info.get(key) or "").strip()
+            if text:
+                return text
+    for key in ("assembly_name", "display_name"):
+        text = str(report.get(key) or "").strip()
+        if text:
+            return text
+    return _find_nested_text(report, ("assembly_name", "display_name", "submitter_name"))
+
+
+def _normalize_ncbi_species_name(organism_name: str, assembly_name: str) -> str:
+    organism_text = str(organism_name or "").strip()
+    assembly_text = str(assembly_name or "").strip()
+    if not organism_text:
+        return ""
+    if assembly_text and organism_text.lower().endswith(assembly_text.lower()):
+        trimmed = organism_text[: len(organism_text) - len(assembly_text)].strip(" ,;:-_/")
+        if trimmed:
+            return trimmed
+    for marker in (" strain ", " substr. ", " subsp. ", " isolate "):
+        index = organism_text.lower().find(marker)
+        if index > 0:
+            trimmed = organism_text[:index].strip()
+            if trimmed:
+                return trimmed
+    return organism_text
+
+
+def _extract_ncbi_biosource_value(raw: object, allowed_types: tuple[str, ...] = ("strain", "isolate")) -> str:
+    biosource = raw.get("biosource") if isinstance(raw, dict) else {}
+    infraspecies = biosource.get("infraspecieslist") if isinstance(biosource, dict) else None
+    if isinstance(infraspecies, list):
+        for item in infraspecies:
+            if not isinstance(item, dict):
+                continue
+            sub_type = str(item.get("sub_type") or item.get("subtype") or "").strip().lower()
+            sub_value = str(item.get("sub_value") or item.get("subname") or item.get("value") or "").strip()
+            if sub_type in allowed_types and sub_value:
+                return sub_value
+    return ""
+
+
+def _score_ncbi_assembly_quality(doc: dict[str, object]) -> tuple[int, int, int, int, int, str, str]:
+    refseq_category = str(doc.get("refseq_category") or "").strip().lower()
+    assembly_level = str(doc.get("assemblylevel") or doc.get("assembly_level") or "").strip().lower()
+    assembly_status = str(doc.get("assemblystatus") or doc.get("versionstatus") or "").strip().lower()
+    accession = _normalize_ncbi_accession(str(doc.get("assemblyaccession") or doc.get("assembly_accession") or "").strip())
+    release_date = str(doc.get("seqreleasedate") or doc.get("submissiondate") or doc.get("lastupdatedate") or "").strip()
+    refseq_score = 3 if refseq_category == "reference genome" else 2 if refseq_category == "representative genome" else 0
+    level_score = {
+        "complete genome": 4,
+        "chromosome": 3,
+        "scaffold": 2,
+        "contig": 1,
+    }.get(assembly_level, 0)
+    accession_score = 1 if accession.startswith("GCF_") else 0
+    latest_score = 1 if "latest" in assembly_status or "current" in assembly_status else 0
+    preferred_score = 1 if refseq_score > 0 or level_score >= 3 else 0
+    return (preferred_score, refseq_score, level_score, accession_score, latest_score, release_date, accession)
+
+
+def _build_ncbi_reference_dedup_key(doc: dict[str, object]) -> str:
+    species_name = _normalize_taxonomy_lookup_name(doc.get("host_name") or "")
+    strain_name = _normalize_taxonomy_lookup_name(doc.get("strain_name") or "")
+    genome_name = _normalize_taxonomy_lookup_name(doc.get("genome_name") or "")
+    if species_name and strain_name:
+        return f"{species_name}::{strain_name}"
+    if species_name and genome_name:
+        return f"{species_name}::{genome_name}"
+    return genome_name or species_name
+
+
+def _fetch_ncbi_taxid_reference_candidates(taxid: str, *, max_items: int = 20) -> list[dict[str, str]]:
+    taxid = str(taxid or "").strip()
+    if not taxid.isdigit():
+        raise ValidationError("TaxID 必须是纯数字")
+    limit = max(1, min(200, int(max_items or 20)))
+    search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + urlencode(
+        {
+            "db": "assembly",
+            "term": f"txid{taxid}[Organism:exp]",
+            "retmode": "json",
+            "retmax": str(min(max(limit * 12, 100), 500)),
+        }
+    )
+    try:
+        with urlopen(Request(search_url, headers={"User-Agent": "bac-analysis-portal/1.0"}), timeout=60) as response:
+            search_payload = json.loads(response.read().decode("utf-8", errors="ignore"))
+    except Exception as exc:
+        raise ValidationError(f"查询 TaxID {taxid} 的 NCBI 装配列表失败: {exc}") from exc
+    id_list = (((search_payload or {}).get("esearchresult") or {}).get("idlist") or [])
+    if not id_list:
+        raise ValidationError(f"NCBI 中没有找到 TaxID {taxid} 对应的装配记录")
+
+    docs: list[dict[str, object]] = []
+    for start in range(0, len(id_list), 100):
+        batch = id_list[start : start + 100]
+        summary_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?" + urlencode(
+            {
+                "db": "assembly",
+                "id": ",".join(str(item) for item in batch),
+                "retmode": "json",
+            }
+        )
+        try:
+            with urlopen(Request(summary_url, headers={"User-Agent": "bac-analysis-portal/1.0"}), timeout=60) as response:
+                summary_payload = json.loads(response.read().decode("utf-8", errors="ignore"))
+        except Exception:
+            continue
+        result = (summary_payload or {}).get("result") or {}
+        for item_id in batch:
+            doc = result.get(str(item_id)) or {}
+            if isinstance(doc, dict) and doc:
+                docs.append(doc)
+
+    if not docs:
+        raise ValidationError(f"TaxID {taxid} 的装配摘要读取失败")
+
+    candidates: list[dict[str, object]] = []
+    for doc in docs:
+        accession = _normalize_ncbi_accession(str(doc.get("assemblyaccession") or doc.get("assembly_accession") or "").strip())
+        if not accession.startswith(("GCF_", "GCA_")):
+            continue
+        organism_name = _extract_ncbi_organism_name(doc)
+        assembly_name = _extract_ncbi_assembly_name(doc)
+        species_name = _normalize_ncbi_species_name(organism_name, assembly_name) or organism_name
+        strain_name = _extract_ncbi_biosource_value(doc)
+        refseq_category = str(doc.get("refseq_category") or "").strip().lower()
+        assembly_level = str(doc.get("assemblylevel") or doc.get("assembly_level") or "").strip().lower()
+        score = _score_ncbi_assembly_quality(doc)
+        candidates.append(
+            {
+                "source_accession": accession,
+                "host_name": species_name.strip(),
+                "genome_name": (strain_name or assembly_name or accession).strip(),
+                "taxid": str(doc.get("taxid") or taxid).strip(),
+                "strain_name": strain_name.strip(),
+                "assembly_level": assembly_level,
+                "refseq_category": refseq_category,
+                "quality_score": score,
+            }
+        )
+
+    if not candidates:
+        raise ValidationError(f"TaxID {taxid} 没有可下载的参考基因组 accession")
+
+    candidates.sort(key=lambda item: item.get("quality_score") or (), reverse=True)
+
+    selected: list[dict[str, str]] = []
+    seen_accessions: set[str] = set()
+    seen_groups: set[str] = set()
+    quality_tiers = (
+        lambda item: (item.get("quality_score") or (0,))[0] >= 1 and str(item.get("assembly_level") or "") in {"complete genome", "chromosome"},
+        lambda item: (item.get("quality_score") or (0,))[0] >= 1,
+        lambda item: str(item.get("assembly_level") or "") in {"complete genome", "chromosome", "scaffold"},
+        lambda item: True,
+    )
+    for predicate in quality_tiers:
+        for item in candidates:
+            accession = str(item.get("source_accession") or "").strip()
+            if not accession or accession in seen_accessions:
+                continue
+            dedup_key = _build_ncbi_reference_dedup_key(item)
+            if dedup_key and dedup_key in seen_groups:
+                continue
+            if not predicate(item):
+                continue
+            selected.append(
+                {
+                    "source_accession": accession,
+                    "host_name": str(item.get("host_name") or "").strip(),
+                    "genome_name": str(item.get("genome_name") or accession).strip(),
+                    "taxid": str(item.get("taxid") or taxid).strip(),
+                }
+            )
+            seen_accessions.add(accession)
+            if dedup_key:
+                seen_groups.add(dedup_key)
+            if len(selected) >= limit:
+                return selected
+    return selected[:limit]
+
+
+def _fetch_ncbi_accession_metadata(accession: str) -> dict[str, str]:
+    accession = str(accession or "").strip()
+    if not accession:
+        return {}
+    search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + urlencode({
+        "db": "assembly",
+        "term": f"{accession}[Assembly Accession]",
+        "retmode": "json",
+    })
+    try:
+        with urlopen(Request(search_url, headers={"User-Agent": "bac-analysis-portal/1.0"}), timeout=60) as response:
+            search_payload = json.loads(response.read().decode("utf-8", errors="ignore"))
+    except Exception:
+        return {}
+    id_list = (((search_payload or {}).get("esearchresult") or {}).get("idlist") or [])
+    if not id_list:
+        return {}
+    summary_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?" + urlencode({
+        "db": "assembly",
+        "id": str(id_list[0]),
+        "retmode": "json",
+    })
+    try:
+        with urlopen(Request(summary_url, headers={"User-Agent": "bac-analysis-portal/1.0"}), timeout=60) as response:
+            summary_payload = json.loads(response.read().decode("utf-8", errors="ignore"))
+    except Exception:
+        return {}
+    result = (summary_payload or {}).get("result") or {}
+    doc = result.get(str(id_list[0])) or {}
+    species_name = str(doc.get("speciesname") or doc.get("organism") or "").strip()
+    assembly_name = str(doc.get("assemblyname") or "").strip()
+    taxid = str(doc.get("taxid") or "").strip()
+    return {
+        "host_name": species_name,
+        "genome_name": _extract_ncbi_biosource_value(doc) or assembly_name,
+        "taxid": taxid,
+        "source_accession": accession,
+    }
+
+
+def _read_ncbi_download_metadata(download_target: Path) -> dict[str, str]:
+    if not zipfile.is_zipfile(download_target):
+        return {}
+    try:
+        with zipfile.ZipFile(download_target) as archive:
+            report_names = [name for name in archive.namelist() if name.endswith("assembly_data_report.jsonl")]
+            for report_name in report_names:
+                with archive.open(report_name) as handle:
+                    for raw_line in handle:
+                        line = raw_line.decode("utf-8", errors="ignore").strip()
+                        if not line:
+                            continue
+                        try:
+                            report = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        organism_name = _extract_ncbi_organism_name(report)
+                        taxid = _extract_ncbi_taxid(report)
+                        assembly_name = _extract_ncbi_assembly_name(report)
+                        species_name = _normalize_ncbi_species_name(organism_name, assembly_name)
+                        if organism_name or taxid or assembly_name:
+                            return {
+                                "host_name": species_name or organism_name,
+                                "taxid": taxid,
+                                "genome_name": assembly_name,
+                            }
+    except OSError:
+        return {}
+    return {}
+
+
+def _validate_downloaded_reference_file(download_target: Path) -> None:
+    if zipfile.is_zipfile(download_target):
+        return
+    head = download_target.read_bytes()[:4096]
+    text = head.decode("utf-8", errors="ignore").strip()
+    if not text:
+        raise ValidationError("下载结果为空")
+    if text.startswith(">"):
+        return
+    if text.startswith("{") or text.startswith("["):
+        try:
+            payload = json.loads(text)
+            error_text = json.dumps(payload, ensure_ascii=False)[:400]
+        except json.JSONDecodeError:
+            error_text = text[:200]
+        raise ValidationError(f"NCBI 未返回基因组文件，返回内容为: {error_text}")
+    raise ValidationError(f"下载结果不是 FASTA 文件，返回内容为: {text[:200]}")
+
+
+def _download_with_resume(*, source_url: str, destination: Path, progress_callback=None, max_attempts: int = 5) -> None:
+    downloaded_bytes = destination.stat().st_size if destination.exists() else 0
+    total_bytes = 0
+    chunk_size = 1024 * 1024
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        request_obj = Request(source_url, headers={"User-Agent": "bac-analysis-portal/1.0"})
+        if downloaded_bytes > 0:
+            request_obj.add_header("Range", f"bytes={downloaded_bytes}-")
+        try:
+            with urlopen(request_obj, timeout=180) as response:
+                content_range = str(response.headers.get("Content-Range") or "").strip()
+                if downloaded_bytes > 0 and not content_range:
+                    downloaded_bytes = 0
+                    if destination.exists():
+                        destination.unlink(missing_ok=True)
+                with destination.open("ab" if downloaded_bytes > 0 else "wb") as handle:
+                    if content_range and "/" in content_range:
+                        try:
+                            total_bytes = int(content_range.rsplit("/", 1)[1])
+                        except (TypeError, ValueError):
+                            total_bytes = total_bytes
+                    elif response.headers.get("Content-Length"):
+                        try:
+                            response_length = int(response.headers.get("Content-Length") or 0)
+                        except (TypeError, ValueError):
+                            response_length = 0
+                        total_bytes = downloaded_bytes + response_length if downloaded_bytes > 0 else response_length
+
+                    while True:
+                        try:
+                            chunk = response.read(chunk_size)
+                        except http.client.IncompleteRead as exc:
+                            chunk = exc.partial or b""
+                            if chunk:
+                                handle.write(chunk)
+                                downloaded_bytes += len(chunk)
+                                if progress_callback is not None:
+                                    percent = 10
+                                    if total_bytes > 0:
+                                        percent = max(2, min(94, int(downloaded_bytes * 94 / total_bytes)))
+                                    progress_callback("downloading", percent, f"下载连接中断，正在重试（第 {attempt} 次）")
+                            raise
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        downloaded_bytes += len(chunk)
+                        if progress_callback is not None:
+                            percent = 10
+                            if total_bytes > 0:
+                                percent = max(2, min(94, int(downloaded_bytes * 94 / total_bytes)))
+                            progress_callback("downloading", percent, "正在下载参考基因组")
+            return
+        except http.client.IncompleteRead as exc:
+            last_error = exc
+            time.sleep(min(2 * attempt, 8))
+            continue
+        except Exception as exc:
+            last_error = exc
+            if attempt >= max_attempts:
+                break
+            time.sleep(min(2 * attempt, 8))
+            continue
+
+    raise ValidationError(f"下载宿主基因组失败: {last_error}")
+
+
+def _download_with_datasets(
+    *,
+    datasets_binary: Path,
+    accession: str,
+    destination: Path,
+    progress_callback=None,
+    max_attempts: int = 3,
+) -> None:
+    last_error = ""
+    for attempt in range(1, max_attempts + 1):
+        if destination.exists():
+            destination.unlink(missing_ok=True)
+        command = [
+            str(datasets_binary),
+            "download",
+            "genome",
+            "accession",
+            accession,
+            "--filename",
+            str(destination),
+            "--include",
+            "genome",
+        ]
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        last_size = -1
+        stable_rounds = 0
+        while True:
+            return_code = process.poll()
+            current_size = destination.stat().st_size if destination.exists() else 0
+            if current_size != last_size:
+                stable_rounds = 0
+                last_size = current_size
+                if progress_callback is not None:
+                    progress_callback("downloading", 10, f"NCBI datasets 下载中（第 {attempt}/{max_attempts} 次），已接收 {current_size} bytes")
+            else:
+                stable_rounds += 1
+                if progress_callback is not None and stable_rounds % 5 == 0:
+                    progress_callback("downloading", 10, f"NCBI datasets 下载中（第 {attempt}/{max_attempts} 次），请稍候")
+            if return_code is not None:
+                if return_code != 0:
+                    last_error = f"datasets 退出码 {return_code}"
+                    break
+                if not destination.exists():
+                    last_error = f"datasets 未生成输出文件 {destination}"
+                    break
+                return
+            time.sleep(1)
+        if attempt < max_attempts:
+            time.sleep(min(2 * attempt, 6))
+    raise ValidationError(f"下载宿主基因组失败: {last_error or 'datasets 多次重试后仍失败'}")
+
+
+def _download_remote_host_genome(*, project_root: Path, provider: str, query: str, host_name: str, category: str = "host", ncbi_mode: str = "datasets", progress_callback=None) -> dict[str, str]:
+    provider = str(provider or "").strip().lower()
+    ncbi_mode = str(ncbi_mode or "datasets").strip().lower()
+    query = str(query or "").strip()
+    if not query:
+        raise ValidationError("请填写 accession 或下载链接")
+    host_root = _reference_database_root(project_root, category)
+    downloads_dir = host_root / "downloads"
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+    source_url = query if query.startswith(("http://", "https://")) else ""
+    source_accession = ""
+    if provider == "ncbi" and not source_url:
+        source_accession = _normalize_ncbi_accession(query)
+    if provider in {"gtdb", "ensembl"} and not source_url:
+        label = "Ensembl" if provider == "ensembl" else "GTDB"
+        raise ValidationError(f"{label} 下载请提供可直接访问的 FASTA 或压缩包链接")
+
+    slug_seed = host_name or source_accession or (Path(source_url.split("?")[0]).stem if source_url else "") or provider
+    slug = _sanitize_host_slug(slug_seed)
+    if provider == "ncbi" and source_accession and ncbi_mode == "datasets":
+        datasets_binary = _resolve_datasets_binary(project_root)
+        if datasets_binary is None:
+            raise ValidationError("未找到可用的 datasets 软件，请确认 scripts/datasets_linux 或 scripts/datasets_macos 存在且可执行")
+        download_target = downloads_dir / f"{slug}.ncbi_dataset.zip"
+        if progress_callback is not None:
+            progress_callback("downloading", 5, "正在通过 NCBI datasets 下载参考基因组")
+        _download_with_datasets(
+            datasets_binary=datasets_binary,
+            accession=source_accession,
+            destination=download_target,
+            progress_callback=progress_callback,
+        )
+    else:
+        if provider == "ncbi" and source_accession:
+            source_url = f"https://api.ncbi.nlm.nih.gov/datasets/v2/genome/accession/{quote(source_accession)}/download?include_annotation_type=GENOME_FASTA"
+        download_target = downloads_dir / f"{slug}.download"
+        _download_with_resume(source_url=source_url, destination=download_target, progress_callback=progress_callback)
+        _validate_downloaded_reference_file(download_target)
+
+    ncbi_metadata = _read_ncbi_download_metadata(download_target) if provider == "ncbi" else {}
+
+    if zipfile.is_zipfile(download_target):
+        if progress_callback is not None:
+            progress_callback("importing", 96, "下载完成，正在提取 FASTA")
+        with zipfile.ZipFile(download_target) as archive:
+            fasta_members = [name for name in archive.namelist() if name.lower().endswith((".fa", ".fasta", ".fna"))]
+            if not fasta_members:
+                raise ValidationError("下载文件中未找到 FASTA")
+            chosen = fasta_members[0]
+            extracted = downloads_dir / f"{slug}{Path(chosen).suffix or '.fa'}"
+            with archive.open(chosen) as src, extracted.open("wb") as dest:
+                shutil.copyfileobj(src, dest)
+            download_target.unlink(missing_ok=True)
+            download_target = extracted
+    else:
+        if progress_callback is not None:
+            progress_callback("importing", 96, "下载完成，正在整理参考文件")
+        suffix = Path(source_url.split("?")[0]).suffix or ".fa"
+        normalized = downloads_dir / f"{slug}{suffix}"
+        download_target.replace(normalized)
+        download_target = normalized
+
+    inferred_name = host_name or ncbi_metadata.get("host_name") or source_accession or Path(download_target).stem
+    if provider == "ncbi" and (not ncbi_metadata.get("host_name") or not ncbi_metadata.get("genome_name")) and source_accession:
+        accession_metadata = _fetch_ncbi_accession_metadata(source_accession)
+        for key, value in accession_metadata.items():
+            if value and not ncbi_metadata.get(key):
+                ncbi_metadata[key] = value
+        inferred_name = host_name or ncbi_metadata.get("host_name") or source_accession or Path(download_target).stem
+    return {
+        "host_name": inferred_name,
+        "genome_name": str(ncbi_metadata.get("genome_name") or "").strip(),
+        "taxid": str(ncbi_metadata.get("taxid") or "").strip(),
+        "source_accession": source_accession,
+        "source_url": source_url,
+        "fasta_path": str(download_target),
+    }
+
+
+def _append_fasta_to_handle(handle, fasta_path: Path) -> None:
+    with fasta_path.open("r", encoding="utf-8", errors="ignore") as source:
+        content = source.read().strip()
+        if not content:
+            return
+        handle.write(content)
+        handle.write("\n")
+
+
+def _run_host_index_command(command: list[str], workdir: Path) -> tuple[bool, str]:
+    tool_name = command[0]
+    if shutil.which(tool_name) is None:
+        return False, f"{tool_name} 未安装，已跳过"
+    completed = subprocess.run(command, cwd=workdir, capture_output=True, text=True)
+    if completed.returncode != 0:
+        error_text = (completed.stderr or completed.stdout or "").strip() or f"{tool_name} 执行失败"
+        return False, error_text
+    return True, f"{tool_name} 已完成"
+
+
+def _reference_panel_root(project_root: Path, category: str, panel_type: str = "cgmlst") -> Path:
+    return _reference_database_root(project_root, category) / "panels" / panel_type
+
+
+def _resolve_chewbbaca_command(store: PortalStore | None = None) -> list[str]:
+    env_name = "genomad_aux"
+    if store is not None:
+        env_name = resolve_conda_env_name(str(store.get_setting("conda_env_vfind", env_name) or env_name).strip() or env_name)
+    raw = str(os.environ.get("CHEWBBACA_BIN") or "").strip()
+    if raw:
+        return shlex.split(raw)
+    conda_root = _load_conda_root_setting(store) if store is not None else ""
+    return [_resolve_conda_exe_from_root(conda_root), "run", "-n", env_name, "--no-capture-output", "chewBBACA.py"]
+
+
+def _resolve_chewbbaca_training_file(species_slug: str) -> Path | None:
+    specific_env = str(os.environ.get(f"CHEWBBACA_PTF_{species_slug.upper()}") or "").strip()
+    generic_env = str(os.environ.get("CHEWBBACA_PTF") or "").strip()
+    for candidate in (specific_env, generic_env):
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser().resolve()
+        if path.is_file():
+            return path
+    return None
+
+
+def _run_reference_panel_command(command: list[str], workdir: Path) -> None:
+    executable = command[0]
+    if shutil.which(executable) is None and not Path(executable).is_file():
+        raise ValidationError(f"{executable} 未安装或不可执行")
+    completed = subprocess.run(command, cwd=workdir, capture_output=True, text=True)
+    if completed.returncode != 0:
+        error_text = (completed.stderr or completed.stdout or "").strip() or "命令执行失败"
+        raise ValidationError(error_text)
+
+
+def _link_or_copy_reference_fasta(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() or target.is_symlink():
+        target.unlink()
+    try:
+        target.symlink_to(source)
+    except OSError:
+        shutil.copy2(source, target)
+
+
+def _materialize_cgmlst_loci(schema_dir: Path, loci_list_path: Path, target_dir: Path) -> int:
+    if not loci_list_path.is_file():
+        return 0
+    target_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    names = [line.strip() for line in loci_list_path.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
+    for locus in names:
+        candidates = [
+            schema_dir / locus,
+            schema_dir / f"{locus}.fasta",
+            schema_dir / f"{locus}.fa",
+            schema_dir / f"{locus}.fna",
+        ]
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            shutil.copy2(candidate, target_dir / candidate.name)
+            copied += 1
+            break
+    return copied
+
+
+def _run_single_cgmlst_panel_build(
+    *,
+    store: PortalStore,
+    project_root: Path,
+    panel_key: str,
+    species_name: str,
+    selected_records: list[dict[str, object]],
+    threshold: str,
+    threads: int,
+    owner: str,
+) -> None:
+    species_slug = _sanitize_host_slug(species_name or panel_key)
+    panel_root = _reference_panel_root(project_root, "pathogen", "cgmlst") / species_slug / panel_key
+    input_dir = panel_root / "input_genomes"
+    schema_dir = panel_root / "schema_seed"
+    allele_call_dir = panel_root / "allele_call"
+    cgmlst_dir = panel_root / "cgmlst_panel"
+    loci_dir = cgmlst_dir / "loci"
+    panel_root.mkdir(parents=True, exist_ok=True)
+    input_dir.mkdir(parents=True, exist_ok=True)
+    selected_host_keys = [str(row.get("host_key") or "").strip() for row in selected_records if str(row.get("host_key") or "").strip()]
+    store.upsert_reference_panel(
+        {
+            "panel_key": panel_key,
+            "db_category": "pathogen",
+            "panel_type": "cgmlst",
+            "species_name": species_name,
+            "species_slug": species_slug,
+            "selected_host_keys_json": selected_host_keys,
+            "genome_count": len(selected_records),
+            "schema_dir": str(schema_dir),
+            "cgmlst_dir": str(cgmlst_dir),
+            "threshold": threshold,
+            "status": "running",
+            "message": "正在准备参考基因组并启动 chewBBACA",
+            "owner": owner,
+        }
+    )
+    try:
+        if len(selected_records) < 2:
+            raise ValidationError("构建 cgMLST panel 至少需要 2 条同物种参考基因组")
+        for row in selected_records:
+            fasta_path = Path(str(row.get("fasta_path") or "")).expanduser().resolve()
+            if not fasta_path.is_file():
+                raise ValidationError(f"参考 FASTA 不存在: {fasta_path}")
+            target = input_dir / f"{_sanitize_host_slug(str(row.get('genome_name') or row.get('host_key') or fasta_path.stem))}.fa"
+            _link_or_copy_reference_fasta(fasta_path, target)
+
+        chewbbaca = _resolve_chewbbaca_command(store)
+        ptf_path = _resolve_chewbbaca_training_file(species_slug)
+        create_schema_cmd = chewbbaca + [
+            "CreateSchema",
+            "-i",
+            str(input_dir),
+            "-o",
+            str(schema_dir),
+            "--cpu",
+            str(threads),
+        ]
+        if ptf_path is not None:
+            create_schema_cmd.extend(["--ptf", str(ptf_path)])
+        _run_reference_panel_command(create_schema_cmd, panel_root)
+
+        allele_call_cmd = chewbbaca + [
+            "AlleleCall",
+            "-i",
+            str(input_dir),
+            "-g",
+            str(schema_dir),
+            "-o",
+            str(allele_call_dir),
+            "--cpu",
+            str(threads),
+        ]
+        _run_reference_panel_command(allele_call_cmd, panel_root)
+
+        extract_cmd = chewbbaca + [
+            "ExtractCgMLST",
+            "-i",
+            str(allele_call_dir / "results_alleles.tsv"),
+            "-o",
+            str(cgmlst_dir),
+            "--t",
+            str(threshold),
+        ]
+        _run_reference_panel_command(extract_cmd, panel_root)
+
+        loci_list_candidates = sorted(cgmlst_dir.glob("cgMLSTschema*.txt"))
+        loci_list_path = loci_list_candidates[0] if loci_list_candidates else Path("")
+        copied_count = _materialize_cgmlst_loci(schema_dir, loci_list_path, loci_dir) if loci_list_candidates else 0
+        results_alleles_path = allele_call_dir / "results_alleles.tsv"
+        message = f"cgMLST panel 构建完成，纳入 {len(selected_records)} 条参考；提取 {copied_count} 个 loci"
+        store.upsert_reference_panel(
+            {
+                "panel_key": panel_key,
+                "db_category": "pathogen",
+                "panel_type": "cgmlst",
+                "species_name": species_name,
+                "species_slug": species_slug,
+                "selected_host_keys_json": selected_host_keys,
+                "genome_count": len(selected_records),
+                "schema_dir": str(schema_dir),
+                "cgmlst_dir": str(cgmlst_dir),
+                "loci_list_path": str(loci_list_path) if loci_list_candidates else "",
+                "results_alleles_path": str(results_alleles_path) if results_alleles_path.is_file() else "",
+                "threshold": threshold,
+                "status": "built",
+                "message": message,
+                "owner": owner,
+            }
+        )
+    except Exception as exc:
+        store.upsert_reference_panel(
+            {
+                "panel_key": panel_key,
+                "db_category": "pathogen",
+                "panel_type": "cgmlst",
+                "species_name": species_name,
+                "species_slug": species_slug,
+                "selected_host_keys_json": selected_host_keys,
+                "genome_count": len(selected_records),
+                "schema_dir": str(schema_dir),
+                "cgmlst_dir": str(cgmlst_dir),
+                "threshold": threshold,
+                "status": "failed",
+                "message": str(exc),
+                "owner": owner,
+            }
+        )
+
+
+def _queue_pathogen_cgmlst_panels(
+    *,
+    store: PortalStore,
+    project_root: Path,
+    host_keys: list[object],
+    threshold: str,
+    threads: int,
+    owner: str,
+) -> dict[str, object]:
+    selected_keys = [str(item or "").strip() for item in host_keys if str(item or "").strip()]
+    if not selected_keys:
+        raise ValidationError("请先勾选病原参考基因组")
+    all_records = {
+        str(item.get("host_key") or ""): item
+        for item in store.list_host_database("pathogen")
+    }
+    selected_records = [all_records[key] for key in selected_keys if key in all_records]
+    if not selected_records:
+        raise ValidationError("未找到对应的病原参考记录")
+
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for row in selected_records:
+        species_name = str(row.get("host_name") or "").strip()
+        if not species_name:
+            raise ValidationError(f"参考记录缺少病原名称，无法构建 cgMLST panel: {row.get('host_key')}")
+        grouped.setdefault(species_name, []).append(row)
+
+    queued_items: list[dict[str, object]] = []
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    for species_name, rows in grouped.items():
+        species_slug = _sanitize_host_slug(species_name)
+        panel_key = f"{species_slug}_{timestamp}_{uuid.uuid4().hex[:6]}"
+        record = store.upsert_reference_panel(
+            {
+                "panel_key": panel_key,
+                "db_category": "pathogen",
+                "panel_type": "cgmlst",
+                "species_name": species_name,
+                "species_slug": species_slug,
+                "selected_host_keys_json": [str(row.get("host_key") or "") for row in rows],
+                "genome_count": len(rows),
+                "threshold": threshold,
+                "status": "pending",
+                "message": "已加入构建队列",
+                "owner": owner,
+            }
+        )
+        queued_items.append(record)
+        threading.Thread(
+            target=_run_single_cgmlst_panel_build,
+            kwargs={
+                "store": store,
+                "project_root": project_root,
+                "panel_key": panel_key,
+                "species_name": species_name,
+                "selected_records": rows,
+                "threshold": threshold,
+                "threads": threads,
+                "owner": owner,
+            },
+            daemon=True,
+            name=f"cgmlst-panel-{panel_key}",
+        ).start()
+
+    return {
+        "status": "queued",
+        "message": f"已按物种提交 {len(queued_items)} 个 cgMLST panel 构建任务",
+        "items": queued_items,
+    }
+
+
+def _build_single_reference_index(*, store: PortalStore, project_root: Path, category: str, host_key: str) -> dict[str, object]:
+    record = store.get_host_database_record(host_key)
+    fasta_path = Path(str(record.get("fasta_path") or ""))
+    if str(record.get("db_category") or "") != category:
+        raise ValidationError("参考记录分类不匹配")
+    if not fasta_path.is_file():
+        raise ValidationError("该参考记录缺少可用的 FASTA 文件")
+
+    index_dir = _reference_database_root(project_root, category) / "index" / _sanitize_host_slug(str(record.get("host_key") or host_key))
+    index_dir.mkdir(parents=True, exist_ok=True)
+    stem = _sanitize_host_slug(str(record.get("host_key") or host_key))
+    prefix = index_dir / "reference"
+    results: list[str] = []
+    for command in (
+        ["samtools", "faidx", str(fasta_path)],
+        ["minimap2", "-d", str(prefix.with_suffix(".mmi")), str(fasta_path)],
+        ["bowtie2-build", str(fasta_path), str(prefix)],
+    ):
+        ok, message = _run_host_index_command(command, index_dir)
+        results.append(message)
+
+    built_files = [str(path) for path in [fasta_path.with_suffix(fasta_path.suffix + ".fai"), prefix.with_suffix(".mmi")] if path.exists()]
+    built_files.extend(str(path) for path in index_dir.glob("reference*.bt2*"))
+    status = "built" if any("已完成" in message for message in results) else "prepared"
+    message = "；".join(results)
+    updated = store.update_host_database_record(
+        host_key,
+        index_prefix=str(prefix),
+        index_status=status,
+        index_message=message,
+    )
+    return {
+        "status": status,
+        "host_key": host_key,
+        "index_prefix": str(prefix),
+        "built_files": built_files,
+        "message": message,
+        "record": updated,
+    }
+
+
+def _build_reference_database_index(*, store: PortalStore, project_root: Path, category: str) -> dict[str, object]:
+    records = store.list_host_database(category)
+    available_records = [row for row in records if Path(str(row.get("fasta_path") or "")).is_file()]
+    if not available_records:
+        raise ValidationError("当前参考数据库中暂无可用于构建索引的 FASTA")
+    built_items = [
+        _build_single_reference_index(store=store, project_root=project_root, category=category, host_key=str(row.get("host_key") or ""))
+        for row in available_records
+    ]
+    return {
+        "status": "built",
+        "message": f"已完成 {len(built_items)} 条参考记录的索引构建",
+        "built_items": built_items,
+        "items": store.list_host_database(category),
+    }
+
+
+def _update_reference_database_record(*, store: PortalStore, project_root: Path, host_key: str, category: str, payload: dict[str, object]) -> dict[str, object]:
+    current = store.get_host_database_record(host_key)
+    if str(current.get("db_category") or "") != category:
+        raise ValidationError("参考记录分类不匹配")
+    next_host_name = str(payload.get("host_name") or current.get("host_name") or "").strip()
+    next_genome_name = str(payload.get("genome_name") or current.get("genome_name") or current.get("host_name") or "").strip()
+    next_fasta_path = _resolve_reference_fasta_for_update(project_root, category, current, payload)
+    fasta_changed = next_fasta_path is not None and next_fasta_path != str(current.get("fasta_path") or "")
+    return store.update_host_database_record(
+        host_key,
+        host_name=next_host_name,
+        genome_name=next_genome_name,
+        taxid=str(payload.get("taxid") or current.get("taxid") or "").strip(),
+        source_label=str(payload.get("source_label") or current.get("source_label") or "").strip(),
+        source_accession=str(payload.get("source_accession") or current.get("source_accession") or "").strip(),
+        source_url=str(payload.get("source_url") or current.get("source_url") or "").strip(),
+        description=str(payload.get("description") or current.get("description") or "").strip(),
+        fasta_path=next_fasta_path if next_fasta_path is not None else None,
+        index_prefix="" if fasta_changed else None,
+        index_status="pending" if fasta_changed else None,
+        index_message="FASTA 已更新，请重新构建索引" if fasta_changed else None,
+    )
+
+
+def _delete_reference_database_record(*, store: PortalStore, project_root: Path, host_key: str, category: str) -> dict[str, object]:
+    current = store.get_host_database_record(host_key)
+    if str(current.get("db_category") or "") != category:
+        raise ValidationError("参考记录分类不匹配")
+    host_root = _reference_database_root(project_root, category)
+    downloads_dir = host_root / "downloads"
+    fasta_path = Path(str(current.get("fasta_path") or "")).expanduser()
+    index_prefix = Path(str(current.get("index_prefix") or "")).expanduser()
+    index_dir = index_prefix.parent if str(index_prefix) else (host_root / "index" / _sanitize_host_slug(host_key))
+    if fasta_path.is_file():
+        fasta_path.unlink(missing_ok=True)
+        fai_path = fasta_path.with_suffix(f"{fasta_path.suffix}.fai")
+        fai_path.unlink(missing_ok=True)
+    download_stems = {
+        _sanitize_host_slug(str(host_key or "")),
+        _sanitize_host_slug(str(current.get("genome_name") or "")),
+        _sanitize_host_slug(str(current.get("host_name") or "")),
+        _sanitize_host_slug(str(current.get("source_accession") or "")),
+    }
+    for stem in {item for item in download_stems if item}:
+        for path in downloads_dir.glob(f"{stem}*"):
+            if path.is_file():
+                path.unlink(missing_ok=True)
+    if index_dir.exists():
+        shutil.rmtree(index_dir, ignore_errors=True)
+    store.delete_host_database_record(host_key)
+    return {"status": "deleted", "host_key": host_key}
+
+
 def _normalize_export_columns(columns: object) -> list[str]:
     if not isinstance(columns, list):
         raise ValidationError("导出表头格式不正确")
@@ -799,6 +8790,24 @@ def _normalize_export_rows(rows: object) -> list[list[str]]:
         if not isinstance(row, list):
             raise ValidationError("导出表格内容格式不正确")
         normalized.append([str(value or "") for value in row])
+    return normalized
+
+
+def _normalize_export_sheets(sheets: object) -> list[dict[str, object]]:
+    if not sheets:
+        return []
+    if not isinstance(sheets, list):
+        raise ValidationError("导出 sheet 格式不正确")
+    normalized: list[dict[str, object]] = []
+    for index, sheet in enumerate(sheets, start=1):
+        if not isinstance(sheet, dict):
+            raise ValidationError("导出 sheet 格式不正确")
+        title = str(sheet.get("title") or f"Sheet{index}").strip() or f"Sheet{index}"
+        normalized.append({
+            "title": title,
+            "columns": _normalize_export_columns(sheet.get("columns", [])),
+            "rows": _normalize_export_rows(sheet.get("rows", [])),
+        })
     return normalized
 
 
@@ -823,6 +8832,137 @@ def _xlsx_column_name(index: int) -> str:
         current, remainder = divmod(current - 1, 26)
         result = chr(65 + remainder) + result
     return result
+
+
+def _sanitize_xlsx_sheet_name(name: str, used: set[str]) -> str:
+    invalid = set("[]:*?/\\")
+    base = "".join("_" if char in invalid else char for char in str(name or "").strip()).strip("'") or "Sheet"
+    base = base[:31] or "Sheet"
+    candidate = base
+    counter = 2
+    while candidate.lower() in used:
+        suffix = f"_{counter}"
+        candidate = f"{base[:31 - len(suffix)]}{suffix}"
+        counter += 1
+    used.add(candidate.lower())
+    return candidate
+
+
+def _build_xlsx_sheet_xml(columns: list[str], rows: list[list[str]]) -> str:
+    def build_row_xml(row_number: int, values: list[str]) -> str:
+        cells = []
+        for index, value in enumerate(values):
+            reference = f"{_xlsx_column_name(index)}{row_number}"
+            text = xml_escape(str(value or ""))
+            cells.append(
+                f'<c r="{reference}" t="inlineStr"><is><t xml:space="preserve">{text}</t></is></c>'
+            )
+        return f'<row r="{row_number}">{"".join(cells)}</row>'
+
+    sheet_rows = []
+    current_row = 1
+    if columns:
+        sheet_rows.append(build_row_xml(current_row, columns))
+        current_row += 1
+    for row in rows:
+        sheet_rows.append(build_row_xml(current_row, row))
+        current_row += 1
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f'<sheetData>{"".join(sheet_rows)}</sheetData>'
+        '</worksheet>'
+    )
+
+
+def _build_xlsx_workbook_bytes(sheets: list[dict[str, object]]) -> bytes:
+    normalized_sheets = sheets or [{"title": "Sheet1", "columns": [], "rows": []}]
+    used_names: set[str] = set()
+    sheet_meta = [
+        {
+            "name": _sanitize_xlsx_sheet_name(str(sheet.get("title") or f"Sheet{index}"), used_names),
+            "columns": sheet.get("columns") if isinstance(sheet.get("columns"), list) else [],
+            "rows": sheet.get("rows") if isinstance(sheet.get("rows"), list) else [],
+            "index": index,
+        }
+        for index, sheet in enumerate(normalized_sheets, start=1)
+    ]
+    workbook_sheets_xml = "".join(
+        f'<sheet name="{xml_escape(item["name"])}" sheetId="{item["index"]}" r:id="rId{item["index"]}"/>'
+        for item in sheet_meta
+    )
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f'<sheets>{workbook_sheets_xml}</sheets>'
+        '</workbook>'
+    )
+    worksheet_overrides = "".join(
+        f'<Override PartName="/xl/worksheets/sheet{item["index"]}.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        for item in sheet_meta
+    )
+    content_types_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        f'{worksheet_overrides}'
+        '<Override PartName="/xl/styles.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        '</Types>'
+    )
+    rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="xl/workbook.xml"/>'
+        '</Relationships>'
+    )
+    workbook_relationships = "".join(
+        f'<Relationship Id="rId{item["index"]}" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+        f'Target="worksheets/sheet{item["index"]}.xml"/>'
+        for item in sheet_meta
+    )
+    workbook_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f'{workbook_relationships}'
+        f'<Relationship Id="rId{len(sheet_meta) + 1}" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
+        'Target="styles.xml"/>'
+        '</Relationships>'
+    )
+    styles_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>'
+        '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
+        '<borders count="1"><border/></borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        '</styleSheet>'
+    )
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types_xml)
+        archive.writestr("_rels/.rels", rels_xml)
+        archive.writestr("xl/workbook.xml", workbook_xml)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+        archive.writestr("xl/styles.xml", styles_xml)
+        for item in sheet_meta:
+            archive.writestr(
+                f'xl/worksheets/sheet{item["index"]}.xml',
+                _build_xlsx_sheet_xml(item["columns"], item["rows"]),
+            )
+    return output.getvalue()
 
 
 def _build_xlsx_bytes(title: str, columns: list[str], rows: list[list[str]]) -> bytes:
@@ -915,58 +9055,1353 @@ def _build_xlsx_bytes(title: str, columns: list[str], rows: list[list[str]]) -> 
     return output.getvalue()
 
 
-def _build_report_payload(task: dict) -> dict:
+def _load_public_health_support_file(project_root_text: str, filename: str) -> dict:
+    candidate = Path(project_root_text).expanduser()
+    support_path = candidate / filename if candidate.name == "database" else candidate / "database" / filename
+    if not support_path.is_file():
+        fallback_path = candidate / filename
+        if fallback_path.is_file():
+            support_path = fallback_path
+    if not support_path.is_file():
+        return {"source": {}, "entries": []}
+    try:
+        payload = json.loads(support_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"source": {}, "entries": []}
+    if not isinstance(payload, dict):
+        return {"source": {}, "entries": []}
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        payload["entries"] = []
+    return payload
+
+
+@lru_cache(maxsize=1)
+def _load_who_bppl_2024_support(project_root_text: str) -> dict:
+    return _load_public_health_support_file(project_root_text, "who_bppl_2024_support.json")
+
+
+@lru_cache(maxsize=1)
+def _load_china_cdc_bacteria_support(project_root_text: str) -> dict:
+    return _load_public_health_support_file(project_root_text, "china_cdc_bacteria_support.json")
+
+
+def _load_marker_annotations(payload: dict, entry_key: str) -> dict:
+    annotations = payload.get("marker_annotations") if isinstance(payload, dict) else {}
+    if not isinstance(annotations, dict):
+        return {"key_serotypes": [], "key_resistance_genes": [], "key_virulence_genes": []}
+    block = annotations.get(entry_key) if isinstance(annotations.get(entry_key), dict) else {}
+    return {
+        "key_serotypes": block.get("key_serotypes", []) if isinstance(block.get("key_serotypes"), list) else [],
+        "key_resistance_genes": block.get("key_resistance_genes", []) if isinstance(block.get("key_resistance_genes"), list) else [],
+        "key_virulence_genes": block.get("key_virulence_genes", []) if isinstance(block.get("key_virulence_genes"), list) else [],
+    }
+
+
+def _load_serotype_profiles(payload: dict, entry_key: str) -> list[dict]:
+    profiles = payload.get("serotype_profiles") if isinstance(payload, dict) else {}
+    if not isinstance(profiles, dict):
+        return []
+    matched = profiles.get(entry_key)
+    return matched if isinstance(matched, list) else []
+
+
+def _first_nonempty_from_indexes(row: object, columns: object, candidates: list[str]) -> object:
+    if not isinstance(row, list) or not isinstance(columns, list):
+        return ""
+    for candidate in candidates:
+        if candidate not in columns:
+            continue
+        index = columns.index(candidate)
+        if index >= len(row):
+            continue
+        value = row[index]
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return value
+    return ""
+
+
+def _collect_resistance_signals(rows: dict) -> tuple[str, str]:
+    columns = rows.get("columns") if isinstance(rows, dict) else []
+    table_rows = rows.get("rows") if isinstance(rows, dict) else []
+    if not isinstance(columns, list) or not isinstance(table_rows, list):
+        return "", ""
+    gene_parts: list[str] = []
+    class_parts: list[str] = []
+    for row in table_rows:
+        if not isinstance(row, list):
+            continue
+        gene_parts.extend(
+            str(_first_nonempty_from_indexes(row, columns, ["基因名称", "耐药基因", "Gene", "Best_Hit_ARO"]) or "").split()
+        )
+        class_parts.extend(
+            str(_first_nonempty_from_indexes(row, columns, ["耐药药物", "Drug Class", "Drug", "Resistance Mechanism"]) or "").split()
+        )
+    return " ".join(gene_parts).lower(), " ".join(class_parts).lower()
+
+
+def _phenotype_supported(phenotype: str, gene_blob: str, class_blob: str) -> bool:
+    phenotype_key = str(phenotype or "").strip().lower()
+    if not phenotype_key:
+        return False
+    if phenotype_key == "carbapenem-resistant":
+        return any(token in gene_blob for token in ("kpc", "ndm", "oxa", "vim", "imp", "ges")) or any(
+            token in class_blob for token in ("carbapenem", "碳青霉烯")
+        )
+    if phenotype_key == "third-generation cephalosporin-resistant":
+        return any(token in gene_blob for token in ("ctx-m", "shv", "tem", "ampc", "bla")) or any(
+            token in class_blob for token in ("cephalosporin", "头孢", "beta-lactam", "β-内酰胺", "esbl")
+        )
+    if phenotype_key == "esbl":
+        return any(token in gene_blob for token in ("ctx-m", "shv", "tem", "esbl")) or any(
+            token in class_blob for token in ("esbl", "头孢", "cephalosporin", "beta-lactam", "β-内酰胺")
+        )
+    if phenotype_key == "fluoroquinolone-resistant":
+        return any(token in gene_blob for token in ("qnr", "gyr", "parc", "pare")) or any(
+            token in class_blob for token in ("fluoroquinolone", "quinolone", "喹诺酮", "ciprofloxacin", "levofloxacin")
+        )
+    if phenotype_key == "vancomycin-resistant":
+        return any(token in gene_blob for token in ("vana", "vanb", "vanc")) or "vancomycin" in class_blob
+    if phenotype_key == "methicillin-resistant":
+        return any(token in gene_blob for token in ("meca", "mecc")) or any(
+            token in class_blob for token in ("methicillin", "oxacillin")
+        )
+    if phenotype_key == "macrolide-resistant":
+        return any(token in gene_blob for token in ("erm", "mef", "mph")) or "macrolide" in class_blob
+    if phenotype_key == "ampicillin-resistant":
+        return "ampicillin" in class_blob or any(token in gene_blob for token in ("tem", "rob", "bla"))
+    if phenotype_key == "penicillin-resistant":
+        return "penicillin" in class_blob or any(token in gene_blob for token in ("pbp",))
+    if phenotype_key == "rifampicin-resistant":
+        return any(token in gene_blob for token in ("rpob", "rif")) or "rifampicin" in class_blob
+    if phenotype_key == "multidrug-resistant":
+        keywords = (
+            "carbapenem", "cephalosporin", "fluoroquinolone", "quinolone", "macrolide", "methicillin",
+            "ampicillin", "penicillin", "vancomycin", "rifampicin", "头孢", "碳青霉烯", "喹诺酮", "大环内酯",
+            "甲氧西林", "氨苄西林", "青霉素", "万古霉素", "利福平", "多重耐药", "mdr", "esbl",
+        )
+        return sum(1 for token in keywords if token in class_blob or token in gene_blob) >= 2
+    return False
+
+
+def _match_public_health_entries(entries: list, species_name: str, resistance_elements: dict, priority_key: str) -> list[dict]:
+    species_text = str(species_name or "").strip().lower()
+    if not species_text or not isinstance(entries, list):
+        return []
+    matched_entries: list[dict] = []
+    for entry in entries:
+        aliases = entry.get("aliases") if isinstance(entry, dict) else []
+        if not isinstance(aliases, list):
+            continue
+        if any(str(alias or "").strip().lower() in species_text for alias in aliases):
+            matched_entries.append(entry)
+    if not matched_entries:
+        return []
+    gene_blob, class_blob = _collect_resistance_signals(resistance_elements)
+    priority_rank = {
+        "critical": 4,
+        "high": 3,
+        "medium": 2,
+        "法定重点": 4,
+        "食源性重点": 3,
+        "医院感染重点": 3,
+        "症候群重点": 2,
+    }
+    candidates: list[dict] = []
+    for entry in matched_entries:
+        phenotypes = entry.get("resistance_phenotypes") if isinstance(entry.get("resistance_phenotypes"), list) else []
+        supported = [item for item in phenotypes if _phenotype_supported(str(item), gene_blob, class_blob)]
+        candidate = dict(entry)
+        candidate["supported_resistance_phenotypes"] = supported
+        candidates.append(candidate)
+    candidates.sort(
+        key=lambda item: (
+            len(item.get("supported_resistance_phenotypes") or []),
+            priority_rank.get(str(item.get(priority_key) or "").strip(), 0),
+        ),
+        reverse=True,
+    )
+    return candidates
+
+
+def _build_public_health_evidence(
+    primary_source: str,
+    primary_entry: dict,
+    china_candidates: list[dict],
+    who_candidates: list[dict],
+) -> list[dict]:
+    evidence: list[dict] = []
+    display_name = str(primary_entry.get("display_name") or "").strip()
+    surveillance_domain = str(primary_entry.get("surveillance_domain") or "").strip()
+    china_priority = str(primary_entry.get("china_priority_group") or "").strip()
+    monitoring_tags = primary_entry.get("monitoring_tags") if isinstance(primary_entry.get("monitoring_tags"), list) else []
+    supported_phenotypes = primary_entry.get("supported_resistance_phenotypes") if isinstance(primary_entry.get("supported_resistance_phenotypes"), list) else []
+    typing_hint = str(primary_entry.get("typing_hint") or "").strip()
+    cluster_hint = str(primary_entry.get("cluster_hint") or "").strip()
+
+    if primary_source == "china":
+        if surveillance_domain == "食源性":
+            evidence.append(
+                {
+                    "manual": "2023年食源性疾病监测工作手册-20221226.pdf",
+                    "rule_type": "监测对象/暴发溯源",
+                    "basis": f"{display_name or '该病原'}命中食源性监测域，需结合食源性病例监测、暴发监测和分子溯源规则判读。",
+                }
+            )
+        if any("国家致病菌识别网" in str(tag) for tag in monitoring_tags) or surveillance_domain in {"呼吸道", "脑膜炎", "医院感染"}:
+            evidence.append(
+                {
+                    "manual": "基于国家致病菌识别网的细菌性传染病实验室监测工作方案（2024版）.pdf",
+                    "rule_type": "监测病原/上报时限/事件调查",
+                    "basis": f"{display_name or '该病原'}属于{china_priority or '重点'}监测对象，适用症候群监测、重点病原上报和事件溯源调查规则。",
+                }
+            )
+        if typing_hint or cluster_hint or supported_phenotypes:
+            evidence.append(
+                {
+                    "manual": "国家致病菌识别网实验室监测技术手册（2022试用版）终稿(1).pdf",
+                    "rule_type": "血清分型/耐药检测/PFGE-WGS",
+                    "basis": typing_hint or cluster_hint or f"该病原存在{'; '.join(map(str, supported_phenotypes))}等重点耐药或分型判读依据。",
+                }
+            )
+    if who_candidates:
+        top_who = who_candidates[0]
+        evidence.append(
+            {
+                "manual": "9789240093461-eng.pdf",
+                "rule_type": "WHO优先病原体分层",
+                "basis": f"{display_name or '该病原'}在 WHO 2024 中对应 {top_who.get('who_priority_group', '--')} 优先级，作为国际补充参考。",
+            }
+        )
+    # 去重，避免同一本手册被重复塞两次
+    deduped: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for item in evidence:
+        key = (str(item.get("manual") or ""), str(item.get("rule_type") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _build_public_health_support(
+    project_root: Path,
+    species_name: str,
+    resistance_elements: dict,
+) -> dict:
+    database_root = _resolve_runtime_database_root()
+    who_payload = _load_who_bppl_2024_support(str(database_root))
+    china_payload = _load_china_cdc_bacteria_support(str(database_root))
+    species_text = str(species_name or "").strip().lower()
+    if not species_text:
+        return {
+            "status": "empty",
+            "source": {"china": china_payload.get("source", {}), "who": who_payload.get("source", {})},
+        }
+    china_candidates = _match_public_health_entries(china_payload.get("entries"), species_name, resistance_elements, "china_priority_group")
+    who_candidates = _match_public_health_entries(who_payload.get("entries"), species_name, resistance_elements, "who_priority_group")
+    if not china_candidates and not who_candidates:
+        return {
+            "status": "unmatched",
+            "source": {"china": china_payload.get("source", {}), "who": who_payload.get("source", {})},
+            "species_name": species_name,
+        }
+    primary_source = "china" if china_candidates else "who"
+    primary_entry = china_candidates[0] if china_candidates else who_candidates[0]
+    marker_annotations = _load_marker_annotations(china_payload if primary_source == "china" else who_payload, str(primary_entry.get("key") or ""))
+    serotype_profiles = _load_serotype_profiles(china_payload if primary_source == "china" else who_payload, str(primary_entry.get("key") or ""))
+    phenotypes = primary_entry.get("resistance_phenotypes") if isinstance(primary_entry.get("resistance_phenotypes"), list) else []
+    supported = primary_entry.get("supported_resistance_phenotypes") or []
+    evidence = _build_public_health_evidence(primary_source, primary_entry, china_candidates, who_candidates)
+    return {
+        "status": "matched",
+        "source": {
+            "china": china_payload.get("source", {}),
+            "who": who_payload.get("source", {}),
+        },
+        "primary_source": primary_source,
+        "species_name": species_name,
+        "display_name": primary_entry.get("display_name", species_name),
+        "who_priority_group": (who_candidates[0] if who_candidates else {}).get("who_priority_group", ""),
+        "china_priority_group": (china_candidates[0] if china_candidates else {}).get("china_priority_group", ""),
+        "surveillance_domain": (china_candidates[0] if china_candidates else {}).get("surveillance_domain", ""),
+        "monitoring_tags": (china_candidates[0] if china_candidates else {}).get("monitoring_tags", []),
+        "resistance_phenotypes": phenotypes,
+        "supported_resistance_phenotypes": supported,
+        "public_health_significance": primary_entry.get("public_health_significance", ""),
+        "transmission_context": primary_entry.get("transmission_context", ""),
+        "outbreak_potential": primary_entry.get("outbreak_potential", ""),
+        "reporting_hint": primary_entry.get("reporting_hint", ""),
+        "cluster_hint": primary_entry.get("cluster_hint", ""),
+        "typing_hint": primary_entry.get("typing_hint", ""),
+        "resistance_focus": primary_entry.get("resistance_focus", ""),
+        "key_serotypes": marker_annotations.get("key_serotypes", []),
+        "serotype_profiles": serotype_profiles,
+        "key_resistance_genes": marker_annotations.get("key_resistance_genes", []),
+        "key_virulence_genes": marker_annotations.get("key_virulence_genes", []),
+        "support_evidence": evidence,
+        "domestic_matched_entries": [
+            {
+                "key": item.get("key", ""),
+                "display_name": item.get("display_name", ""),
+                "surveillance_domain": item.get("surveillance_domain", ""),
+                "china_priority_group": item.get("china_priority_group", ""),
+                "monitoring_tags": item.get("monitoring_tags", []),
+                "resistance_phenotypes": item.get("resistance_phenotypes", []),
+                "supported_resistance_phenotypes": item.get("supported_resistance_phenotypes", []),
+            }
+            for item in china_candidates
+        ],
+        "matched_entries": [
+            {
+                "key": item.get("key", ""),
+                "display_name": item.get("display_name", ""),
+                "who_priority_group": item.get("who_priority_group", ""),
+                "resistance_phenotypes": item.get("resistance_phenotypes", []),
+                "supported_resistance_phenotypes": item.get("supported_resistance_phenotypes", []),
+            }
+            for item in who_candidates
+        ],
+    }
+
+
+def _build_report_payload(task: dict, selected_sample: str = "") -> dict:
+    project_root = Path(__file__).resolve().parent.parent
+    database_root = _resolve_runtime_database_root()
     params = task.get("params", {})
-    report_dir = _resolve_report_directory(task)
-    sample_name = _resolve_report_sample_name(task, report_dir)
+    report_source = _resolve_report_source(task, selected_sample)
+    if not report_source.get("available"):
+        raise ValidationError(str(report_source.get("reason") or "服务器结果目录尚未就绪。"))
+    report_dir = report_source["report_dir"]
+    sample_name = report_source.get("selected_sample") or _resolve_report_sample_name(task, report_dir)
+    sample_display_name = _resolve_report_sample_display_name(task, sample_name)
+    if _is_community_report_task(task):
+        cache_fingerprint = _report_cache_fingerprint(task, report_dir, sample_name)
+        cached_payload = _read_report_cache(report_dir, sample_name, cache_fingerprint)
+        if cached_payload:
+            return _refresh_cached_report_payload(
+                cached_payload,
+                task=task,
+                report_dir=report_dir,
+                report_source=report_source,
+                sample_name=sample_name,
+                sample_display_name=sample_display_name,
+            )
+        payload = _build_community_report_payload(
+            task=task,
+            report_dir=report_dir,
+            report_source=report_source,
+        )
+        _write_report_cache(report_dir, sample_name, cache_fingerprint, payload)
+        return payload
+    if _is_pathosource_report_task(task):
+        cache_fingerprint = _report_cache_fingerprint(task, report_dir, sample_name)
+        cached_payload = _read_report_cache(report_dir, sample_name, cache_fingerprint)
+        if cached_payload:
+            return _refresh_cached_report_payload(
+                cached_payload,
+                task=task,
+                report_dir=report_dir,
+                report_source=report_source,
+                sample_name=sample_name,
+                sample_display_name=sample_display_name,
+            )
+        payload = _build_pathosource_report_payload(
+            task=task,
+            report_dir=report_dir,
+            report_source=report_source,
+            sample_name=sample_name,
+            sample_display_name=sample_display_name,
+        )
+        _write_report_cache(report_dir, sample_name, cache_fingerprint, payload)
+        return payload
+    cache_fingerprint = _report_cache_fingerprint(task, report_dir, sample_name)
+    cached_payload = _read_report_cache(report_dir, sample_name, cache_fingerprint)
+    if cached_payload:
+        return _refresh_cached_report_payload(
+            cached_payload,
+            task=task,
+            report_dir=report_dir,
+            report_source=report_source,
+            sample_name=sample_name,
+            sample_display_name=sample_display_name,
+        )
+    fastp_path = _resolve_report_artifact_path(
+        report_dir,
+        [f"{sample_name}.fastp2.json"] if sample_name else [],
+        ["*.fastp2.json"],
+    )
+    coverage_path = _resolve_report_artifact_path(
+        report_dir,
+        ([ "ref.regions.bed", f"{sample_name}_ngs.per-base.bed.gz"] if sample_name else ["ref.regions.bed"]),
+        ["ref.regions.bed", "*.regions.bed", "*_ngs.per-base.bed.gz", "*.regions.bed.gz", "*.per-base.bed.gz", "*.per-base.bed"],
+    )
     summary_info = _read_summary_metrics(report_dir / "summary.tsv")
     checkm_info = _read_checkm_metrics(report_dir / f"{sample_name}.checkm.tsv") if sample_name else {}
     assembly_profile = _read_assembly_profile(report_dir / "Assem_info.tsv")
     contig_depth_relationship = _read_contig_depth_relationship(report_dir / "Assem_info.tsv")
-    fastp_info = _read_fastp_metrics(report_dir / f"{sample_name}.fastp2.json") if sample_name else {}
+    fastp_info = _read_fastp_metrics(fastp_path) if fastp_path else {}
     assembly_summary = _read_tsv_rows(report_dir / f"{sample_name}.assemble.result.tsv") if sample_name else {"columns": [], "rows": []}
-    assembly_coverage = _read_coverage_profile(report_dir / f"{sample_name}_ngs.per-base.bed.gz") if sample_name else {}
+    assembly_coverage = _read_coverage_profile(coverage_path) if coverage_path else {}
+    is_virus_analysis = str(params.get("analysis_target", "bacteria")).strip() == "virus"
+    species_hint = str(params.get("species") or "").strip().lower()
+    hpiv_coverage_path = report_dir / "hpiv_coverage" / "hpiv.coverage.regions.bed"
+    if ("parainfluenza" in species_hint or "副流感" in species_hint or species_hint == "hpiv") and hpiv_coverage_path.is_file():
+        coverage_path = hpiv_coverage_path
+        assembly_coverage = _read_coverage_profile(coverage_path)
+    if is_virus_analysis and not assembly_summary.get("rows"):
+        assembly_summary = _build_virus_fallback_assembly_summary(report_dir, sample_name, assembly_coverage)
+    if is_virus_analysis and assembly_summary.get("rows") and assembly_coverage.get("status") == "ready":
+        assembly_summary = _merge_assembly_coverage_summary(assembly_summary, assembly_coverage)
+    nextclade_report_path = report_dir / "nextclade_output" / "nextclade.tsv"
+    if assembly_coverage.get("status") == "ready":
+        if nextclade_report_path.is_file() and ("sars-cov-2" in species_hint or "cov" in species_hint or "新冠" in species_hint):
+            assembly_coverage["view_mode"] = "ncov_annotated"
+            assembly_coverage["reference_name"] = "NC_045512.2"
+            assembly_coverage["annotation_source"] = "database/virus/ncov/genomic.gff"
+            assembly_coverage["annotation_label"] = "Wuhan-Hu-1 参考基因组 GFF"
+            assembly_coverage["genome_features"] = _read_ncov_genome_features()
+        elif (
+            "respiratory syncytial virus" in species_hint
+            or "rsv" in species_hint
+            or "合胞病毒" in species_hint
+            or "human metapneumovirus" in species_hint
+            or "hmpv" in species_hint
+            or "偏肺病毒" in species_hint
+            or "dengue virus" in species_hint
+            or species_hint == "denv"
+            or "登革热" in species_hint
+            or "zika virus" in species_hint
+            or species_hint == "zikav"
+            or "寨卡" in species_hint
+            or "chikungunya" in species_hint
+            or species_hint == "chikv"
+            or "基孔肯雅" in species_hint
+            or "parainfluenza" in species_hint
+            or species_hint == "hpiv"
+            or "副流感" in species_hint
+            or "adenovirus" in species_hint
+            or species_hint == "hadv"
+            or "腺病毒" in species_hint
+            or "norovirus" in species_hint
+            or "norwalk" in species_hint
+            or "诺如" in species_hint
+            or "rhinovirus" in species_hint
+            or "hrv" in species_hint
+            or "鼻病毒" in species_hint
+            or "human coronavirus" in species_hint
+            or "seasonal coronavirus" in species_hint
+            or "seasonal_hcov" in species_hint
+            or "季节性冠状病毒" in species_hint
+            or "229e" in species_hint
+            or "nl63" in species_hint
+            or "oc43" in species_hint
+            or "hku1" in species_hint
+            or "orthohantavirus" in species_hint
+            or "hantavirus" in species_hint
+            or "汉坦" in species_hint
+            or "汉他" in species_hint
+            or "ebola virus" in species_hint
+            or "ebolavirus" in species_hint
+            or "orthoebolavirus" in species_hint
+            or "ebov" in species_hint
+            or "埃博拉" in species_hint
+        ):
+            virus_gff_candidates = [report_dir / "ref" / "genes.gff"]
+            for selection_dir in sorted(report_dir.glob("*_reference_selection")):
+                virus_gff_candidates.extend(
+                    [
+                        selection_dir / "snpeff_reference.gff3",
+                        selection_dir / "snpeff_vadr_ref" / "ref" / "genes.gff",
+                    ]
+                )
+                selection_tsv = selection_dir / "selection.tsv"
+                if not selection_tsv.is_file():
+                    continue
+                try:
+                    with selection_tsv.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+                        selection_row = next(csv.DictReader(handle, delimiter="\t"), None) or {}
+                except OSError:
+                    selection_row = {}
+                gff_text = str(selection_row.get("gff_path") or "").strip()
+                if gff_text and gff_text != "nogtf":
+                    virus_gff_candidates.append(Path(gff_text).expanduser())
+            virus_gff_path = next((path for path in virus_gff_candidates if path.is_file() and path.stat().st_size > 0), virus_gff_candidates[0])
+            virus_features = _read_gff_genome_features(virus_gff_path)
+            virus_features = _simplify_virus_coverage_features(virus_features, species_hint)
+            if virus_features:
+                assembly_coverage["view_mode"] = "ncov_annotated"
+                assembly_coverage["reference_name"] = str(params.get("species") or "Virus")
+                try:
+                    annotation_source = str(virus_gff_path.relative_to(report_dir))
+                except ValueError:
+                    annotation_source = virus_gff_path.name
+                assembly_coverage["annotation_source"] = annotation_source
+                assembly_coverage["annotation_label"] = "病毒参考基因组注释 GFF"
+                assembly_coverage["genome_features"] = virus_features
     contig_annotation = _read_tsv_rows(report_dir / "flye_output" / "assembly_info.txt")
+    assembly_profile = _fallback_assembly_profile(assembly_profile, contig_annotation, assembly_summary)
     checkm_quality = _read_checkm2_quality(report_dir / "checkm2_out" / "quality_report.tsv")
     gene_annotation_summary = _read_tsv_rows(report_dir / f"{sample_name}.genefun_summary.tsv") if sample_name else {"columns": [], "rows": []}
     gene_length_distribution = _read_gene_length_distribution(report_dir / f"{sample_name}_gene_raw_sum.tsv") if sample_name else {"status": "empty", "points": []}
-    rv_summary = _read_tsv_rows(report_dir / "Assem_info1.tsv")
-    virulence_elements = _merge_annotation_with_summary(
-        report_dir / "Assem_abricate_VFDB.tsv",
-        report_dir / "VFDB_summary.tsv",
-        mode="virulence",
-    )
-    virulence_relationship = _build_category_gene_relationship(
-        virulence_elements,
-        left_key="VF分类",
-        right_key="基因名称",
-        label="VF 分类与毒力基因关系图",
-    )
-    resistance_elements = _merge_annotation_with_summary(
-        report_dir / "Assem_abricate_CARD.tsv",
-        report_dir / "CARD_summary.tsv",
-        mode="resistance",
-    )
-    resistance_relationship = _build_category_gene_relationship(
-        resistance_elements,
-        left_key="耐药药物",
-        right_key="基因名称",
-        label="耐药药物与耐药基因关系图",
-        split_delimiters=[";"],
-    )
+    is_meta_method = str(params.get("method", "")).strip() == "meta"
+    if is_meta_method:
+        meta_rv = _read_meta_resistance_virulence(report_dir / "meta_plas_vf_card.tsv")
+        rv_summary = meta_rv.get("summary", {"columns": [], "rows": []})
+        virulence_elements = meta_rv.get("virulence_elements", {"columns": [], "rows": []})
+        resistance_elements = meta_rv.get("resistance_elements", {"columns": [], "rows": []})
+        virulence_relationship = _build_category_gene_relationship(
+            virulence_elements,
+            left_key="VF分类",
+            right_key="基因名称",
+            label="基因组/质粒与毒力基因关系图",
+        )
+        resistance_relationship = _build_category_gene_relationship(
+            resistance_elements,
+            left_key="耐药药物",
+            right_key="基因名称",
+            label="基因组/质粒与耐药基因关系图",
+            split_delimiters=[";"],
+        )
+    else:
+        rv_summary = _read_tsv_rows(report_dir / "Assem_info1.tsv")
+        virulence_elements = _merge_annotation_with_summary(
+            report_dir / "Assem_abricate_VFDB.tsv",
+            report_dir / "VFDB_summary.tsv",
+            mode="virulence",
+        )
+        virulence_relationship = _build_category_gene_relationship(
+            virulence_elements,
+            left_key="VF分类",
+            right_key="基因名称",
+            label="VF 分类与毒力基因关系图",
+        )
+        resistance_elements = _merge_annotation_with_summary(
+            report_dir / "Assem_abricate_CARD.tsv",
+            report_dir / "CARD_summary.tsv",
+            mode="resistance",
+        )
+        resistance_relationship = _build_category_gene_relationship(
+            resistance_elements,
+            left_key="耐药药物",
+            right_key="基因名称",
+            label="耐药药物与耐药基因关系图",
+            split_delimiters=[";"],
+        )
     rv_overview = _build_resistance_virulence_summary(rv_summary, virulence_elements, resistance_elements)
-    species_taxonomy = _read_taxonomy_list(report_dir / f"{sample_name}_2.list.txt", terminal_column="种") if sample_name else {"rows": [], "rank_options": []}
-    subspecies_taxonomy = _read_taxonomy_list(report_dir / f"{sample_name}_2.list2.txt", terminal_column="亚种") if sample_name else {"rows": [], "rank_options": []}
+    mge_monitoring = _read_mge_monitoring(report_dir, sample_name)
+    taxonomy_index = _build_kb_taxonomy_index(str(database_root))
+    species_taxonomy = _read_taxonomy_list(report_dir / f"{sample_name}_2.list.txt", terminal_column="种", taxonomy_index=taxonomy_index) if sample_name else {"rows": [], "rank_options": []}
+    subspecies_taxonomy = _read_taxonomy_list(report_dir / f"{sample_name}_2.list2.txt", terminal_column="亚种", taxonomy_index=taxonomy_index) if sample_name else {"rows": [], "rank_options": []}
     taxonomy_abundance = _build_taxonomy_abundance(species_taxonomy, subspecies_taxonomy)
     taxonomy_risk_summary = _build_taxonomy_risk_summary(species_taxonomy, subspecies_taxonomy)
+    taxonomy_interpretation = _build_taxonomy_interpretation(species_taxonomy, checkm_info)
     assembly_taxonomy = _read_assembly_taxonomy(
         report_dir / "Assem_info1.tsv",
         report_dir / f"{sample_name}_assem.kraken2.txt",
+        taxonomy_index=taxonomy_index,
     ) if sample_name else {"columns": [], "rows": []}
-    mlst_result = _read_mlst_result(report_dir / f"{sample_name}.mlst_Stat.txt") if sample_name else {"columns": [], "rows": [], "gene_show_map": {}, "default_gene": ""}
-    serotype_result = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv") if sample_name else {"columns": [], "rows": []}
+    binning_quality = _build_binning_quality_section(report_dir / "bin_checkm2out" / "quality_report.tsv")
+    binning_taxonomy = _build_binning_taxonomy_section(report_dir / "gtdbtk_out" / "gtdbtk.bac120.summary.tsv")
+    viral_assembly = _build_meta_viral_assembly_section(report_dir / "viral_assembly") if is_meta_method else {"status": "empty", "summary": {}, "table": {"columns": [], "rows": []}}
+    mlst_result = _read_mlst_result(report_dir / f"{sample_name}.mlst_Stat.txt", str(project_root)) if sample_name else {"columns": [], "rows": [], "gene_show_map": {}, "default_gene": ""}
+    neisseria_amr_result = _build_neisseria_amr_section(report_dir, sample_name, mlst_result, checkm_info, project_root) if sample_name else {"status": "empty", "columns": [], "rows": []}
+    tb_amr_result = _build_tb_amr_section(report_dir, sample_name, checkm_info) if sample_name else {"status": "empty", "columns": [], "rows": []}
+    serotype_result = _build_serotype_section(report_dir, sample_name, checkm_info) if sample_name else {"status": "empty", "mode": "generic", "columns": [], "rows": []}
+    tb_serotype_result = _build_tb_serotype_section(report_dir, sample_name, checkm_info) if sample_name else None
+    if isinstance(tb_serotype_result, dict) and str(tb_serotype_result.get("status") or "").strip() != "":
+        serotype_result = tb_serotype_result
+    if str(serotype_result.get("mode") or "").strip() == "bandavirus_typing":
+        assembly_coverage = _normalize_bandavirus_assembly_coverage(assembly_coverage, serotype_result)
     priority_serotype = _read_tsv_rows(report_dir / f"{sample_name}.pathonet_result.tsv") if sample_name else {"columns": [], "rows": []}
-    return {
+    if sample_name:
+        priority_serotype = _enrich_priority_serotype_rows(str(project_root), priority_serotype, serotype_result, checkm_info)
+    if is_meta_method:
+        assembly_summary = _read_fasta_assembly_summary(report_dir / "tmp_combine.fa")
+        assembly_coverage = {"status": "empty", "points": []}
+        contig_annotation = _read_meta_annotation_subset(report_dir / "meta_plas_vf_card.tsv")
+        contig_depth_relationship = {"status": "empty", "points": [], "length_depth_scatter": {"status": "empty", "points": []}}
+        assembly_profile = _fallback_assembly_profile(assembly_profile, contig_annotation, assembly_summary)
+    cgview_assets = _discover_cgview_assets(report_dir, sample_name) if not is_meta_method else {"status": "empty", "summary": {"map_count": 0}, "maps": []}
+    dominant_species = _extract_dominant_species(species_taxonomy)
+    dominant_virus_taxonomy = _extract_dominant_virus_taxonomy(species_taxonomy, subspecies_taxonomy)
+    dominant_fungus_taxonomy = _extract_dominant_fungus_taxonomy(species_taxonomy, subspecies_taxonomy)
+    public_health_support = _build_public_health_support(
+        project_root,
+        checkm_info.get("species_name") or dominant_species.get("species") or "",
+        resistance_elements,
+    )
+    knowledge_interpretation = _build_knowledge_interpretation(
+        project_root,
+        species_taxonomy,
+        subspecies_taxonomy,
+        resistance_elements,
+        virulence_elements,
+        mge_monitoring,
+        mlst_result,
+        serotype_result,
+        public_health_support,
+        is_meta_method,
+    )
+    total_reads = _safe_int(summary_info.get("sum_reads"))
+    if total_reads is None:
+        total_reads = _safe_int(((fastp_info.get("summary") or {}).get("before_filtering") or {}).get("total_reads"))
+    fastp_before_summary = (fastp_info.get("summary") or {}).get("before_filtering") or {}
+    resolved_total_bases = summary_info.get("sum_len")
+    if resolved_total_bases is None:
+        resolved_total_bases = fastp_before_summary.get("total_bases")
+    resolved_q20_rate = summary_info.get("q20_rate")
+    if resolved_q20_rate is None:
+        resolved_q20_rate = _coerce_percent_value(fastp_before_summary.get("q20_rate"))
+    resolved_q30_rate = summary_info.get("q30_rate")
+    if resolved_q30_rate is None:
+        resolved_q30_rate = _coerce_percent_value(fastp_before_summary.get("q30_rate"))
+    if isinstance(serotype_result, dict):
+        mode = str(serotype_result.get("mode") or "").strip()
+        if mode == "tb_profiler":
+            serotype_result["knowledge_summary"] = serotype_result.get("knowledge_summary") or {"headline": "", "items": []}
+        else:
+            serotype_result["knowledge_summary"] = _build_viral_serotype_knowledge_summary(
+                project_root,
+                params.get("species", ""),
+                serotype_result,
+            )
+            serotype_result["report_template"] = _build_virus_report_template_summary(project_root, serotype_result)
+    influenza_overview_metrics: list[dict] = []
+    monkeypox_overview_metrics: list[dict] = []
+    rsv_overview_metrics: list[dict] = []
+    hmpv_overview_metrics: list[dict] = []
+    denv_overview_metrics: list[dict] = []
+    zikav_overview_metrics: list[dict] = []
+    chikv_overview_metrics: list[dict] = []
+    ebola_overview_metrics: list[dict] = []
+    hpiv_overview_metrics: list[dict] = []
+    hiv_overview_metrics: list[dict] = []
+    hadv_overview_metrics: list[dict] = []
+    norovirus_overview_metrics: list[dict] = []
+    enterovirus_overview_metrics: list[dict] = []
+    hepatovirus_overview_metrics: list[dict] = []
+    bandavirus_overview_metrics: list[dict] = []
+    orthohantavirus_overview_metrics: list[dict] = []
+    astroviridae_overview_metrics: list[dict] = []
+    rhinovirus_overview_metrics: list[dict] = []
+    seasonal_hcov_overview_metrics: list[dict] = []
+    rotavirus_overview_metrics: list[dict] = []
+    if str(serotype_result.get("mode") or "").strip() == "influenza_typing":
+        segment_manifest = serotype_result.get("segment_manifest") if isinstance(serotype_result.get("segment_manifest"), dict) else {}
+        segment_columns = segment_manifest.get("columns") if isinstance(segment_manifest.get("columns"), list) else []
+        segment_rows = segment_manifest.get("rows") if isinstance(segment_manifest.get("rows"), list) else []
+        coverage_segments = assembly_coverage.get("segments") if isinstance(assembly_coverage.get("segments"), list) else []
+        coverage_by_name: dict[str, dict] = {}
+        coverage_by_group: dict[str, dict] = {}
+        for item in coverage_segments:
+            if not isinstance(item, dict):
+                continue
+            coverage_name = str(item.get("name") or item.get("label") or "").strip()
+            if not coverage_name:
+                continue
+            coverage_by_name[coverage_name] = item
+            parts = coverage_name.split("_")
+            if len(parts) >= 2 and parts[1]:
+                coverage_by_group[parts[1]] = item
+        segment_name_index = -1
+        reference_id_index = -1
+        segment_subtype_index = -1
+        for index, value in enumerate(segment_columns):
+            text = str(value or "").strip()
+            if segment_name_index < 0 and text in {"segment_group", "片段"}:
+                segment_name_index = index
+            if reference_id_index < 0 and text in {"reference_id", "参考ID"}:
+                reference_id_index = index
+            if segment_subtype_index < 0 and (text in {"subtype", "亚型"} or text.lower() == "subtype"):
+                segment_subtype_index = index
+        segment_labels: list[str] = []
+        for row in segment_rows:
+            if not isinstance(row, list):
+                continue
+            segment_name = str(row[segment_name_index] if segment_name_index >= 0 and segment_name_index < len(row) else "").strip()
+            reference_id = str(row[reference_id_index] if reference_id_index >= 0 and reference_id_index < len(row) else "").strip()
+            if not segment_name:
+                continue
+            segment_subtype = str(row[segment_subtype_index] if segment_subtype_index >= 0 and segment_subtype_index < len(row) else "").strip()
+            label = f"{segment_name}({segment_subtype})" if segment_subtype and segment_subtype != "-" else segment_name
+            coverage_item = coverage_by_name.get(reference_id) or coverage_by_group.get(segment_name)
+            mean_depth = _safe_float(coverage_item.get("mean_depth")) if isinstance(coverage_item, dict) else None
+            if mean_depth is not None:
+                label = f"{label}: {mean_depth:.2f}x"
+            if label not in segment_labels:
+                segment_labels.append(label)
+        influenza_type = str(serotype_result.get("influenza_type") or "--").strip() or "--"
+        ha_subtype = str(serotype_result.get("ha_subtype") or "--").strip() or "--"
+        na_subtype = str(serotype_result.get("na_subtype") or "--").strip() or "--"
+        influenza_overview_metrics = [
+            {
+                "key": "influenza_segments",
+                "label": "组装情况",
+                "type": "influenza_segments",
+                "segment_count": len(segment_labels),
+                "segments": segment_labels,
+            },
+            {
+                "key": "influenza_species_estimation",
+                "label": "物种预估",
+                "type": "influenza_species_estimation",
+                "influenza_type": influenza_type,
+                "ha_subtype": ha_subtype,
+                "na_subtype": na_subtype,
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "monkeypox_nextclade":
+        monkeypox_overview_metrics = [
+            {
+                "key": "monkeypox_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "monkeypox_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "Nextclade Clade", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "Lineage", "display": str(serotype_result.get("predicted_lineage") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "rsv_nextclade":
+        rsv_overview_metrics = [
+            {
+                "key": "rsv_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "rsv_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "Nextclade Clade", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "Lineage", "display": str(serotype_result.get("predicted_lineage") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "hmpv_nextclade":
+        hmpv_overview_metrics = [
+            {
+                "key": "hmpv_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "hmpv_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "Nextclade Clade", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "Lineage", "display": str(serotype_result.get("predicted_lineage") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "denv_nextclade":
+        denv_overview_metrics = [
+            {
+                "key": "denv_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "denv_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "Nextclade Clade", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "Lineage", "display": str(serotype_result.get("predicted_lineage") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "zikav_nextclade":
+        zikav_overview_metrics = [
+            {
+                "key": "zikav_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "zikav_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "Nextclade Clade", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "Lineage", "display": str(serotype_result.get("predicted_lineage") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "chikv_nextclade":
+        chikv_overview_metrics = [
+            {
+                "key": "chikv_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "chikv_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "Nextclade Clade", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "Lineage", "display": str(serotype_result.get("predicted_lineage") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "ebola_nextclade":
+        ebola_overview_metrics = [
+            {
+                "key": "ebola_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "ebola_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "本地参考分型", "display": str(serotype_result.get("predicted_serotype") or "--")},
+                    {"label": "Nextclade Clade", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "Lineage / Genotype", "display": str(serotype_result.get("predicted_lineage") or "--")},
+                    {"label": "参考序列", "display": str(serotype_result.get("reference_name") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "hpiv_typing":
+        hpiv_overview_metrics = [
+            {
+                "key": "hpiv_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "hpiv_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "HPIV 亚型", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "参考序列", "display": str(serotype_result.get("reference_name") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "hiv_resistance":
+        hiv_overview_metrics = [
+            {
+                "key": "hiv_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "hiv_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "大亚型", "display": str(serotype_result.get("predicted_group") or "--")},
+                    {"label": "子亚型", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "重组判定", "display": str((serotype_result.get("summary_cards") or [{} ,{}, {} ,{}])[2].get("value") if isinstance(serotype_result.get("summary_cards"), list) and len(serotype_result.get("summary_cards")) >= 3 else "--")},
+                    {"label": "代表株参考", "display": str((serotype_result.get("summary_cards") or [{} ,{}, {} ,{}])[3].get("value") if isinstance(serotype_result.get("summary_cards"), list) and len(serotype_result.get("summary_cards")) >= 4 else "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "hadv_typing":
+        hadv_overview_metrics = [
+            {
+                "key": "hadv_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "hadv_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "HAdV 分型", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "参考序列", "display": str(serotype_result.get("reference_name") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "norovirus_typing":
+        norovirus_overview_metrics = [
+            {
+                "key": "norovirus_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "norovirus_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "双位点分型", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "参考序列", "display": str(serotype_result.get("reference_name") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "enterovirus_typing":
+        enterovirus_overview_metrics = [
+            {
+                "key": "rhinovirus_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "rhinovirus_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "VP1 分型", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "大亚型", "display": str(serotype_result.get("predicted_group") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "hepatovirus_typing":
+        hepatovirus_overview_metrics = [
+            {
+                "key": "hepatovirus_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "hepatovirus_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "大亚型", "display": str(serotype_result.get("predicted_group") or "--")},
+                    {"label": "子亚型", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "参考序列", "display": str(serotype_result.get("reference_name") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "bandavirus_typing":
+        bandavirus_overview_metrics = [
+            {
+                "key": "bandavirus_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "bandavirus_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "大亚型", "display": str(serotype_result.get("predicted_group") or "--")},
+                    {"label": "A_F 分型", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "CJ 分型", "display": str(serotype_result.get("predicted_lineage") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "orthohantavirus_typing":
+        orthohantavirus_overview_metrics = [
+            {
+                "key": "orthohantavirus_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "orthohantavirus_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "Orthohantavirus 分型", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "S片段分型", "display": str(serotype_result.get("predicted_group") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "astroviridae_typing":
+        astroviridae_overview_metrics = [
+            {
+                "key": "astroviridae_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "astroviridae_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "ORF2 分型", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "病毒属", "display": str(serotype_result.get("predicted_group") or "--")},
+                    {"label": "参考序列", "display": str(serotype_result.get("reference_name") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "rhinovirus_typing":
+        rhinovirus_overview_metrics = [
+            {
+                "key": "rhinovirus_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "rhinovirus_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "VP1 分型", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "参考序列", "display": str(serotype_result.get("reference_name") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "seasonal_hcov_typing":
+        seasonal_hcov_overview_metrics = [
+            {
+                "key": "seasonal_hcov_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "seasonal_hcov_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "大类分型", "display": str(serotype_result.get("predicted_clade") or "--")},
+                    {"label": "S 子亚型", "display": str(serotype_result.get("predicted_subtype") or "--")},
+                    {"label": "参考序列", "display": str(serotype_result.get("reference_name") or "--")},
+                ],
+            },
+        ]
+    if str(serotype_result.get("mode") or "").strip() == "rotavirus_typing":
+        rotavirus_overview_metrics = [
+            {
+                "key": "rotavirus_assembly_coverage",
+                "label": "组装情况",
+                "type": "paired",
+                "items": [
+                    {"label": "1x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_fraction"))},
+                    {"label": "10x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_10x_fraction"))},
+                    {"label": "100x 覆盖度", "display": _display_percent(assembly_coverage.get("coverage_100x_fraction"))},
+                ],
+            },
+            {
+                "key": "rotavirus_species_estimation",
+                "label": "物种预估",
+                "type": "paired",
+                "items": [
+                    {"label": "大组分型", "display": str(serotype_result.get("predicted_group") or "--")},
+                    {"label": "组合分型", "display": str(serotype_result.get("predicted_subtype") or "--")},
+                    {"label": "最优参考株", "display": str(serotype_result.get("reference_name") or "--")},
+                ],
+            },
+        ]
+    meta_overview_metrics = [
+        {
+            "key": "meta_sequencing",
+            "label": "测序数据量 / 读取记录",
+            "type": "paired",
+            "items": [
+                {"label": "总测序数据量", "display": _human_bp(summary_info.get("sum_len") or fastp_before_summary.get("total_bases"))},
+                {"label": "读取记录", "display": _human_count(total_reads)},
+            ],
+        },
+        {
+            "key": "meta_assembly",
+            "label": "组装情况",
+            "type": "paired",
+            "items": [
+                {"label": "Contig数量", "display": _human_count(assembly_profile.get("contig_count"))},
+                {"label": "总长度", "display": _human_bp(assembly_profile.get("total_length"))},
+            ],
+        },
+        {
+            "key": "meta_binning_quality",
+            "label": "Binning完整性 / 污染率",
+            "type": "paired",
+            "items": [
+                {"label": "平均完整性", "display": f"{binning_quality.get('summary', {}).get('avg_completeness', '--')}%" if binning_quality.get("summary", {}).get("avg_completeness") is not None else "--"},
+                {"label": "平均污染率", "display": f"{binning_quality.get('summary', {}).get('avg_contamination', '--')}%" if binning_quality.get("summary", {}).get("avg_contamination") is not None else "--"},
+            ],
+        },
+        {
+            "key": "meta_species_mge",
+            "label": "优势物种 / 移动元件",
+            "type": "paired",
+            "items": [
+                {"label": "优势物种", "display": dominant_species.get("species") or "--"},
+                {"label": "移动元件数量", "display": _human_count((mge_monitoring.get("overview") or {}).get("total_hits"))},
+            ],
+        },
+    ]
+    if dominant_virus_taxonomy:
+        meta_overview_metrics.append(
+            {
+                "key": "virus_taxonomy",
+                "label": "主导病毒 Taxonomy",
+                "type": "paired",
+                "items": [
+                    {"label": "NCBI TaxID", "display": dominant_virus_taxonomy.get("taxid") or "--"},
+                    {"label": "NCBI学名", "display": dominant_virus_taxonomy.get("scientific_name") or "--"},
+                    {
+                        "label": "科 / 属",
+                        "display": " / ".join([
+                            dominant_virus_taxonomy.get("family") or "-",
+                            dominant_virus_taxonomy.get("genus") or "-",
+                        ]),
+                    },
+                    {"label": "种", "display": dominant_virus_taxonomy.get("species_rank") or dominant_virus_taxonomy.get("species") or "--"},
+                ],
+            }
+        )
+    if dominant_fungus_taxonomy:
+        meta_overview_metrics.append(
+            {
+                "key": "fungus_taxonomy",
+                "label": "主导真菌 Taxonomy",
+                "type": "paired",
+                "items": [
+                    {"label": "NCBI TaxID", "display": dominant_fungus_taxonomy.get("taxid") or "--"},
+                    {"label": "NCBI学名", "display": dominant_fungus_taxonomy.get("scientific_name") or "--"},
+                    {
+                        "label": "科 / 属",
+                        "display": " / ".join([
+                            dominant_fungus_taxonomy.get("family") or "-",
+                            dominant_fungus_taxonomy.get("genus") or "-",
+                        ]),
+                    },
+                    {"label": "种", "display": dominant_fungus_taxonomy.get("species_rank") or dominant_fungus_taxonomy.get("species") or "--"},
+                ],
+            }
+        )
+    virus_overview_metrics = (
+        influenza_overview_metrics
+        or monkeypox_overview_metrics
+        or rsv_overview_metrics
+        or hmpv_overview_metrics
+        or denv_overview_metrics
+        or zikav_overview_metrics
+        or chikv_overview_metrics
+        or ebola_overview_metrics
+        or hpiv_overview_metrics
+        or hiv_overview_metrics
+        or hadv_overview_metrics
+        or norovirus_overview_metrics
+        or enterovirus_overview_metrics
+        or hepatovirus_overview_metrics
+        or bandavirus_overview_metrics
+        or orthohantavirus_overview_metrics
+        or astroviridae_overview_metrics
+        or rhinovirus_overview_metrics
+        or seasonal_hcov_overview_metrics
+        or rotavirus_overview_metrics
+    )
+    overview_metrics = meta_overview_metrics if is_meta_method else [
+        {"key": "total_bases", "label": "总测序数据量", "type": "single", "value": resolved_total_bases, "display": _human_bp(resolved_total_bases), "unit": "bp"},
+        *(virus_overview_metrics[:1] if virus_overview_metrics else []),
+        *(
+            []
+            if virus_overview_metrics
+            else [
+                {
+                    "key": "assembly_profile",
+                    "label": "组装情况",
+                    "type": "assembly_profile",
+                    "contig_count": assembly_profile.get("contig_count"),
+                    "plasmid_count": assembly_profile.get("plasmid_count"),
+                    "total_count": assembly_profile.get("total_count"),
+                    "total_length": assembly_profile.get("total_length"),
+                }
+            ]
+        ),
+        {
+            "key": "q_metrics",
+            "label": "Q20 / Q30",
+            "type": "paired",
+            "items": [
+                {"label": "Q20", "display": _display_percent(resolved_q20_rate)},
+                {"label": "Q30", "display": _display_percent(resolved_q30_rate)},
+            ],
+        },
+        *(
+            []
+            if virus_overview_metrics
+            else [
+                {
+                    "key": "checkm_metrics",
+                    "label": "完整性 / 污染率",
+                    "type": "paired",
+                    "items": [
+                        {"label": "完整性", "display": _display_percent_points(checkm_info.get("completeness"))},
+                        {"label": "污染率", "display": _display_percent_points(checkm_info.get("contamination"))},
+                    ],
+                }
+            ]
+        ),
+        *(virus_overview_metrics[1:] if virus_overview_metrics else []),
+        *(
+            []
+            if virus_overview_metrics
+            else [
+                {
+                    "key": "species_estimation",
+                    "label": "物种预估",
+                    "type": "paired",
+                    "items": [
+                        {"label": "物种名称", "display": checkm_info.get("species_name") or "--"},
+                        {"label": "MLST 物种名称", "display": checkm_info.get("mlst_species_name") or "--"},
+                    ],
+                }
+            ]
+        ),
+        *(
+            [
+                {
+                    "key": "virus_taxonomy",
+                    "label": "主导病毒 Taxonomy",
+                    "type": "paired",
+                    "items": [
+                        {"label": "NCBI TaxID", "display": dominant_virus_taxonomy.get("taxid") or "--"},
+                        {"label": "NCBI学名", "display": dominant_virus_taxonomy.get("scientific_name") or "--"},
+                        {
+                            "label": "科 / 属",
+                            "display": " / ".join([
+                                dominant_virus_taxonomy.get("family") or "-",
+                                dominant_virus_taxonomy.get("genus") or "-",
+                            ]),
+                        },
+                        {"label": "种", "display": dominant_virus_taxonomy.get("species_rank") or dominant_virus_taxonomy.get("species") or "--"},
+                    ],
+                }
+            ] if dominant_virus_taxonomy else []
+        ),
+        *(
+            [
+                {
+                    "key": "fungus_taxonomy",
+                    "label": "主导真菌 Taxonomy",
+                    "type": "paired",
+                    "items": [
+                        {"label": "NCBI TaxID", "display": dominant_fungus_taxonomy.get("taxid") or "--"},
+                        {"label": "NCBI学名", "display": dominant_fungus_taxonomy.get("scientific_name") or "--"},
+                        {
+                            "label": "科 / 属",
+                            "display": " / ".join([
+                                dominant_fungus_taxonomy.get("family") or "-",
+                                dominant_fungus_taxonomy.get("genus") or "-",
+                            ]),
+                        },
+                        {"label": "种", "display": dominant_fungus_taxonomy.get("species_rank") or dominant_fungus_taxonomy.get("species") or "--"},
+                    ],
+                }
+            ] if dominant_fungus_taxonomy else []
+        ),
+    ]
+    overview_status = "ready" if overview_metrics else "empty"
+    multi_sample_summary = _build_multi_sample_queue_summary(report_source)
+    assembly_status = "ready" if (
+        assembly_summary.get("rows")
+        or contig_annotation.get("rows")
+        or checkm_quality.get("rows")
+        or gene_annotation_summary.get("rows")
+        or assembly_coverage.get("status") == "ready"
+        or contig_depth_relationship.get("status") == "ready"
+        or gene_length_distribution.get("status") == "ready"
+        or cgview_assets.get("status") == "ready"
+    ) else "empty"
+    resistance_virulence_status = "ready" if (
+        rv_overview.get("status") == "ready"
+        or rv_summary.get("rows")
+        or virulence_elements.get("rows")
+        or resistance_elements.get("rows")
+    ) else "empty"
+    payload = {
         "task": {
             "id": task.get("id"),
             "name": task.get("name"),
@@ -980,50 +10415,17 @@ def _build_report_payload(task: dict) -> dict:
             "output_dir": params.get("output_dir", ""),
             "asm_type": params.get("asm_type", ""),
             "method": params.get("method", ""),
+            "analysis_target": params.get("analysis_target", "bacteria"),
             "species": params.get("species", ""),
             "sample_name": sample_name,
+            "sample_display_name": sample_display_name,
+            "samples": report_source.get("samples", []),
+            "report_mode": report_source.get("mode", "single"),
+            "multi_sample_summary": multi_sample_summary,
         },
-        "overview_metrics": [
-            {"key": "total_bases", "label": "总测序数据量", "type": "single", "value": summary_info.get("sum_len"), "display": _human_bp(summary_info.get("sum_len")), "unit": "bp"},
-            {
-                "key": "assembly_profile",
-                "label": "组装情况",
-                "type": "assembly_profile",
-                "contig_count": assembly_profile.get("contig_count"),
-                "plasmid_count": assembly_profile.get("plasmid_count"),
-                "total_count": assembly_profile.get("total_count"),
-                "total_length": assembly_profile.get("total_length"),
-            },
-            {
-                "key": "q_metrics",
-                "label": "Q20 / Q30",
-                "type": "paired",
-                "items": [
-                    {"label": "Q20", "display": _display_percent(summary_info.get("q20_rate"))},
-                    {"label": "Q30", "display": _display_percent(summary_info.get("q30_rate"))},
-                ],
-            },
-            {
-                "key": "checkm_metrics",
-                "label": "完整性 / 污染率",
-                "type": "paired",
-                "items": [
-                    {"label": "完整性", "display": _display_percent(checkm_info.get("completeness"))},
-                    {"label": "污染率", "display": _display_percent(checkm_info.get("contamination"))},
-                ],
-            },
-            {
-                "key": "species_estimation",
-                "label": "物种预估",
-                "type": "paired",
-                "items": [
-                    {"label": "物种名称", "display": checkm_info.get("species_name") or "--"},
-                    {"label": "MLST 物种名称", "display": checkm_info.get("mlst_species_name") or "--"},
-                ],
-            },
-        ],
+        "overview_metrics": overview_metrics,
         "sections": {
-            "overview": {"status": "empty"},
+            "overview": {"status": overview_status, "multi_sample_summary": multi_sample_summary},
             "raw_qc": {
                 "status": "ready" if fastp_info else "empty",
                 "paired_end": {
@@ -1038,20 +10440,29 @@ def _build_report_payload(task: dict) -> dict:
                 "subspecies": subspecies_taxonomy,
                 "abundance": taxonomy_abundance,
                 "risk_summary": taxonomy_risk_summary,
+                "interpretation": taxonomy_interpretation,
+                "rarefaction": _build_taxonomy_rarefaction(species_taxonomy, subspecies_taxonomy),
                 "assembly_taxonomy": assembly_taxonomy,
             },
+            "binning_results": {
+                "status": "ready" if binning_quality.get("status") == "ready" or binning_taxonomy.get("status") == "ready" or viral_assembly.get("status") == "ready" else "empty",
+                "quality": binning_quality,
+                "taxonomy": binning_taxonomy,
+                "viral_assembly": viral_assembly,
+            },
             "assembly": {
-                "status": "empty",
+                "status": assembly_status,
                 "summary": assembly_summary,
                 "coverage": assembly_coverage,
                 "contig_annotation": contig_annotation,
                 "contig_depth_relationship": contig_depth_relationship,
+                "cgview": cgview_assets,
                 "checkm": checkm_quality,
                 "gene_annotation_summary": gene_annotation_summary,
                 "gene_length_distribution": gene_length_distribution,
             },
             "resistance_virulence": {
-                "status": "empty",
+                "status": resistance_virulence_status,
                 "overview": rv_overview,
                 "summary": rv_summary,
                 "virulence_elements": virulence_elements,
@@ -1065,55 +10476,3843 @@ def _build_report_payload(task: dict) -> dict:
                 "rows": mlst_result.get("rows", []),
                 "gene_show_map": mlst_result.get("gene_show_map", {}),
                 "default_gene": mlst_result.get("default_gene", ""),
+                "knowledge_summary": mlst_result.get("knowledge_summary", {"headline": "", "items": []}),
+                "title": mlst_result.get("title", ""),
+                "tag_label": mlst_result.get("tag_label", ""),
+                "empty_message": mlst_result.get("empty_message", ""),
+                "detail_empty_message": mlst_result.get("detail_empty_message", ""),
+                "generic_detail_note": mlst_result.get("generic_detail_note", ""),
+                "neisseria_amr": neisseria_amr_result,
             },
-            "serotype": {
-                "status": "ready" if serotype_result.get("rows") else "empty",
-                "columns": serotype_result.get("columns", []),
-                "rows": serotype_result.get("rows", []),
-            },
+            "tb_amr": tb_amr_result,
+            "serotype": serotype_result,
             "priority_serotype": {
                 "status": "ready" if priority_serotype.get("rows") else "empty",
                 "columns": priority_serotype.get("columns", []),
                 "rows": priority_serotype.get("rows", []),
             },
+            "mge_monitoring": mge_monitoring,
+            "public_health_support": public_health_support,
+            "knowledge_interpretation": knowledge_interpretation,
         },
+    }
+    _write_report_cache(report_dir, sample_name, cache_fingerprint, payload)
+    return payload
+
+
+def _looks_like_report_directory(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    marker_patterns = (
+        "summary.tsv",
+        "community_summary.json",
+        "community_command_plan.tsv",
+        "community_metadata_preview.tsv",
+        "community_demux_summary.tsv",
+        "community_taxonomy_preview.tsv",
+        "Assem_info.tsv",
+        "Assem_info1.tsv",
+        "*.checkm.tsv",
+        "*.fastp2.json",
+        "*_2.list.txt",
+        "*.mlst_Stat.txt",
+        "Cluster.tsv",
+        "dis_bin.tsv",
+        "dis.mat.txt",
+        "Full_ANI.txt",
+        "grapetree.nwk",
+        "mlst.txt",
+        "rmref.core.aln.contree",
+    )
+    for pattern in marker_patterns:
+        if "*" in pattern:
+            if any(path.glob(pattern)):
+                return True
+        elif (path / pattern).exists():
+            return True
+    if (path / "flye_output").is_dir() or (path / "checkm2_out").is_dir():
+        return True
+    if (path / "nextclade_output" / "nextclade.tsv").is_file():
+        return True
+    return False
+
+
+def _resolve_report_source(task: dict, selected_sample: str = "") -> dict:
+    output_dir = str((task.get("params") or {}).get("output_dir", "")).strip()
+    preferred_sample = str((task.get("params") or {}).get("sample_name", "")).strip()
+    task_name = str(task.get("name") or task.get("id") or "当前任务").strip()
+
+    if not output_dir:
+        return {
+            "available": False,
+            "reason": f"{task_name} 缺少服务器输出目录 output_dir，无法定位结果。",
+            "mode": "single",
+            "root_dir": None,
+            "report_dir": None,
+            "samples": [],
+            "selected_sample": "",
+        }
+
+    try:
+        output_root = Path(output_dir).expanduser().resolve()
+    except OSError:
+        return {
+            "available": False,
+            "reason": f"{task_name} 的服务器输出目录无效: {output_dir}",
+            "mode": "single",
+            "root_dir": None,
+            "report_dir": None,
+            "samples": [],
+            "selected_sample": "",
+        }
+
+    pipeline_script = str(task.get("pipeline_script") or "").strip()
+    if str(task.get("demo_type") or "").strip() and pipeline_script.startswith("demo_data/"):
+        demo_report_dir = (Path(__file__).resolve().parent.parent / pipeline_script).resolve()
+        if demo_report_dir.is_dir() and _looks_like_report_directory(demo_report_dir):
+            return {
+                "available": True,
+                "mode": "single",
+                "root_dir": demo_report_dir,
+                "report_dir": demo_report_dir,
+                "samples": [],
+                "selected_sample": "",
+            }
+        if pipeline_script == "demo_data/meta":
+            meta_demo_report_dir = (Path(__file__).resolve().parent.parent / "demo_data" / "meta_1").resolve()
+            if meta_demo_report_dir.is_dir() and _looks_like_report_directory(meta_demo_report_dir):
+                return {
+                    "available": True,
+                    "mode": "single",
+                    "root_dir": meta_demo_report_dir,
+                    "report_dir": meta_demo_report_dir,
+                    "samples": [],
+                    "selected_sample": "",
+                }
+
+    if not output_root.is_dir():
+        return {
+            "available": False,
+            "reason": f"{task_name} 的服务器结果目录不存在: {output_root}",
+            "mode": "single",
+            "root_dir": output_root,
+            "report_dir": None,
+            "samples": [],
+            "selected_sample": "",
+        }
+
+    params = task.get("params") or {}
+    workstation_key = str(params.get("workstation_key") or "").strip().lower()
+    if not _looks_like_report_directory(output_root) and (
+        task_name == "demo_tree"
+        or workstation_key == "pathosource"
+        or Path(pipeline_script).name == "PathoSource.py"
+    ):
+        try:
+            input_root = Path(str(params.get("input_path") or "")).expanduser().resolve()
+        except OSError:
+            input_root = Path("")
+        if input_root.is_dir() and _looks_like_report_directory(input_root):
+            return {
+                "available": True,
+                "mode": "single",
+                "root_dir": input_root,
+                "report_dir": input_root,
+                "samples": [],
+                "selected_sample": "",
+            }
+
+    if not _looks_like_report_directory(output_root) and task_name == "demo_meta":
+        meta_demo_report_dir = (Path(__file__).resolve().parent.parent / "demo_data" / "meta_1").resolve()
+        if meta_demo_report_dir.is_dir() and _looks_like_report_directory(meta_demo_report_dir):
+            return {
+                "available": True,
+                "mode": "single",
+                "root_dir": meta_demo_report_dir,
+                "report_dir": meta_demo_report_dir,
+                "samples": [],
+                "selected_sample": "",
+            }
+
+    fastq_analysis_root = output_root / "fastq_analysis"
+    if fastq_analysis_root.is_dir():
+        sample_dirs = sorted(
+            [child for child in fastq_analysis_root.iterdir() if child.is_dir() and not child.name.startswith(".")],
+            key=lambda item: item.name.lower(),
+        )
+        if sample_dirs:
+            preferred_name = selected_sample or preferred_sample
+            selected_dir = next((item for item in sample_dirs if item.name == preferred_name), sample_dirs[0])
+            return {
+                "available": True,
+                "mode": "multi",
+                "root_dir": fastq_analysis_root,
+                "report_dir": selected_dir,
+                "samples": [item.name for item in sample_dirs],
+                "selected_sample": selected_dir.name,
+                "task_params": params,
+            }
+
+    if _looks_like_report_directory(output_root):
+        return {
+            "available": True,
+            "mode": "single",
+            "root_dir": output_root,
+            "report_dir": output_root,
+            "samples": [],
+            "selected_sample": "",
+        }
+
+    return {
+        "available": False,
+        "reason": f"{task_name} 的服务器输出目录存在，但其中没有识别到结果文件: {output_root}",
+        "mode": "single",
+        "root_dir": output_root,
+        "report_dir": None,
+        "samples": [],
+        "selected_sample": "",
     }
 
 
-def _resolve_report_directory(task: dict) -> Path:
-    input_path = str((task.get("params") or {}).get("input_path", "")).strip()
-    if not input_path:
-        return Path(task.get("project_root") or ".").resolve()
-    candidate = Path(input_path).expanduser().resolve()
-    return candidate if candidate.is_dir() else candidate.parent
-
-
 def _resolve_report_sample_name(task: dict, report_dir: Path) -> str:
+    def _has_sample_artifacts(name: str) -> bool:
+        sample = str(name or "").strip()
+        if not sample:
+            return False
+        candidate_paths = [
+            report_dir / f"{sample}.fastp2.json",
+            report_dir / f"{sample}.final.fasta",
+            report_dir / f"{sample}.assemble.result.tsv",
+            report_dir / f"{sample}_serotype_result.tsv",
+            report_dir / f"{sample}.mlst_Stat.txt",
+            report_dir / f"{sample}_2.list.txt",
+            report_dir / f"{sample}_2.list2.txt",
+            report_dir / f"{sample}_ngs.per-base.bed.gz",
+            report_dir / f"{sample}_ngs.per-base.bed",
+            report_dir / f"{sample}_rsv_reference_selection" / "selection.tsv",
+            report_dir / f"{sample}_denv_reference_selection" / "selection.tsv",
+            report_dir / f"{sample}_hpiv_reference_selection" / "selection.tsv",
+            report_dir / f"{sample}_hadv_reference_selection" / "selection.tsv",
+            report_dir / f"{sample}_enterovirus_reference_selection" / "selection.tsv",
+            report_dir / f"{sample}_hepatovirus_reference_selection" / "selection.tsv",
+            report_dir / f"{sample}_bandavirus_reference_selection" / "selection.tsv",
+            report_dir / f"{sample}_orthohantavirus_reference_selection" / "selection.tsv",
+            report_dir / f"{sample}_astroviridae_reference_selection" / "selection.tsv",
+            report_dir / f"{sample}_rhinovirus_reference_selection" / "selection.tsv",
+        ]
+        return any(path.exists() for path in candidate_paths)
+
     params = task.get("params") or {}
+    explicit_sample_name = str(params.get("sample_name") or "").strip()
+    if explicit_sample_name and _has_sample_artifacts(explicit_sample_name):
+        return explicit_sample_name
     task_name = str(task.get("name") or params.get("task_name") or "").strip()
     input_path = str(params.get("input_path") or "").strip()
     input_name = Path(input_path).name if input_path else ""
     if input_name == "fastq" and (report_dir / "Men-IGT.fastp2.json").is_file():
         return "Men-IGT"
+    if input_name == "meta" and (report_dir / "A01.fastp2.json").is_file():
+        return "A01"
     for pattern in ("*.checkm.tsv", "*.fastp2.json", "*_bacgenome.html"):
         matches = sorted(report_dir.glob(pattern))
         if matches:
             name = matches[0].name
             if name.endswith(".checkm.tsv"):
-                return name[:-10]
+                return name.removesuffix(".checkm.tsv")
             if name.endswith(".fastp2.json"):
-                return name[:-11]
+                return name.removesuffix(".fastp2.json")
             if name.endswith("_bacgenome.html"):
-                return name[:-14]
-    if task_name and task_name != "demo_fastq":
+                return name.removesuffix("_bacgenome.html")
+    if explicit_sample_name:
+        return explicit_sample_name
+    if (report_dir / "nextclade_output" / "nextclade.tsv").is_file() and input_name:
+        parts = Path(input_name).name.split(".")
+        return parts[0] if parts else Path(input_name).stem
+    if task_name and task_name not in {"demo_fastq", "demo_meta", "demo_tree"}:
         return task_name
     return Path(input_name).stem if input_name else ""
+
+
+def _resolve_report_sample_display_name(task: dict, sample_name: str) -> str:
+    params = task.get("params") or {}
+    input_path = str(params.get("input_path") or "").strip()
+    input_name = Path(input_path).name if input_path else ""
+    task_name = str(task.get("name") or params.get("task_name") or "").strip()
+    if task_name == "demo_meta" or (input_name == "meta" and sample_name == "A01"):
+        return "A01"
+    return sample_name
+
+
+def _build_multi_sample_queue_summary(report_source: dict) -> dict:
+    if str(report_source.get("mode") or "").strip() != "multi":
+        return {}
+    root_dir = report_source.get("root_dir")
+    samples = [str(item or "").strip() for item in (report_source.get("samples") or []) if str(item or "").strip()]
+    if not isinstance(root_dir, Path) or not samples:
+        return {}
+
+    sample_rows: list[dict] = []
+    total_bases = 0
+    total_reads = 0
+    weighted_q20 = 0.0
+    weighted_q30 = 0.0
+    contig_count_total = 0
+    plasmid_count_total = 0
+    assembly_length_total = 0
+    completeness_values: list[float] = []
+    contamination_values: list[float] = []
+    species_counts: dict[str, int] = {}
+    ready_count = 0
+    params = report_source.get("task_params") if isinstance(report_source.get("task_params"), dict) else {}
+    analysis_target = str(params.get("analysis_target") or "").strip().lower()
+    is_virus = analysis_target == "virus" or str(params.get("workstation_key") or "").strip().lower() == "virus"
+
+    for sample in samples:
+        report_dir = root_dir / sample
+        if not report_dir.is_dir():
+            continue
+        summary_info = _read_summary_metrics(report_dir / "summary.tsv")
+        checkm_info = _read_checkm_metrics(report_dir / f"{sample}.checkm.tsv")
+        assembly_profile = _read_multi_sample_assembly_profile(report_dir, sample)
+        has_result = any([
+            (report_dir / "summary.tsv").is_file(),
+            (report_dir / f"{sample}.fastp2.json").is_file(),
+            (report_dir / f"{sample}.checkm.tsv").is_file(),
+            (report_dir / "Assem_info.tsv").is_file(),
+        ])
+        if has_result:
+            ready_count += 1
+
+        bases = _safe_int(summary_info.get("sum_len")) or 0
+        reads = _safe_int(summary_info.get("sum_reads")) or 0
+        total_bases += bases
+        total_reads += reads
+        q20 = _safe_float(summary_info.get("q20_rate"))
+        q30 = _safe_float(summary_info.get("q30_rate"))
+        if bases and q20 is not None:
+            weighted_q20 += q20 * bases
+        if bases and q30 is not None:
+            weighted_q30 += q30 * bases
+
+        contigs = _safe_int(assembly_profile.get("contig_count")) or 0
+        plasmids = _safe_int(assembly_profile.get("plasmid_count")) or 0
+        assembly_length = _safe_int(assembly_profile.get("total_length")) or 0
+        contig_count_total += contigs
+        plasmid_count_total += plasmids
+        assembly_length_total += assembly_length
+
+        completeness = _safe_float(checkm_info.get("completeness"))
+        contamination = _safe_float(checkm_info.get("contamination"))
+        if completeness is not None:
+            completeness_values.append(completeness)
+        if contamination is not None:
+            contamination_values.append(contamination)
+        taxonomy_call = _read_multi_sample_taxonomy_call(report_dir, sample)
+        typing_call = _read_multi_sample_typing_call(report_dir, sample, checkm_info, is_virus=is_virus)
+        species_name = str(
+            typing_call.get("species")
+            or checkm_info.get("species_name")
+            or taxonomy_call.get("species")
+            or checkm_info.get("mlst_species_name")
+            or ""
+        ).strip()
+        if species_name:
+            species_counts[species_name] = species_counts.get(species_name, 0) + 1
+        resistance_count = len(_read_tsv_rows(report_dir / "Assem_abricate_CARD.tsv").get("rows") or [])
+        virulence_count = len(_read_tsv_rows(report_dir / "Assem_abricate_VFDB.tsv").get("rows") or [])
+
+        sample_rows.append({
+            "sample": sample,
+            "ready": has_result,
+            "total_bases": bases or None,
+            "total_reads": reads or None,
+            "q20_rate": q20,
+            "q30_rate": q30,
+            "contig_count": contigs or None,
+            "plasmid_count": plasmids or None,
+            "assembly_length": assembly_length or None,
+            "completeness": completeness,
+            "contamination": contamination,
+            "species_name": species_name,
+            "taxonomy_ratio": taxonomy_call.get("ratio"),
+            "typing": typing_call.get("typing") or "",
+            "serotype": typing_call.get("serotype") or "",
+            "coverage": typing_call.get("coverage") or "",
+            "mean_depth": typing_call.get("mean_depth") or "",
+            "qc_status": typing_call.get("qc_status") or "",
+            "resistance_count": resistance_count or None,
+            "virulence_count": virulence_count or None,
+            "note": typing_call.get("note") or "",
+        })
+
+    def _average(values: list[float]) -> float | None:
+        return round(sum(values) / len(values), 2) if values else None
+
+    species_rank = [
+        {"name": name, "count": count}
+        for name, count in sorted(species_counts.items(), key=lambda item: (-item[1], item[0].lower()))
+    ]
+    return {
+        "sample_count": len(samples),
+        "ready_count": ready_count,
+        "total_bases": total_bases or None,
+        "total_reads": total_reads or None,
+        "q20_rate": round(weighted_q20 / total_bases, 2) if total_bases else None,
+        "q30_rate": round(weighted_q30 / total_bases, 2) if total_bases else None,
+        "contig_count_total": contig_count_total or None,
+        "plasmid_count_total": plasmid_count_total or None,
+        "assembly_length_total": assembly_length_total or None,
+        "avg_completeness": _average(completeness_values),
+        "avg_contamination": _average(contamination_values),
+        "species_rank": species_rank[:5],
+        "samples": sample_rows,
+        "analysis_target": "virus" if is_virus else "bacteria",
+        "table": _build_multi_sample_overview_table(sample_rows, is_virus=is_virus),
+    }
+
+
+def _read_multi_sample_taxonomy_call(report_dir: Path, sample_name: str) -> dict:
+    table = _read_tsv_rows(report_dir / f"{sample_name}_2.list.txt")
+    columns = table.get("columns") or []
+    rows = table.get("rows") or []
+    if not columns or not rows:
+        return {}
+    species_index = _find_column_index(columns, ["种", "species", "scientific_name", "name"])
+    count_index = _find_column_index(columns, ["序列数量", "reads", "read_count", "count"])
+    ratio_index = _find_column_index(columns, ["比例", "比例数值", "ratio", "abundance", "relative_abundance"])
+    best: dict[str, object] = {}
+    best_score = (-1.0, -1.0)
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        species = _cell_at(row, species_index)
+        if not species or species == "-":
+            continue
+        reads = _safe_float(_cell_at(row, count_index)) or 0.0
+        ratio = _coerce_percent_value(_cell_at(row, ratio_index))
+        ratio_score = ratio if ratio is not None else 0.0
+        if (reads, ratio_score) > best_score:
+            best_score = (reads, ratio_score)
+            best = {"species": species, "reads": int(reads) if reads else None, "ratio": ratio}
+    return best
+
+
+def _read_multi_sample_assembly_profile(report_dir: Path, sample_name: str) -> dict:
+    profile = _read_assembly_profile(report_dir / "Assem_info.tsv")
+    if _safe_int(profile.get("contig_count")) or _safe_int(profile.get("total_length")):
+        return profile
+    fasta_candidates = [
+        report_dir / f"{sample_name}.final.fasta",
+        report_dir / f"{sample_name}.consensus.fasta",
+        report_dir / "tmp_combine.fa",
+    ]
+    fasta_path = next((path for path in fasta_candidates if path.is_file()), Path(""))
+    fasta_summary = _read_fasta_assembly_summary(fasta_path)
+    columns = fasta_summary.get("columns") or []
+    rows = fasta_summary.get("rows") or []
+    first = rows[0] if rows and isinstance(rows[0], list) else []
+    return {
+        "contig_count": _first_table_cell(first, columns, ["Contig数量"]),
+        "plasmid_count": None,
+        "total_count": _first_table_cell(first, columns, ["Contig数量"]),
+        "total_length": _first_table_cell(first, columns, ["总长度(bp)"]),
+    }
+
+
+def _read_multi_sample_typing_call(report_dir: Path, sample_name: str, checkm_info: dict, *, is_virus: bool) -> dict:
+    result: dict[str, object] = {}
+    serotype_table = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    serotype_row = _first_row_mapping(serotype_table)
+    if is_virus:
+        nextclade_row = _first_row_mapping(_read_tsv_rows(report_dir / "nextclade_output" / "nextclade.tsv"))
+        species = _first_mapping_value(serotype_row, ["病毒类型", "物种", "species", "virus_type"])
+        clade = _first_mapping_value(serotype_row, ["Nextclade分型", "大类分型", "分型结果", "基因型", "亚型", "clade", "type"])
+        lineage = _first_mapping_value(serotype_row, ["Pango谱系", "S子亚型", "G分型", "P分型", "组合分型", "lineage", "subtype"])
+        if not clade:
+            clade = _first_mapping_value(nextclade_row, ["clade", "clade_display", "clade_who", "Nextclade_pango", "lineage", "genotype"])
+        if not lineage:
+            lineage = _first_mapping_value(nextclade_row, ["lineage", "genotype", "Nextclade_pango", "serotype"])
+        coverage = _first_mapping_value(serotype_row, ["覆盖度", "全长覆盖度", "coverage"])
+        if not coverage:
+            coverage = _first_mapping_value(nextclade_row, ["coverage", "coverageScore"])
+        result.update({
+            "species": species,
+            "typing": " / ".join([item for item in [clade, lineage] if item and item != "-"]),
+            "coverage": coverage,
+            "mean_depth": _first_mapping_value(serotype_row, ["平均深度", "mean_depth", "depth"]),
+            "qc_status": _first_mapping_value(serotype_row, ["QC状态", "qc_status"]) or _first_mapping_value(nextclade_row, ["qc.overallStatus"]),
+            "note": _first_mapping_value(serotype_row, ["说明", "note"]),
+        })
+        return result
+
+    mlst_row = _first_row_mapping(_read_tsv_rows(report_dir / f"{sample_name}.mlst_Stat.txt"))
+    result.update({
+        "species": str(checkm_info.get("species_name") or checkm_info.get("mlst_species_name") or "").strip(),
+        "typing": _first_mapping_value(mlst_row, ["序列分型(ST)", "ST", "mlst_st"]),
+        "serotype": _format_multi_sample_bacterial_serotype(serotype_row),
+        "note": _first_mapping_value(serotype_row, ["说明", "note"]),
+    })
+    return result
+
+
+def _format_multi_sample_bacterial_serotype(serotype_row: dict[str, str]) -> str:
+    annotation = _first_mapping_value(serotype_row, [
+        "血清型注释信息(simple)",
+        "血清型注释信息(details)",
+        "亚型全称",
+        "菌种",
+    ])
+    fallback = _first_mapping_value(serotype_row, [
+        "血清型结果",
+        "分型结果",
+        "serotype",
+        "血清型",
+        "O抗原",
+        "H抗原",
+    ])
+    subtype = _extract_salmonella_serovar_name(annotation or fallback)
+    antigen_formula = _first_mapping_value(serotype_row, [
+        "血清式",
+        "抗原组成",
+        "抗原式",
+        "antigenic_formula",
+        "antigen_formula",
+    ]) or _extract_salmonella_antigen_formula(annotation)
+    if subtype and antigen_formula:
+        return f"{subtype} / {antigen_formula}"
+    if subtype:
+        return subtype
+    if antigen_formula:
+        return antigen_formula
+    return fallback or annotation
+
+
+def _extract_salmonella_serovar_name(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    prefix = re.split(r"\s*[\(（]", text, maxsplit=1)[0].strip(" ，,;；")
+    for candidate in [prefix, text]:
+        normalized_candidate = _normalize_serotype_lookup_text(candidate)
+        for canonical, aliases in SALMONELLA_SEROVAR_ALIAS_MAP.items():
+            normalized_aliases = {_normalize_serotype_lookup_text(item) for item in [canonical, *aliases]}
+            if normalized_candidate in normalized_aliases:
+                return canonical
+    if "沙门" in prefix:
+        return prefix.replace("沙门氏菌", "沙门菌")
+    return prefix
+
+
+def _extract_salmonella_antigen_formula(value: object) -> str:
+    text = str(value or "").strip().replace("（", "(").replace("）", ")")
+    if not text:
+        return ""
+    match = re.search(r",\s*\(([^()]*)\)\s*\)?$", text)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def _build_multi_sample_overview_table(sample_rows: list[dict], *, is_virus: bool) -> dict:
+    if is_virus:
+        columns = [
+            {"key": "sample", "label": "样本"},
+            {"key": "ready_label", "label": "状态"},
+            {"key": "total_bases_label", "label": "测序量"},
+            {"key": "q_label", "label": "Q20 / Q30"},
+            {"key": "species_name", "label": "病毒/物种"},
+            {"key": "typing", "label": "分型/谱系"},
+            {"key": "coverage", "label": "覆盖度"},
+            {"key": "mean_depth", "label": "平均深度"},
+            {"key": "assembly_label", "label": "组装"},
+            {"key": "qc_status", "label": "分型QC"},
+            {"key": "note", "label": "关注说明"},
+        ]
+    else:
+        columns = [
+            {"key": "sample", "label": "样本"},
+            {"key": "ready_label", "label": "状态"},
+            {"key": "total_bases_label", "label": "测序量"},
+            {"key": "q_label", "label": "Q20 / Q30"},
+            {"key": "species_name", "label": "物种鉴定"},
+            {"key": "typing", "label": "MLST/ST"},
+            {"key": "serotype", "label": "血清型注释"},
+            {"key": "checkm_label", "label": "完整性/污染率"},
+            {"key": "assembly_label", "label": "组装"},
+            {"key": "rv_label", "label": "耐药/毒力"},
+            {"key": "note", "label": "关注说明"},
+        ]
+    rows = []
+    for item in sample_rows:
+        q20 = _display_percent(item.get("q20_rate"))
+        q30 = _display_percent(item.get("q30_rate"))
+        completeness = _display_percent_points(item.get("completeness"))
+        contamination = _display_percent_points(item.get("contamination"))
+        rows.append({
+            **item,
+            "ready_label": "已生成" if item.get("ready") else "缺结果",
+            "total_bases_label": _human_bp(item.get("total_bases")),
+            "q_label": f"{q20} / {q30}",
+            "checkm_label": f"{completeness} / {contamination}",
+            "assembly_label": f"{_human_count(item.get('contig_count'))} contig / {_human_bp(item.get('assembly_length'))}",
+            "rv_label": f"{_human_count(item.get('resistance_count'))} / {_human_count(item.get('virulence_count'))}",
+        })
+    return {"columns": columns, "rows": rows}
+
+
+def _find_column_index(columns: list, candidates: list[str]) -> int:
+    normalized = {str(column or "").strip().lower(): index for index, column in enumerate(columns)}
+    for candidate in candidates:
+        key = str(candidate or "").strip().lower()
+        if key in normalized:
+            return normalized[key]
+    return -1
+
+
+def _cell_at(row: list, index: int) -> str:
+    if index < 0 or index >= len(row):
+        return ""
+    return str(row[index] or "").strip()
+
+
+def _first_row_mapping(table: dict) -> dict[str, str]:
+    columns = table.get("columns") or []
+    rows = table.get("rows") or []
+    first = rows[0] if rows and isinstance(rows[0], list) else []
+    return {str(column or "").strip(): _cell_at(first, index) for index, column in enumerate(columns)}
+
+
+def _first_table_cell(row: list, columns: list, candidates: list[str]) -> str:
+    index = _find_column_index(columns, candidates)
+    return _cell_at(row, index)
+
+
+def _first_mapping_value(mapping: dict, candidates: list[str]) -> str:
+    normalized = {str(key or "").strip().lower(): str(value or "").strip() for key, value in (mapping or {}).items()}
+    for candidate in candidates:
+        value = normalized.get(str(candidate or "").strip().lower(), "")
+        if value and value != "-":
+            return value
+    return ""
+
+
+def _is_community_report_task(task: dict) -> bool:
+    params = task.get("params") or {}
+    workstation_key = _resolve_workstation_module(params.get("workstation_key")).get("key", "")
+    pipeline_script = str(task.get("pipeline_script") or "").strip()
+    return workstation_key == "community" or pipeline_script.endswith("CommunityAnalysis.py")
+
+
+def _read_community_summary(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _read_jsonl_records(path: Path) -> tuple[dict, list[dict]]:
+    if not path.is_file():
+        return {}, []
+    header: dict = {}
+    rows: list[dict] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for index, line in enumerate(handle):
+                raw = str(line or "").strip()
+                if not raw:
+                    continue
+                try:
+                    record = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if index == 0 and isinstance(record, dict) and "fields" in record:
+                    header = record
+                    continue
+                if isinstance(record, dict):
+                    rows.append(record)
+    except OSError:
+        return {}, []
+    return header, rows
+
+
+def _read_community_taxonomy_preview(report_dir: Path, preview_size: int = 10) -> dict:
+    taxonomy_path = report_dir / "taxonomy_export" / "taxonomy.tsv"
+    raw = _read_tsv_rows(taxonomy_path)
+    columns = raw.get("columns", [])
+    rows = raw.get("rows", [])
+    if not columns or not rows:
+        return {"summary": {}, "columns": [], "rows": []}
+    column_labels = {
+        "Feature ID": "特征 ID",
+        "Taxon": "分类注释",
+        "Confidence": "置信度",
+    }
+    preview_columns = [column_labels.get(column, column) for column in columns[:3]]
+    preview_rows = [row[:3] for row in rows[:preview_size]]
+    confidences = [_safe_float(row[2] if len(row) > 2 else None) for row in rows]
+    valid_confidences = [value for value in confidences if value is not None]
+    return {
+        "summary": {
+            "feature_count": len(rows),
+            "avg_confidence": round(sum(valid_confidences) / len(valid_confidences), 4) if valid_confidences else None,
+        },
+        "columns": preview_columns,
+        "rows": preview_rows,
+    }
+
+
+def _community_taxonomy_rank_name(level: int) -> str:
+    return {
+        2: "门",
+        3: "纲",
+        4: "目",
+        5: "科",
+        6: "属",
+        7: "种",
+    }.get(level, f"Level {level}")
+
+
+def _community_taxonomy_label(raw: str, level: int) -> str:
+    parts = [part.strip() for part in str(raw or "").split(";") if part.strip()]
+    target = parts[-1] if parts else str(raw or "").strip()
+    target = re.sub(r"^[a-z]__+", "", target).strip("_")
+    if not target:
+        target = "未注释"
+    return f"{_community_taxonomy_rank_name(level)}:{target}"
+
+
+def _is_community_taxonomy_column(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text or text == "index":
+        return False
+    if text.startswith("d__"):
+        return True
+    if text.startswith("Unassigned"):
+        return True
+    return False
+
+
+def _read_metadata_group_lookup(metadata_path: Path, sample_id_column: str, group_column: str) -> dict[str, str]:
+    if not metadata_path.is_file():
+        return {}
+    try:
+        with metadata_path.open("r", encoding="utf-8", errors="ignore") as handle:
+            lines = [line.rstrip("\n") for line in handle if line.strip()]
+    except OSError:
+        return {}
+    if not lines:
+        return {}
+    reader = csv.DictReader(lines, delimiter="\t")
+    lookup: dict[str, str] = {}
+    for row in reader:
+        if any(str(value or "").strip().startswith("#q2:") for value in row.values()):
+            continue
+        sample_id = str(row.get(sample_id_column) or "").strip()
+        if not sample_id:
+            continue
+        lookup[sample_id] = str(row.get(group_column) or "未分组").strip() or "未分组"
+    return lookup
+
+
+def _find_qzv_member(names: list[str], suffix: str) -> str:
+    for name in names:
+        if name.endswith(suffix):
+            return name
+    raise FileNotFoundError(f"未在 qzv 中找到 {suffix}")
+
+
+def _read_qzv_text(path: Path, suffix: str) -> str:
+    with zipfile.ZipFile(path) as archive:
+        member = _find_qzv_member(archive.namelist(), suffix)
+        return archive.read(member).decode("utf-8", errors="ignore")
+
+
+def _read_qzv_tsv_rows(path: Path, suffix: str) -> tuple[list[str], list[list[str]]]:
+    raw_text = _read_qzv_text(path, suffix)
+    lines = [line for line in raw_text.splitlines() if line.strip()]
+    if not lines:
+        return [], []
+    reader = csv.reader(lines, delimiter="\t")
+    rows = list(reader)
+    if not rows:
+        return [], []
+    columns = [str(item or "").strip() for item in rows[0]]
+    data_rows: list[list[str]] = []
+    for row in rows[1:]:
+        if row and str(row[0] or "").strip().startswith("#q2:"):
+            continue
+        data_rows.append([str(item or "").strip() for item in row[: len(columns)]])
+    return columns, data_rows
+
+
+def _read_community_demux_preview(report_dir: Path, preview_size: int = 12) -> dict:
+    qzv_path = report_dir / "demux.qzv"
+    columns: list[str] = []
+    rows: list[list[str]] = []
+    if qzv_path.is_file():
+        try:
+            columns, rows = _read_qzv_tsv_rows(qzv_path, "data/per-sample-fastq-counts.tsv")
+        except Exception:
+            columns, rows = [], []
+    if not columns or not rows:
+        demux_path = report_dir / "community_demux_summary.tsv"
+        raw = _read_tsv_rows(demux_path)
+        columns = raw.get("columns", [])
+        rows = raw.get("rows", [])
+    if not columns or not rows:
+        return {"summary": {}, "columns": [], "rows": []}
+    column_labels = {
+        "sample ID": "样本 ID",
+        "sample_id": "样本 ID",
+        "forward sequence count": "正向 reads 数",
+        "forward_count": "正向 reads 数",
+        "reverse sequence count": "反向 reads 数",
+        "reverse_count": "反向 reads 数",
+    }
+    columns = [column_labels.get(column, column) for column in columns]
+    forward_values = [_safe_int(row[1] if len(row) > 1 else None) for row in rows]
+    reverse_values = [_safe_int(row[2] if len(row) > 2 else None) for row in rows]
+    valid_forward = [value for value in forward_values if value is not None]
+    valid_reverse = [value for value in reverse_values if value is not None]
+    preview_rows = rows[:preview_size]
+    return {
+        "summary": {
+            "sample_count": len(rows),
+            "forward_total": sum(valid_forward) if valid_forward else None,
+            "reverse_total": sum(valid_reverse) if valid_reverse else None,
+        },
+        "columns": columns,
+        "rows": preview_rows,
+    }
+
+
+def _read_community_denoise_preview(report_dir: Path, preview_size: int = 12) -> dict:
+    qzv_path = report_dir / "denoising-stats-dada2.qzv"
+    if not qzv_path.is_file():
+        return {"summary": {}, "columns": [], "rows": []}
+    try:
+        columns, rows = _read_qzv_tsv_rows(qzv_path, "data/metadata.tsv")
+    except Exception:
+        return {"summary": {}, "columns": [], "rows": []}
+    if not columns or not rows:
+        return {"summary": {}, "columns": [], "rows": []}
+    filtered_pct_idx = columns.index("percentage of input passed filter") if "percentage of input passed filter" in columns else -1
+    non_chimeric_pct_idx = columns.index("percentage of input non-chimeric") if "percentage of input non-chimeric" in columns else -1
+    merged_idx = columns.index("merged") if "merged" in columns else -1
+    preview_columns = [
+        "sample-id",
+        "input",
+        "filtered",
+        "merged",
+        "non-chimeric",
+        "percentage of input non-chimeric",
+    ]
+    preview_indexes = [columns.index(name) for name in preview_columns if name in columns]
+    preview_rows = [[row[index] if index < len(row) else "" for index in preview_indexes] for row in rows[:preview_size]]
+    valid_filtered_pct = [_safe_float(row[filtered_pct_idx]) for row in rows] if filtered_pct_idx >= 0 else []
+    valid_non_chimeric_pct = [_safe_float(row[non_chimeric_pct_idx]) for row in rows] if non_chimeric_pct_idx >= 0 else []
+    valid_merged = [_safe_int(row[merged_idx]) for row in rows] if merged_idx >= 0 else []
+    clean_filtered_pct = [value for value in valid_filtered_pct if value is not None]
+    clean_non_chimeric_pct = [value for value in valid_non_chimeric_pct if value is not None]
+    clean_merged = [value for value in valid_merged if value is not None]
+    column_labels = {
+        "sample-id": "样本 ID",
+        "input": "输入 reads",
+        "filtered": "过滤后 reads",
+        "denoised": "去噪后 reads",
+        "merged": "合并后 reads",
+        "non-chimeric": "非嵌合 reads",
+        "percentage of input passed filter": "过滤保留率(%)",
+        "percentage of input merged": "合并保留率(%)",
+        "percentage of input non-chimeric": "非嵌合保留率(%)",
+    }
+    return {
+        "summary": {
+            "sample_count": len(rows),
+            "avg_pass_filter_pct": round(sum(clean_filtered_pct) / len(clean_filtered_pct), 2) if clean_filtered_pct else None,
+            "avg_non_chimeric_pct": round(sum(clean_non_chimeric_pct) / len(clean_non_chimeric_pct), 2) if clean_non_chimeric_pct else None,
+            "merged_total": sum(clean_merged) if clean_merged else None,
+        },
+        "columns": [column_labels.get(columns[index], columns[index]) for index in preview_indexes],
+        "rows": preview_rows,
+    }
+
+
+def _read_community_taxa_abundance_summary(report_dir: Path, metadata_groups: dict[str, str] | None = None, levels: tuple[int, ...] = (2, 4, 5, 6), top_n: int = 15, sample_limit: int = 120) -> dict:
+    qzv_path = report_dir / "taxa-barplot.qzv"
+    if not qzv_path.is_file():
+        return {"summary": {}, "columns": [], "rows": [], "levels": {}}
+    summary_rows: list[list[str]] = []
+    level_counts: dict[str, int] = {}
+    level_map: dict[str, dict[str, object]] = {}
+    try:
+        with zipfile.ZipFile(qzv_path) as archive:
+            names = archive.namelist()
+            for level in levels:
+                try:
+                    member = _find_qzv_member(names, f"data/level-{level}.csv")
+                except FileNotFoundError:
+                    continue
+                text = archive.read(member).decode("utf-8", errors="ignore")
+                reader = csv.reader(line for line in text.splitlines() if line.strip())
+                rows = list(reader)
+                if len(rows) < 2:
+                    continue
+                header = rows[0]
+                value_columns = []
+                for index, column in enumerate(header[1:], start=1):
+                    text_column = str(column or "").strip()
+                    if not text_column:
+                        continue
+                    if not _is_community_taxonomy_column(text_column):
+                        continue
+                    value_columns.append((index, text_column))
+                if not value_columns:
+                    continue
+                taxa_metrics: list[tuple[str, float, int]] = []
+                for index, taxon in value_columns:
+                    total = 0.0
+                    present = 0
+                    sample_totals = 0
+                    for row in rows[1:]:
+                        numeric_values = []
+                        for value_index, _taxon in value_columns:
+                            numeric_values.append(_safe_float(row[value_index] if value_index < len(row) else None) or 0.0)
+                        sample_sum = sum(numeric_values)
+                        if sample_sum <= 0:
+                            continue
+                        sample_totals += 1
+                        value = _safe_float(row[index] if index < len(row) else None) or 0.0
+                        relative = (value / sample_sum) * 100 if sample_sum else 0.0
+                        total += relative
+                        if value > 0:
+                            present += 1
+                    if sample_totals <= 0:
+                        continue
+                    taxa_metrics.append((taxon, total / sample_totals, present))
+                taxa_metrics.sort(key=lambda item: item[1], reverse=True)
+                top_rows = taxa_metrics[:top_n]
+                level_label = _community_taxonomy_rank_name(level)
+                level_counts[level_label] = len(top_rows)
+                level_rows: list[list[str]] = []
+                sample_series: list[dict[str, object]] = []
+                for row in rows[1:1 + sample_limit]:
+                    sample_name = str(row[0] or "").strip()
+                    if not sample_name:
+                        continue
+                    sample_numeric = {}
+                    sample_sum = 0.0
+                    for index, taxon in value_columns:
+                        value = _safe_float(row[index] if index < len(row) else None) or 0.0
+                        sample_numeric[taxon] = value
+                        sample_sum += value
+                    if sample_sum <= 0:
+                        continue
+                    segments = []
+                    for taxon, _relative_mean, _present in top_rows:
+                        value = sample_numeric.get(taxon, 0.0)
+                        ratio = (value / sample_sum) * 100 if sample_sum else 0.0
+                        if ratio <= 0:
+                            continue
+                        segments.append({
+                            "label": _community_taxonomy_label(taxon, level),
+                            "ratio": round(ratio, 2),
+                        })
+                    other_ratio = max(0.0, 100.0 - sum(item["ratio"] for item in segments))
+                    if other_ratio > 0.01:
+                        segments.append({"label": "其他", "ratio": round(other_ratio, 2)})
+                    sample_series.append({
+                        "sample": sample_name,
+                        "group": (metadata_groups or {}).get(sample_name, "未分组"),
+                        "segments": segments,
+                    })
+                for taxon, relative_mean, present in top_rows:
+                    row = [
+                        level_label,
+                        _community_taxonomy_label(taxon, level),
+                        f"{relative_mean:.2f}%",
+                        str(present),
+                    ]
+                    summary_rows.append(row)
+                    level_rows.append(row[1:])
+                level_map[level_label] = {
+                    "level": level_label,
+                    "columns": ["分类单元", "平均相对丰度", "检出样本数"],
+                    "rows": level_rows,
+                    "sample_series": sample_series,
+                }
+    except OSError:
+        return {"summary": {}, "columns": [], "rows": [], "levels": {}}
+    return {
+        "summary": {
+            "level_count": len(level_counts),
+            "row_count": len(summary_rows),
+        },
+        "columns": ["分类水平", "分类单元", "平均相对丰度", "检出样本数"],
+        "rows": summary_rows,
+        "levels": level_map,
+    }
+
+
+def _quantile(sorted_values: list[float], fraction: float) -> float:
+    if not sorted_values:
+        return 0.0
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+    position = (len(sorted_values) - 1) * fraction
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return float(sorted_values[lower])
+    weight = position - lower
+    return float(sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight)
+
+
+def _boxplot_stats(values: list[float]) -> dict[str, float | int]:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return {"n": 0, "min": 0.0, "q1": 0.0, "median": 0.0, "q3": 0.0, "max": 0.0, "mean": 0.0}
+    return {
+        "n": len(ordered),
+        "min": round(ordered[0], 4),
+        "q1": round(_quantile(ordered, 0.25), 4),
+        "median": round(_quantile(ordered, 0.5), 4),
+        "q3": round(_quantile(ordered, 0.75), 4),
+        "max": round(ordered[-1], 4),
+        "mean": round(sum(ordered) / len(ordered), 4),
+    }
+
+
+def _average_ranks(values: list[float]) -> list[float]:
+    ordered = sorted(enumerate(values), key=lambda item: item[1])
+    ranks = [0.0] * len(values)
+    index = 0
+    while index < len(ordered):
+        end = index + 1
+        while end < len(ordered) and ordered[end][1] == ordered[index][1]:
+            end += 1
+        average_rank = (index + 1 + end) / 2
+        for cursor in range(index, end):
+            original_index = ordered[cursor][0]
+            ranks[original_index] = average_rank
+        index = end
+    return ranks
+
+
+def _kruskal_wallis_h(groups: list[list[float]]) -> float:
+    valid_groups = [group for group in groups if group]
+    if len(valid_groups) < 2:
+        return 0.0
+    all_values = [float(value) for group in valid_groups for value in group]
+    total_n = len(all_values)
+    if total_n <= 1:
+        return 0.0
+    ranks = _average_ranks(all_values)
+    cursor = 0
+    rank_sums = []
+    group_sizes = []
+    for group in valid_groups:
+        group_size = len(group)
+        group_ranks = ranks[cursor:cursor + group_size]
+        rank_sums.append(sum(group_ranks))
+        group_sizes.append(group_size)
+        cursor += group_size
+    statistic = (12 / (total_n * (total_n + 1))) * sum((rank_sum ** 2) / size for rank_sum, size in zip(rank_sums, group_sizes)) - 3 * (total_n + 1)
+    value_counts: dict[float, int] = {}
+    for value in all_values:
+        value_counts[value] = value_counts.get(value, 0) + 1
+    tie_correction = 1 - sum(count ** 3 - count for count in value_counts.values()) / (total_n ** 3 - total_n) if total_n > 1 else 1
+    if tie_correction > 0:
+        statistic /= tie_correction
+    return float(max(statistic, 0.0))
+
+
+def _permutation_kruskal_pvalue(groups: list[list[float]], permutations: int = 1200, seed: int = 42) -> float | None:
+    valid_groups = [group for group in groups if group]
+    if len(valid_groups) < 2:
+        return None
+    flattened = [float(value) for group in valid_groups for value in group]
+    if len(flattened) <= 1:
+        return None
+    group_sizes = [len(group) for group in valid_groups]
+    observed = _kruskal_wallis_h(valid_groups)
+    rng = random.Random(seed)
+    exceed_count = 0
+    shuffled = list(flattened)
+    for _ in range(permutations):
+        rng.shuffle(shuffled)
+        cursor = 0
+        permuted_groups = []
+        for size in group_sizes:
+            permuted_groups.append(shuffled[cursor:cursor + size])
+            cursor += size
+        if _kruskal_wallis_h(permuted_groups) >= observed - 1e-12:
+            exceed_count += 1
+    return round((exceed_count + 1) / (permutations + 1), 4)
+
+
+def _normal_survival_probability(z_score: float) -> float:
+    return 0.5 * math.erfc(z_score / math.sqrt(2.0))
+
+
+def _mann_whitney_pairwise_pvalue(group_a: list[float], group_b: list[float]) -> float | None:
+    values_a = [float(value) for value in group_a]
+    values_b = [float(value) for value in group_b]
+    if not values_a or not values_b:
+        return None
+    merged = values_a + values_b
+    ranks = _average_ranks(merged)
+    n1 = len(values_a)
+    n2 = len(values_b)
+    rank_sum_a = sum(ranks[:n1])
+    u1 = rank_sum_a - (n1 * (n1 + 1)) / 2
+    u2 = n1 * n2 - u1
+    u_stat = min(u1, u2)
+    mean_u = (n1 * n2) / 2
+    value_counts: dict[float, int] = {}
+    for value in merged:
+        value_counts[value] = value_counts.get(value, 0) + 1
+    total_n = n1 + n2
+    tie_term = sum(count ** 3 - count for count in value_counts.values())
+    variance = (n1 * n2 / 12) * ((total_n + 1) - tie_term / max(total_n * (total_n - 1), 1))
+    if variance <= 0:
+        return None
+    z_score = (abs(u_stat - mean_u) - 0.5) / math.sqrt(variance)
+    p_value = min(1.0, max(0.0, 2 * _normal_survival_probability(abs(z_score))))
+    return round(p_value, 4)
+
+
+def _community_alpha_metric_label(metric_key: str) -> str:
+    labels = {
+        "shannon": "Shannon 指数",
+        "observed_features": "观察到的特征数",
+        "pielou_evenness": "Pielou 均匀度",
+        "simpson": "Simpson 指数",
+        "faith_pd": "Faith 系统发育多样性",
+        "chao1": "Chao1 丰富度",
+        "goods_coverage": "Good's coverage",
+    }
+    return labels.get(metric_key, metric_key.replace("_", " ").strip() or metric_key)
+
+
+def _read_alpha_metric_export_rows(export_dir: Path) -> dict[str, float]:
+    target = export_dir / "alpha-diversity.tsv"
+    if not target.is_file():
+        return {}
+    rows = _read_tsv_rows(target)
+    sample_idx = rows["columns"].index("sample-id") if "sample-id" in rows["columns"] else 0
+    value_idx = rows["columns"].index("alpha_diversity") if "alpha_diversity" in rows["columns"] else 1
+    result: dict[str, float] = {}
+    for row in rows["rows"]:
+        if sample_idx >= len(row) or value_idx >= len(row):
+            continue
+        sample_id = str(row[sample_idx] or "").strip()
+        value = _safe_float(row[value_idx])
+        if sample_id and value is not None:
+            result[sample_id] = round(float(value), 4)
+    return result
+
+
+def _read_community_alpha_rarefaction_summary(report_dir: Path, metadata_groups: dict[str, str] | None = None, preferred_depth: int | None = None, preview_size: int = 18) -> dict:
+    qzv_path = report_dir / "alpha-rarefaction.qzv"
+    if not qzv_path.is_file():
+        return {"summary": {}, "sample_columns": [], "sample_rows": [], "group_columns": [], "group_rows": [], "boxplots": {}, "pairwise": {}, "rarefaction": {}}
+
+    def _select_depth_columns(header: list[str], target_depth: int | None) -> tuple[int | None, list[int]]:
+        depth_map: dict[int, list[int]] = {}
+        for index, column in enumerate(header[1:], start=1):
+            text = str(column or "").strip()
+            if not text.startswith("depth-"):
+                continue
+            depth_text = text.split("_iter-", 1)[0].removeprefix("depth-")
+            depth_value = int(_safe_float(depth_text) or 0)
+            if depth_value <= 0:
+                continue
+            depth_map.setdefault(depth_value, []).append(index)
+        if not depth_map:
+            return None, []
+        available_depths = sorted(depth_map)
+        if target_depth and any(depth == target_depth for depth in available_depths):
+            chosen_depth = target_depth
+        elif target_depth:
+            chosen_depth = min(available_depths, key=lambda depth: (abs(depth - target_depth), -depth))
+        else:
+            chosen_depth = max(available_depths)
+        return chosen_depth, depth_map.get(chosen_depth, [])
+
+    def _build_rarefaction_curves(rows: list[list[str]], header: list[str], limit_groups: int = 8) -> dict:
+        depth_map: dict[int, list[int]] = {}
+        for index, column in enumerate(header[1:], start=1):
+            text = str(column or "").strip()
+            if not text.startswith("depth-"):
+                continue
+            depth_text = text.split("_iter-", 1)[0].removeprefix("depth-")
+            depth_value = int(_safe_float(depth_text) or 0)
+            if depth_value <= 0:
+                continue
+            depth_map.setdefault(depth_value, []).append(index)
+        if not depth_map:
+            return {}
+        grouped_points: dict[str, dict[int, list[float]]] = {}
+        grouped_counts: dict[str, int] = {}
+        for row in rows:
+            sample_id = str(row[0] or "").strip()
+            if not sample_id:
+                continue
+            group_name = (metadata_groups or {}).get(sample_id, "未分组")
+            grouped_counts[group_name] = grouped_counts.get(group_name, 0) + 1
+            group_bucket = grouped_points.setdefault(group_name, {})
+            for depth in sorted(depth_map):
+                values = [_safe_float(row[index] if index < len(row) else None) for index in depth_map[depth]]
+                valid_values = [value for value in values if value is not None]
+                if not valid_values:
+                    continue
+                group_bucket.setdefault(depth, []).append(sum(valid_values) / len(valid_values))
+        curves = []
+        max_y = 0.0
+        ranked_groups = sorted(grouped_points, key=lambda group: (-grouped_counts.get(group, 0), group))[:limit_groups]
+        for group_name in ranked_groups:
+            points = []
+            for depth in sorted(grouped_points[group_name]):
+                values = grouped_points[group_name][depth]
+                mean_value = round(sum(values) / len(values), 4)
+                max_y = max(max_y, mean_value)
+                points.append({"x": depth, "y": mean_value})
+            if points:
+                curves.append({
+                    "group": group_name,
+                    "n": grouped_counts.get(group_name, 0),
+                    "points": points,
+                })
+        return {
+            "label": "Observed Features 稀释曲线",
+            "x_label": "测序深度",
+            "y_label": "观察到的特征数",
+            "curves": curves,
+            "max_y": round(max_y, 4) if max_y else None,
+        }
+
+    metrics = ["shannon", "observed_features", "pielou_evenness", "simpson", "faith_pd", "chao1", "goods_coverage"]
+    sample_map: dict[str, dict[str, object]] = {}
+    chosen_depth: int | None = None
+    rarefaction_chart: dict[str, object] = {}
+    try:
+        with zipfile.ZipFile(qzv_path) as archive:
+            names = archive.namelist()
+            for metric_key in metrics:
+                try:
+                    member = _find_qzv_member(names, f"data/{metric_key}.csv")
+                except FileNotFoundError:
+                    continue
+                text = archive.read(member).decode("utf-8", errors="ignore")
+                reader = csv.reader(line for line in text.splitlines() if line.strip())
+                rows = list(reader)
+                if len(rows) < 2:
+                    continue
+                if metric_key == "observed_features":
+                    rarefaction_chart = _build_rarefaction_curves(rows[1:], rows[0]) or {}
+                metric_depth, depth_indexes = _select_depth_columns(rows[0], preferred_depth)
+                if chosen_depth is None:
+                    chosen_depth = metric_depth
+                if not depth_indexes:
+                    continue
+                for row in rows[1:]:
+                    sample_id = str(row[0] or "").strip()
+                    if not sample_id:
+                        continue
+                    values = [_safe_float(row[index] if index < len(row) else None) for index in depth_indexes]
+                    valid_values = [value for value in values if value is not None]
+                    if not valid_values:
+                        continue
+                    entry = sample_map.setdefault(sample_id, {
+                        "sample": sample_id,
+                        "group": (metadata_groups or {}).get(sample_id, "未分组"),
+                    })
+                    entry[metric_key] = round(sum(valid_values) / len(valid_values), 4)
+    except (OSError, FileNotFoundError, zipfile.BadZipFile):
+        return {"summary": {}, "sample_columns": [], "sample_rows": [], "group_columns": [], "group_rows": [], "boxplots": {}, "pairwise": {}, "rarefaction": {}}
+
+    for metric in metrics:
+        exported_values = _read_alpha_metric_export_rows(report_dir / f"alpha-{metric}_export")
+        for sample_id, value in exported_values.items():
+            entry = sample_map.setdefault(sample_id, {
+                "sample": sample_id,
+                "group": (metadata_groups or {}).get(sample_id, "未分组"),
+            })
+            entry[metric] = value
+
+    available_metrics = [metric for metric in metrics if any(entry.get(metric) is not None for entry in sample_map.values())]
+    sample_rows_source = [entry for entry in sample_map.values() if any(entry.get(metric) is not None for metric in available_metrics)]
+    if not sample_rows_source:
+        return {"summary": {}, "sample_columns": [], "sample_rows": [], "group_columns": [], "group_rows": [], "boxplots": {}, "pairwise": {}, "rarefaction": rarefaction_chart}
+
+    sample_rows_source.sort(key=lambda item: (str(item.get("group") or "未分组"), str(item.get("sample") or "")))
+    group_map: dict[str, list[dict[str, object]]] = {}
+    for entry in sample_rows_source:
+        group_name = str(entry.get("group") or "未分组")
+        group_map.setdefault(group_name, []).append(entry)
+
+    group_rows: list[list[str]] = []
+    metric_group_boxes: dict[str, list[dict[str, object]]] = {metric: [] for metric in available_metrics}
+    metric_group_values: dict[str, dict[str, list[float]]] = {metric: {} for metric in available_metrics}
+    for group_name, items in sorted(group_map.items(), key=lambda item: item[0]):
+        shannon_values = [float(item["shannon"]) for item in items if item.get("shannon") is not None]
+        observed_values = [float(item["observed_features"]) for item in items if item.get("observed_features") is not None]
+        shannon_mean = round(sum(shannon_values) / len(shannon_values), 4) if shannon_values else None
+        observed_mean = round(sum(observed_values) / len(observed_values), 2) if observed_values else None
+        group_rows.append([
+            group_name,
+            str(len(items)),
+            f"{shannon_mean:.3f}" if shannon_mean is not None else "--",
+            f"{observed_mean:.2f}" if observed_mean is not None else "--",
+        ])
+        for metric in available_metrics:
+            metric_values = [float(item[metric]) for item in items if item.get(metric) is not None]
+            if metric_values:
+                metric_group_values[metric][group_name] = metric_values
+                metric_group_boxes[metric].append({"label": group_name, **_boxplot_stats(metric_values)})
+
+    shannon_all = [float(item["shannon"]) for item in sample_rows_source if item.get("shannon") is not None]
+    observed_all = [float(item["observed_features"]) for item in sample_rows_source if item.get("observed_features") is not None]
+    metric_pvalues = {
+        metric: _permutation_kruskal_pvalue([
+            values for _group, values in sorted(metric_group_values[metric].items(), key=lambda item: item[0])
+        ])
+        for metric in available_metrics
+    }
+    def _pairwise_rows(group_values: dict[str, list[float]]) -> list[list[str]]:
+        rows: list[list[str]] = []
+        ordered_groups = sorted(group_values)
+        for left_index, left_name in enumerate(ordered_groups):
+            for right_name in ordered_groups[left_index + 1:]:
+                p_value = _mann_whitney_pairwise_pvalue(group_values[left_name], group_values[right_name])
+                rows.append([
+                    left_name,
+                    right_name,
+                    str(len(group_values[left_name])),
+                    str(len(group_values[right_name])),
+                    f"{p_value:.4f}" if p_value is not None else "--",
+                    "显著" if p_value is not None and p_value < 0.05 else "不显著",
+                ])
+        rows.sort(key=lambda item: (_safe_float(item[4]) if item[4] != "--" else 99, item[0], item[1]))
+        return rows
+
+    pairwise_map = {
+        metric: {
+            "columns": ["分组 A", "分组 B", "A 组样本数", "B 组样本数", "P 值", "显著性"],
+            "rows": _pairwise_rows(metric_group_values[metric]),
+            "test": "Mann-Whitney U",
+        }
+        for metric in available_metrics
+    }
+    sample_rows = [
+        [
+            str(entry.get("sample") or "--"),
+            str(entry.get("group") or "未分组"),
+            f"{float(entry['shannon']):.3f}" if entry.get("shannon") is not None else "--",
+            f"{float(entry['observed_features']):.2f}" if entry.get("observed_features") is not None else "--",
+        ]
+        for entry in sample_rows_source[:preview_size]
+    ]
+    return {
+        "summary": {
+            "selected_depth": chosen_depth,
+            "sample_count": len(sample_rows_source),
+            "group_count": len(group_rows),
+            "shannon_mean": round(sum(shannon_all) / len(shannon_all), 4) if shannon_all else None,
+            "observed_features_mean": round(sum(observed_all) / len(observed_all), 2) if observed_all else None,
+            "shannon_pvalue": metric_pvalues.get("shannon"),
+            "observed_features_pvalue": metric_pvalues.get("observed_features"),
+            "available_metrics": available_metrics,
+        },
+        "sample_columns": ["样本 ID", "分组", "Shannon 指数", "观察到的特征数"],
+        "sample_rows": sample_rows,
+        "group_columns": ["分组", "样本数", "平均 Shannon 指数", "平均观察到的特征数"],
+        "group_rows": group_rows,
+        "boxplots": {
+            metric: {
+                "label": f"{_community_alpha_metric_label(metric)}箱线图",
+                "tab_label": _community_alpha_metric_label(metric),
+                "x_label": "分组",
+                "y_label": _community_alpha_metric_label(metric),
+                "groups": metric_group_boxes[metric],
+                "p_value": metric_pvalues.get(metric),
+                "significant": bool(metric_pvalues.get(metric) is not None and metric_pvalues.get(metric) < 0.05),
+                "test": "置换 Kruskal-Wallis",
+            }
+            for metric in available_metrics
+        },
+        "pairwise": pairwise_map,
+        "rarefaction": {
+            **(rarefaction_chart or {}),
+            "suggested_depth": chosen_depth,
+        },
+    }
+
+
+def _read_community_biomarker_summary(report_dir: Path, preview_size: int = 12) -> dict:
+    base_dir = report_dir / "microeco_biomarker"
+    lefse_raw = _read_tsv_rows(base_dir / "lefse_diff.tsv")
+    rf_raw = _read_tsv_rows(base_dir / "rf_importance.tsv")
+    assets: list[dict[str, str]] = []
+    for label, file_name in [
+        ("LEfSe 差异表", "lefse_diff.tsv"),
+        ("LEfSe 条形图 PNG", "lefse_barplot.png"),
+        ("LEfSe 条形图 PDF", "lefse_barplot.pdf"),
+        ("RF 特征重要性", "rf_importance.tsv"),
+        ("RF 特征重要性 PNG", "rf_importance.png"),
+        ("RF 特征重要性 PDF", "rf_importance.pdf"),
+        ("Biomarker 运行摘要", "run_summary.txt"),
+    ]:
+        asset_path = base_dir / file_name
+        if asset_path.exists():
+            assets.append({"label": label, "status": "ready", "path": str(asset_path)})
+    if not lefse_raw.get("rows") and not rf_raw.get("rows"):
+        return {"summary": {}, "columns": [], "rows": [], "assets": assets}
+
+    def _normalize_row_map(raw: dict) -> list[dict[str, str]]:
+        columns = [str(col or "").strip() for col in raw.get("columns", [])]
+        rows = raw.get("rows", [])
+        normalized_rows: list[dict[str, str]] = []
+        for row in rows:
+            normalized_rows.append({
+                columns[index] if index < len(columns) else f"col_{index + 1}": str(row[index] if index < len(row) else "").strip()
+                for index in range(len(columns))
+            })
+        return normalized_rows
+
+    lefse_rows = _normalize_row_map(lefse_raw)
+    rf_rows = _normalize_row_map(rf_raw)
+    lefse_preview: list[list[str]] = []
+    lefse_significant = 0
+    lefse_lda_max = None
+    for row in lefse_rows:
+        taxon = str(row.get("Taxa") or row.get("taxa") or row.get("Taxon") or "").strip()
+        group = str(row.get("Group") or row.get("Comparison") or row.get("group") or "").strip() or "--"
+        pvalue = _safe_float(row.get("P.unadj") or row.get("P.adj") or row.get("Pvalue") or row.get("P"))
+        lda_score = _safe_float(row.get("LDA") or row.get("LDA_score") or row.get("Score") or row.get("Importance"))
+        if pvalue is not None and pvalue <= 0.05:
+            lefse_significant += 1
+        if lda_score is not None:
+            lefse_lda_max = max(lefse_lda_max, lda_score) if lefse_lda_max is not None else lda_score
+        if taxon and len(lefse_preview) < preview_size:
+            lefse_preview.append([
+                "LEfSe",
+                taxon,
+                group,
+                f"{pvalue:.4f}" if pvalue is not None else "--",
+                f"{lda_score:.4f}" if lda_score is not None else "--",
+            ])
+    rf_preview: list[list[str]] = []
+    rf_top_importance = None
+    for row in rf_rows[:preview_size]:
+        taxon = str(row.get("Taxa") or row.get("taxa") or row.get("Feature") or "").strip()
+        importance = _safe_float(row.get("Importance") or row.get("importance"))
+        method = str(row.get("Method") or "RF").strip() or "RF"
+        if importance is not None:
+            rf_top_importance = max(rf_top_importance, importance) if rf_top_importance is not None else importance
+        if taxon:
+            rf_preview.append([
+                "RF",
+                taxon,
+                method,
+                "--",
+                f"{importance:.4f}" if importance is not None else "--",
+            ])
+    preview_rows = (lefse_preview[: max(1, preview_size // 2)] + rf_preview[: max(1, preview_size - max(1, preview_size // 2))])[:preview_size]
+    return {
+        "summary": {
+            "lefse_feature_count": len(lefse_rows),
+            "lefse_significant_count": lefse_significant,
+            "lefse_lda_max": round(lefse_lda_max, 4) if lefse_lda_max is not None else None,
+            "rf_feature_count": len(rf_rows),
+            "rf_top_importance": round(rf_top_importance, 4) if rf_top_importance is not None else None,
+            "preview_mode": "lefse_rf",
+        },
+        "columns": ["方法", "分类单元", "分组/模型", "P值", "效应值/重要性"],
+        "rows": preview_rows,
+        "lefse": {
+            "columns": ["方法", "分类单元", "分组", "P值", "LDA"],
+            "rows": lefse_preview[:preview_size],
+        },
+        "rf": {
+            "columns": ["方法", "分类单元", "模型", "P值", "重要性"],
+            "rows": rf_preview[:preview_size],
+        },
+        "assets": assets,
+    }
+
+
+def _read_community_network_summary(report_dir: Path, preview_size: int = 16, graph_node_limit: int = 120) -> dict:
+    base_dir = report_dir / "microeco_network"
+    empty_result = {
+        "summary": {},
+        "nodes": [],
+        "edges": [],
+        "node_preview": {"columns": [], "rows": []},
+        "edge_preview": {"columns": [], "rows": []},
+        "module_preview": {"columns": [], "rows": []},
+        "role_preview": {"columns": [], "rows": []},
+        "eigen_preview": {"columns": [], "rows": []},
+        "assets": [],
+    }
+    if not base_dir.is_dir():
+        return empty_result
+
+    summary_rows = _read_tsv_rows(base_dir / "network_summary.tsv")
+    node_raw = _read_tsv_rows(base_dir / "node_table.tsv")
+    edge_raw = _read_tsv_rows(base_dir / "edge_table.tsv")
+    module_raw = _read_tsv_rows(base_dir / "module_summary.tsv")
+    role_raw = _read_tsv_rows(base_dir / "role_summary.tsv")
+    eigen_raw = _read_tsv_rows(base_dir / "eigen_summary.tsv")
+
+    def _rows_to_maps(raw: dict) -> list[dict[str, str]]:
+        columns = [str(col or "").strip() for col in raw.get("columns", [])]
+        rows = raw.get("rows", [])
+        normalized_rows: list[dict[str, str]] = []
+        for row in rows:
+            normalized_rows.append({
+                columns[index] if index < len(columns) else f"col_{index + 1}": str(row[index] if index < len(row) else "").strip()
+                for index in range(len(columns))
+            })
+        return normalized_rows
+
+    summary_map = {
+        str(row[0] if len(row) > 0 else "").strip(): str(row[1] if len(row) > 1 else "").strip()
+        for row in summary_rows.get("rows", [])
+        if row
+    }
+    node_rows = _rows_to_maps(node_raw)
+    edge_rows = _rows_to_maps(edge_raw)
+    module_rows = _rows_to_maps(module_raw)
+    role_rows = _rows_to_maps(role_raw)
+    eigen_rows = _rows_to_maps(eigen_raw)
+
+    node_rows_sorted = sorted(
+        node_rows,
+        key=lambda item: (_safe_float(item.get("degree")) or 0, _safe_float(item.get("Abundance")) or 0),
+        reverse=True,
+    )
+    graph_node_rows = node_rows_sorted[:graph_node_limit]
+    graph_node_names = {str(item.get("name") or "").strip() for item in graph_node_rows if str(item.get("name") or "").strip()}
+
+    nodes = [
+        {
+            "id": str(item.get("name") or "").strip(),
+            "label": str(item.get("Genus") or item.get("name") or "").strip() or str(item.get("name") or "--").strip(),
+            "module": str(item.get("module") or "未分模块").strip() or "未分模块",
+            "degree": _safe_float(item.get("degree")) or 0.0,
+            "abundance": _safe_float(item.get("Abundance")) or 0.0,
+            "phylum": str(item.get("Phylum") or "未注释").strip() or "未注释",
+            "genus": str(item.get("Genus") or "未注释").strip() or "未注释",
+            "role": str(item.get("taxa_roles") or "未分类").strip() or "未分类",
+            "z": _safe_float(item.get("z")),
+            "p": _safe_float(item.get("p")),
+        }
+        for item in graph_node_rows
+        if str(item.get("name") or "").strip()
+    ]
+    edges = [
+        {
+            "source": str(item.get("node1") or "").strip(),
+            "target": str(item.get("node2") or "").strip(),
+            "label": str(item.get("label") or "").strip() or "+",
+            "weight": _safe_float(item.get("weight")) or 0.0,
+        }
+        for item in edge_rows
+        if str(item.get("node1") or "").strip() in graph_node_names and str(item.get("node2") or "").strip() in graph_node_names
+    ]
+
+    assets: list[dict[str, str]] = []
+    for label, file_name in [
+        ("网络摘要", "network_summary.tsv"),
+        ("节点属性表", "node_table.tsv"),
+        ("边属性表", "edge_table.tsv"),
+        ("模块统计", "module_summary.tsv"),
+        ("节点角色统计", "role_summary.tsv"),
+        ("模块特征向量", "eigen_summary.tsv"),
+        ("运行摘要", "run_summary.txt"),
+        ("门水平正相关汇总", "phylum_links_positive.tsv"),
+        ("门水平负相关汇总", "phylum_links_negative.tsv"),
+    ]:
+        asset_path = base_dir / file_name
+        if asset_path.exists():
+            assets.append({"label": label, "status": "ready", "path": str(asset_path)})
+
+    positive_edge_count = _safe_int(summary_map.get("positive_edge_count"))
+    negative_edge_count = _safe_int(summary_map.get("negative_edge_count"))
+    module_count = _safe_int(summary_map.get("module_count"))
+    node_count = _safe_int(summary_map.get("node_count"))
+    edge_count = _safe_int(summary_map.get("edge_count"))
+    avg_degree = _safe_float(summary_map.get("avg_degree"))
+    density = _safe_float(summary_map.get("density"))
+    modularity = _safe_float(summary_map.get("modularity"))
+    mean_abs_weight = _safe_float(summary_map.get("mean_abs_weight"))
+
+    return {
+        "summary": {
+            "status": summary_map.get("status") or "",
+            "taxa_level": summary_map.get("taxa_level") or "",
+            "cor_method": summary_map.get("cor_method") or "",
+            "cor_cut": _safe_float(summary_map.get("cor_cut")),
+            "p_thres": _safe_float(summary_map.get("p_thres")),
+            "filter_thres": _safe_float(summary_map.get("filter_thres")),
+            "node_count": node_count,
+            "edge_count": edge_count,
+            "positive_edge_count": positive_edge_count,
+            "negative_edge_count": negative_edge_count,
+            "module_count": module_count,
+            "avg_degree": round(avg_degree, 4) if avg_degree is not None else None,
+            "density": round(density, 6) if density is not None else None,
+            "modularity": round(modularity, 6) if modularity is not None else None,
+            "mean_abs_weight": round(mean_abs_weight, 4) if mean_abs_weight is not None else None,
+            "preview_nodes": len(nodes),
+            "preview_edges": len(edges),
+        },
+        "nodes": nodes,
+        "edges": edges,
+        "node_preview": {
+            "columns": ["节点", "模块", "Degree", "丰度%", "门", "属", "角色"],
+            "rows": [
+                [
+                    str(item.get("name") or "--"),
+                    str(item.get("module") or "--"),
+                    str(item.get("degree") or "--"),
+                    str(item.get("Abundance") or "--"),
+                    str(item.get("Phylum") or "--"),
+                    str(item.get("Genus") or "--"),
+                    str(item.get("taxa_roles") or "--"),
+                ]
+                for item in node_rows_sorted[:preview_size]
+            ],
+        },
+        "edge_preview": {
+            "columns": ["节点 1", "节点 2", "方向", "权重"],
+            "rows": [
+                [
+                    str(item.get("node1") or "--"),
+                    str(item.get("node2") or "--"),
+                    str(item.get("label") or "--"),
+                    str(item.get("weight") or "--"),
+                ]
+                for item in sorted(edge_rows, key=lambda row: abs(_safe_float(row.get("weight")) or 0), reverse=True)[:preview_size]
+            ],
+        },
+        "module_preview": {
+            "columns": ["模块", "节点数", "平均 Degree", "最高 Degree", "总丰度%"],
+            "rows": [
+                [
+                    str(item.get("module") or "--"),
+                    str(item.get("node_count") or "--"),
+                    str(item.get("mean_degree") or "--"),
+                    str(item.get("max_degree") or "--"),
+                    str(item.get("total_abundance") or "--"),
+                ]
+                for item in module_rows[:preview_size]
+            ],
+        },
+        "role_preview": {
+            "columns": ["节点角色", "节点数", "平均 Degree"],
+            "rows": [
+                [
+                    str(item.get("taxa_role") or "--"),
+                    str(item.get("node_count") or "--"),
+                    str(item.get("mean_degree") or "--"),
+                ]
+                for item in role_rows[:preview_size]
+            ],
+        },
+        "eigen_preview": {
+            "columns": ["模块", "解释度/特征值"],
+            "rows": [
+                [
+                    str(item.get("module") or item.get("row.names") or "--"),
+                    str(item.get("variance_explained") or item.get("PC1") or item.get("value") or "--"),
+                ]
+                for item in eigen_rows[:preview_size]
+            ],
+        },
+        "assets": assets,
+    }
+
+
+def _read_community_beta_summary(report_dir: Path, group_column: str = "SampleType", preview_size: int = 12) -> dict:
+    base_dir = report_dir / "microeco_beta"
+    empty_result = {
+        "summary": {},
+        "assets": [],
+        "pcoa_points": [],
+        "pcoa_preview": {"columns": [], "rows": []},
+        "nmds_points": [],
+        "nmds_preview": {"columns": [], "rows": []},
+        "distance_matrix": {"samples": [], "groups": {}, "rows": [], "min": None, "max": None},
+        "permanova": {"columns": [], "rows": []},
+        "anosim": {"columns": [], "rows": []},
+        "group_distances": {"columns": [], "rows": []},
+        "group_counts": {"columns": [], "rows": []},
+        "dispersion": {"summary": {}, "lines": []},
+    }
+    if not base_dir.is_dir():
+        return empty_result
+
+    def _read_named_rows(path: Path, rename_map: dict[str, str] | None = None, limit: int = preview_size) -> dict:
+        raw = _read_tsv_rows(path)
+        columns = [str(col or "").strip() for col in raw.get("columns", [])]
+        rows = raw.get("rows", [])
+        if not columns:
+            return {"columns": [], "rows": []}
+        if columns and not columns[0]:
+            columns[0] = "index"
+        mapped_columns = [rename_map.get(column, column) if rename_map else column for column in columns]
+        trimmed_rows = []
+        for row in rows[:limit]:
+            trimmed_rows.append([str(row[index] if index < len(row) else "").strip() for index in range(len(columns))])
+        return {"columns": mapped_columns, "rows": trimmed_rows}
+
+    pcoa_raw = _read_tsv_rows(base_dir / "pcoa_scores.tsv")
+    pcoa_columns = [str(col or "").strip() for col in pcoa_raw.get("columns", [])]
+    pcoa_rows = pcoa_raw.get("rows", [])
+    pcoa_preview = {"columns": [], "rows": []}
+    pcoa_points: list[dict[str, object]] = []
+    sample_count = 0
+    group_values: set[str] = set()
+    if pcoa_columns and pcoa_rows:
+        if not pcoa_columns[0]:
+            pcoa_columns[0] = "SampleID"
+        column_lookup = {column: index for index, column in enumerate(pcoa_columns)}
+        pco1_index = column_lookup.get("PCo1")
+        pco2_index = column_lookup.get("PCo2")
+        sample_index = column_lookup.get("SampleID", 0)
+        group_index = column_lookup.get(group_column)
+        if pco1_index is not None and pco2_index is not None:
+            preview_rows: list[list[str]] = []
+            for row in pcoa_rows:
+                sample_name = str(row[sample_index] if sample_index < len(row) else "").strip()
+                group_name = str(row[group_index] if group_index is not None and group_index < len(row) else "未分组").strip() or "未分组"
+                if sample_name:
+                    sample_count += 1
+                if group_name:
+                    group_values.add(group_name)
+                pco1_value = _safe_float(row[pco1_index] if pco1_index < len(row) else None)
+                pco2_value = _safe_float(row[pco2_index] if pco2_index < len(row) else None)
+                if pco1_value is not None and pco2_value is not None:
+                    pcoa_points.append({
+                        "sample": sample_name or "--",
+                        "group": group_name,
+                        "x": round(pco1_value, 6),
+                        "y": round(pco2_value, 6),
+                    })
+                preview_rows.append([
+                    sample_name or "--",
+                    group_name,
+                    str(row[pco1_index] if pco1_index < len(row) else "").strip(),
+                    str(row[pco2_index] if pco2_index < len(row) else "").strip(),
+                ])
+            pcoa_preview = {"columns": ["样本 ID", "分组", "PCo1", "PCo2"], "rows": preview_rows[:preview_size]}
+
+    nmds_raw = _read_tsv_rows(base_dir / "nmds_scores.tsv")
+    nmds_columns = [str(col or "").strip() for col in nmds_raw.get("columns", [])]
+    nmds_rows = nmds_raw.get("rows", [])
+    nmds_preview = {"columns": [], "rows": []}
+    nmds_points: list[dict[str, object]] = []
+    nmds_stress = None
+    if nmds_columns and nmds_rows:
+        if not nmds_columns[0]:
+            nmds_columns[0] = "SampleID"
+        column_lookup = {column: index for index, column in enumerate(nmds_columns)}
+        axis1_index = column_lookup.get("MDS1", column_lookup.get("NMDS1"))
+        axis2_index = column_lookup.get("MDS2", column_lookup.get("NMDS2"))
+        sample_index = column_lookup.get("SampleID", 0)
+        group_index = column_lookup.get(group_column)
+        if "Stress" in nmds_columns:
+            stress_index = column_lookup.get("Stress")
+            if stress_index is not None and nmds_rows:
+                nmds_stress = _safe_float(nmds_rows[0][stress_index] if stress_index < len(nmds_rows[0]) else None)
+        if axis1_index is not None and axis2_index is not None:
+            preview_rows: list[list[str]] = []
+            for row in nmds_rows:
+                sample_name = str(row[sample_index] if sample_index < len(row) else "").strip()
+                group_name = str(row[group_index] if group_index is not None and group_index < len(row) else "未分组").strip() or "未分组"
+                axis1_value = _safe_float(row[axis1_index] if axis1_index < len(row) else None)
+                axis2_value = _safe_float(row[axis2_index] if axis2_index < len(row) else None)
+                if axis1_value is not None and axis2_value is not None:
+                    nmds_points.append({
+                        "sample": sample_name or "--",
+                        "group": group_name,
+                        "x": round(axis1_value, 6),
+                        "y": round(axis2_value, 6),
+                    })
+                preview_rows.append([
+                    sample_name or "--",
+                    group_name,
+                    str(row[axis1_index] if axis1_index < len(row) else "").strip(),
+                    str(row[axis2_index] if axis2_index < len(row) else "").strip(),
+                ])
+            nmds_preview = {"columns": ["样本 ID", "分组", "NMDS1", "NMDS2"], "rows": preview_rows[:preview_size]}
+    if nmds_stress is None:
+        run_summary_path = base_dir / "run_summary.txt"
+        if run_summary_path.is_file():
+            try:
+                for line in run_summary_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if not str(line).startswith("nmds_stress:"):
+                        continue
+                    nmds_stress = _safe_float(str(line).split(":", 1)[1].strip())
+                    break
+            except OSError:
+                pass
+
+    permanova = _read_named_rows(
+        base_dir / "permanova.tsv",
+        {
+            "index": "来源",
+            "Df": "自由度",
+            "SumOfSqs": "平方和",
+            "R2": "R2",
+            "F": "F值",
+            "Pr(>F)": "P值",
+            "Significance": "显著性",
+        },
+    )
+    anosim = _read_named_rows(
+        base_dir / "anosim.tsv",
+        {
+            "index": "序号",
+            "Test": "检验",
+            "permutations": "置换次数",
+            "statistic.R": "R统计量",
+            "p.value": "P值",
+            "Significance": "显著性",
+        },
+    )
+    group_distances = _read_named_rows(
+        base_dir / "within_group_distance_stats.tsv",
+        {
+            "index": "序号",
+            "Comparison": "比较",
+            "Measure": "指标",
+            "Method": "方法",
+            "Group": "分组",
+            "P.unadj": "未校正P值",
+            "P.adj": "校正P值",
+            "Significance": "显著性",
+        },
+    )
+    group_counts = _read_named_rows(
+        base_dir / "group_sample_counts.tsv",
+        {
+            group_column: "分组",
+            "sample_count": "样本数",
+        },
+        limit=preview_size * 2,
+    )
+    distance_matrix = {"samples": [], "groups": {}, "rows": [], "min": None, "max": None}
+    within_group_raw = _read_tsv_rows(base_dir / "within_group_distances.tsv")
+    within_group_columns = [str(col or "").strip() for col in within_group_raw.get("columns", [])]
+    within_group_rows = within_group_raw.get("rows", [])
+    if within_group_columns and within_group_rows:
+        if within_group_columns and not within_group_columns[0]:
+            within_group_columns[0] = "index"
+        column_lookup = {column: index for index, column in enumerate(within_group_columns)}
+        value_index = column_lookup.get("Value")
+        group_index = column_lookup.get(group_column)
+        grouped_values: dict[str, list[float]] = {}
+        if value_index is not None and group_index is not None:
+            for row in within_group_rows:
+                group_name = str(row[group_index] if group_index < len(row) else "").strip() or "未分组"
+                value = _safe_float(row[value_index] if value_index < len(row) else None)
+                if value is None:
+                    continue
+                grouped_values.setdefault(group_name, []).append(float(value))
+    matrix_raw = _read_tsv_rows(base_dir / "bray_distance_matrix.tsv")
+    matrix_columns = [str(col or "").strip() for col in matrix_raw.get("columns", [])]
+    matrix_rows = matrix_raw.get("rows", [])
+    if matrix_columns and matrix_rows:
+        if matrix_columns and not matrix_columns[0]:
+            matrix_columns = matrix_columns[1:]
+        samples = [str(value or "").strip() for value in matrix_columns if str(value or "").strip()]
+        pcoa_group_lookup = {str(point.get("sample") or ""): str(point.get("group") or "未分组") for point in pcoa_points}
+        matrix_values: list[list[float]] = []
+        valid_values: list[float] = []
+        for row in matrix_rows:
+            numeric_row: list[float] = []
+            for index in range(len(samples)):
+                source_index = index + 1
+                value = _safe_float(row[source_index] if source_index < len(row) else None)
+                numeric = float(value) if value is not None else 0.0
+                numeric_row.append(round(numeric, 6))
+                valid_values.append(numeric)
+            matrix_values.append(numeric_row)
+        distance_matrix = {
+            "samples": samples,
+            "groups": {sample: pcoa_group_lookup.get(sample, "未分组") for sample in samples},
+            "rows": matrix_values,
+            "min": round(min(valid_values), 6) if valid_values else None,
+            "max": round(max(valid_values), 6) if valid_values else None,
+        }
+
+    permanova_r2 = None
+    permanova_p = None
+    if permanova["rows"]:
+        first_row = permanova["rows"][0]
+        if "R2" in permanova["columns"]:
+            permanova_r2 = _safe_float(first_row[permanova["columns"].index("R2")])
+        if "P值" in permanova["columns"]:
+            permanova_p = _safe_float(first_row[permanova["columns"].index("P值")])
+
+    anosim_r = None
+    anosim_p = None
+    if anosim["rows"]:
+        first_row = anosim["rows"][0]
+        if "R统计量" in anosim["columns"]:
+            anosim_r = _safe_float(first_row[anosim["columns"].index("R统计量")])
+        if "P值" in anosim["columns"]:
+            anosim_p = _safe_float(first_row[anosim["columns"].index("P值")])
+
+    betadisper_summary: dict[str, object] = {}
+    betadisper_lines: list[str] = []
+    betadisper_path = base_dir / "betadisper.txt"
+    if betadisper_path.is_file():
+        try:
+            raw_text = betadisper_path.read_text(encoding="utf-8", errors="ignore")
+            all_lines = [str(line or "").rstrip() for line in raw_text.splitlines()]
+            betadisper_lines = [line for line in all_lines if line.strip()][:preview_size]
+            for line in all_lines:
+                stripped = line.strip()
+                if not stripped.startswith("Groups"):
+                    continue
+                parts = re.split(r"\s+", stripped)
+                if len(parts) >= 7:
+                    betadisper_summary = {
+                        "f_value": _safe_float(parts[4]),
+                        "p_value": _safe_float(parts[6]),
+                        "significance": parts[7] if len(parts) >= 8 else "",
+                    }
+                    break
+        except OSError:
+            betadisper_lines = []
+
+    assets: list[dict[str, str]] = []
+    for label, file_name in [
+        ("PCoA 排序图", "pcoa_plot.png"),
+        ("NMDS 排序图", "nmds_plot.png"),
+        ("组内距离分布图", "within_group_distance_plot.png"),
+        ("PCoA 排序图 PDF", "pcoa_plot.pdf"),
+        ("NMDS 排序图 PDF", "nmds_plot.pdf"),
+        ("组内距离分布图 PDF", "within_group_distance_plot.pdf"),
+        ("Bray-Curtis 距离矩阵", "bray_distance_matrix.tsv"),
+        ("PCoA 坐标表", "pcoa_scores.tsv"),
+        ("NMDS 坐标表", "nmds_scores.tsv"),
+        ("PERMANOVA 结果", "permanova.tsv"),
+        ("ANOSIM 结果", "anosim.tsv"),
+        ("Betadisper 结果", "betadisper.txt"),
+        ("组内距离统计", "within_group_distance_stats.tsv"),
+    ]:
+        asset_path = base_dir / file_name
+        if asset_path.exists():
+            assets.append({"label": label, "status": "ready", "path": str(asset_path)})
+
+    return {
+        "summary": {
+            "sample_count": sample_count or None,
+            "group_count": len(group_values) or None,
+            "measure": "bray",
+            "permanova_r2": round(permanova_r2, 4) if permanova_r2 is not None else None,
+            "permanova_p": permanova_p,
+            "anosim_r": round(anosim_r, 4) if anosim_r is not None else None,
+            "anosim_p": anosim_p,
+            "nmds_stress": round(nmds_stress, 4) if nmds_stress is not None else None,
+            "betadisper_f": betadisper_summary.get("f_value"),
+            "betadisper_p": betadisper_summary.get("p_value"),
+            "betadisper_significance": betadisper_summary.get("significance") or "",
+        },
+        "assets": assets,
+        "pcoa_points": pcoa_points,
+        "pcoa_preview": pcoa_preview,
+        "nmds_points": nmds_points,
+        "nmds_preview": nmds_preview,
+        "distance_matrix": distance_matrix,
+        "permanova": permanova,
+        "anosim": anosim,
+        "group_distances": group_distances,
+        "group_counts": group_counts,
+        "dispersion": {"summary": betadisper_summary, "lines": betadisper_lines},
+    }
+
+
+def _build_community_report_payload(*, task: dict, report_dir: Path, report_source: dict) -> dict:
+    summary = _read_community_summary(report_dir / "community_summary.json")
+    workflow_mode = str(summary.get("workflow_mode") or "abundance").strip()
+    metadata_summary = summary.get("metadata_summary") or {}
+    taxonomy_summary = summary.get("taxonomy_summary") or {}
+    demux_summary = summary.get("demux_summary") or {}
+    demux_preview = _read_community_demux_preview(report_dir)
+    denoise_preview = _read_community_denoise_preview(report_dir)
+    taxonomy_preview = _read_community_taxonomy_preview(report_dir)
+    differential_summary = _read_community_biomarker_summary(report_dir)
+    input_summary = summary.get("input_summary") or {}
+    parameters = summary.get("parameters") or {}
+    modules = summary.get("modules") if isinstance(summary.get("modules"), list) else []
+    commands = summary.get("commands") if isinstance(summary.get("commands"), list) else []
+    outputs = summary.get("outputs") if isinstance(summary.get("outputs"), list) else []
+    task_params = task.get("params") or {}
+    metadata_path_text = str(task_params.get("metadata") or "").strip()
+    metadata_lookup = _read_metadata_group_lookup(
+        Path(metadata_path_text),
+        str(metadata_summary.get("sample_id_column") or "sample-id"),
+        str(metadata_summary.get("group_column") or "SampleType"),
+    ) if metadata_path_text else {}
+    taxa_abundance = _read_community_taxa_abundance_summary(report_dir, metadata_groups=metadata_lookup)
+    alpha_summary = _read_community_alpha_rarefaction_summary(
+        report_dir,
+        metadata_groups=metadata_lookup,
+        preferred_depth=int(_safe_float(demux_summary.get("suggested_sampling_depth")) or 0) or None,
+    )
+    beta_summary = _read_community_beta_summary(
+        report_dir,
+        group_column=str(metadata_summary.get("group_column") or task_params.get("group_column") or "SampleType"),
+    )
+    network_summary = _read_community_network_summary(report_dir)
+    known_outputs = [
+        ("demux.qzv", report_dir / "demux.qzv"),
+        ("denoising-stats-dada2.qzv", report_dir / "denoising-stats-dada2.qzv"),
+        ("taxonomy.qzv", report_dir / "taxonomy.qzv"),
+        ("taxa-barplot.qzv", report_dir / "taxa-barplot.qzv"),
+        ("alpha-rarefaction.qzv", report_dir / "alpha-rarefaction.qzv"),
+        ("ancombc2-sampletype.qzv", report_dir / "ancombc2-sampletype.qzv"),
+        ("taxonomy.tsv", report_dir / "taxonomy_export" / "taxonomy.tsv"),
+        ("ancombc2_export", report_dir / "ancombc2_export"),
+        ("microeco_beta", report_dir / "microeco_beta"),
+        ("microeco_biomarker", report_dir / "microeco_biomarker"),
+        ("microeco_network", report_dir / "microeco_network"),
+        ("lefse_diff.tsv", report_dir / "microeco_biomarker" / "lefse_diff.tsv"),
+        ("lefse_barplot.png", report_dir / "microeco_biomarker" / "lefse_barplot.png"),
+        ("lefse_barplot.pdf", report_dir / "microeco_biomarker" / "lefse_barplot.pdf"),
+        ("rf_importance.tsv", report_dir / "microeco_biomarker" / "rf_importance.tsv"),
+        ("rf_importance.png", report_dir / "microeco_biomarker" / "rf_importance.png"),
+        ("rf_importance.pdf", report_dir / "microeco_biomarker" / "rf_importance.pdf"),
+        ("network_summary.tsv", report_dir / "microeco_network" / "network_summary.tsv"),
+        ("node_table.tsv", report_dir / "microeco_network" / "node_table.tsv"),
+        ("edge_table.tsv", report_dir / "microeco_network" / "edge_table.tsv"),
+        ("module_summary.tsv", report_dir / "microeco_network" / "module_summary.tsv"),
+    ]
+    for metric_qzv in sorted(report_dir.glob("alpha-*.qzv")):
+        known_outputs.append((metric_qzv.name, metric_qzv))
+    for metric_export in sorted(report_dir.glob("alpha-*_export")):
+        known_outputs.append((metric_export.name, metric_export))
+    output_map: dict[str, dict] = {}
+    for item in outputs:
+        if not isinstance(item, dict):
+            continue
+        path_value = str(item.get("path") or "").strip()
+        label_value = str(item.get("label") or "").strip() or (Path(path_value).name if path_value else "")
+        status_value = str(item.get("status") or "").strip().lower()
+        candidate_path = Path(path_value) if path_value else None
+        if candidate_path and candidate_path.exists():
+            status_value = "ready"
+        elif status_value in {"planned", "needs-demux-artifact", ""}:
+            status_value = "missing"
+        normalized = {
+            "label": label_value or "--",
+            "status": status_value or "missing",
+            "path": path_value,
+        }
+        output_map[normalized["label"]] = normalized
+    for label, output_path in known_outputs:
+        output_map[label] = {
+            "label": label,
+            "status": "ready" if output_path.exists() else "missing",
+            "path": str(output_path),
+        }
+    outputs = list(output_map.values())
+    ready_outputs = sum(1 for item in outputs if str(item.get("status") or "").strip().lower() == "ready")
+    return {
+        "task": {
+            "id": task.get("id"),
+            "name": task.get("name"),
+            "status": task.get("status"),
+            "owner": task.get("owner"),
+            "group": task.get("owner_group", ""),
+            "created_at": task.get("created_at"),
+            "started_at": task.get("started_at"),
+            "finished_at": task.get("finished_at"),
+            "input_path": task_params.get("input_path", ""),
+            "output_dir": task_params.get("output_dir", ""),
+            "asm_type": "",
+            "method": "community",
+            "analysis_target": "bacteria",
+            "species": "",
+            "sample_name": "",
+            "sample_display_name": task.get("name", ""),
+            "samples": [],
+            "report_mode": "cohort",
+            "report_kind": "community_meta_ecology",
+            "workstation_key": "community",
+        },
+        "overview_metrics": [
+            {"key": "community_samples", "label": "纳入样本", "type": "single", "display": str(metadata_summary.get("sample_count") or "--")},
+            {"key": "community_metadata_columns", "label": "元数据字段", "type": "single", "display": str(len(metadata_summary.get("metadata_columns") or []) or "--")},
+            {"key": "community_taxa", "label": "Taxonomy 条目", "type": "single", "display": str(taxonomy_summary.get("feature_count") or "--")},
+            {"key": "community_modules", "label": "分析模块", "type": "single", "display": str(len(modules) or "--")},
+            {"key": "community_outputs", "label": "就绪输出", "type": "single", "display": str(ready_outputs or "--")},
+        ],
+        "sections": {
+            "community": {
+                "summary": {
+                    "sample_count": metadata_summary.get("sample_count"),
+                    "group_column": metadata_summary.get("group_column", ""),
+                    "sample_id_column": metadata_summary.get("sample_id_column", ""),
+                    "input_type": input_summary.get("path_type", ""),
+                    "input_entry_count": input_summary.get("entry_count"),
+                    "workflow_mode": workflow_mode,
+                    "taxonomy_feature_count": taxonomy_summary.get("feature_count"),
+                    "taxonomy_feature_column": taxonomy_summary.get("feature_column", ""),
+                    "demux_sample_count": demux_summary.get("sample_count"),
+                    "demux_trunc_len_f": demux_summary.get("suggested_trunc_len_f"),
+                    "demux_trunc_len_r": demux_summary.get("suggested_trunc_len_r"),
+                    "demux_sampling_depth": demux_summary.get("suggested_sampling_depth"),
+                    "taxonomy_level": parameters.get("taxonomy_level", ""),
+                    "normalization": parameters.get("normalization", ""),
+                },
+                "metadata": {
+                    "columns": ["字段", "值"],
+                    "rows": [
+                        ["流程模式", "QIIME2 amplicon" if workflow_mode == "amplicon" else "丰度表模式"],
+                        ["样本 ID 列", str(metadata_summary.get("sample_id_column") or "--")],
+                        ["分组列", str(metadata_summary.get("group_column") or "--")],
+                        ["样本数", str(metadata_summary.get("sample_count") or "--")],
+                        ["元数据字段", ", ".join(metadata_summary.get("metadata_columns") or []) or "--"],
+                        ["输入路径类型", str(input_summary.get("path_type") or "--")],
+                        ["输入条目数", str(input_summary.get("entry_count") or "--")],
+                        ["taxonomy 条目数", str(taxonomy_summary.get("feature_count") or "--")],
+                        ["taxonomy 主键列", str(taxonomy_summary.get("feature_column") or "--")],
+                        ["demux 样本数", str(demux_summary.get("sample_count") or "--")],
+                        ["建议 trunc-len-f / r", f"{demux_summary.get('suggested_trunc_len_f') or '--'} / {demux_summary.get('suggested_trunc_len_r') or '--'}"],
+                        ["建议 rarefaction depth", str(demux_summary.get("suggested_sampling_depth") or "--")],
+                        ["标准化方式", str(parameters.get("normalization") or "--")],
+                        ["统计层级", str(parameters.get("taxonomy_level") or "--")],
+                    ],
+                },
+                "demux_preview": {
+                    "summary": demux_preview.get("summary") or {},
+                    "columns": demux_preview.get("columns") or [],
+                    "rows": demux_preview.get("rows") or [],
+                },
+                "denoise_preview": {
+                    "summary": denoise_preview.get("summary") or {},
+                    "columns": denoise_preview.get("columns") or [],
+                    "rows": denoise_preview.get("rows") or [],
+                },
+                "modules": {
+                    "columns": ["模块", "状态", "运行环境", "说明"],
+                    "rows": [
+                        [
+                            str(item.get("label") or "--"),
+                            str(item.get("status") or "--"),
+                            str(item.get("runtime") or "--"),
+                            str(item.get("description") or "--"),
+                        ]
+                        for item in modules
+                    ],
+                },
+                "commands": {
+                    "columns": ["模块", "运行环境", "命令"],
+                    "rows": [
+                        [
+                            str(item.get("module") or "--"),
+                            str(item.get("runtime") or "--"),
+                            str(item.get("command") or "--"),
+                        ]
+                        for item in commands
+                    ],
+                },
+                "outputs": {
+                    "columns": ["输出项", "状态", "路径"],
+                    "rows": [
+                        [
+                            str(item.get("label") or "--"),
+                            str(item.get("status") or "--"),
+                            str(item.get("path") or "--"),
+                        ]
+                        for item in outputs
+                    ],
+                },
+                "taxonomy_preview": {
+                    "summary": taxonomy_preview.get("summary") or {},
+                    "columns": taxonomy_preview.get("columns") or [],
+                    "rows": taxonomy_preview.get("rows") or [],
+                },
+                "taxa_abundance": {
+                    "summary": taxa_abundance.get("summary") or {},
+                    "columns": taxa_abundance.get("columns") or [],
+                    "rows": taxa_abundance.get("rows") or [],
+                    "levels": taxa_abundance.get("levels") or {},
+                },
+                "differential": {
+                    "summary": differential_summary.get("summary") or {},
+                    "columns": differential_summary.get("columns") or [],
+                    "rows": differential_summary.get("rows") or [],
+                    "lefse": differential_summary.get("lefse") or {"columns": [], "rows": []},
+                    "rf": differential_summary.get("rf") or {"columns": [], "rows": []},
+                    "assets": differential_summary.get("assets") or [],
+                },
+                "alpha": {
+                    "summary": alpha_summary.get("summary") or {},
+                    "sample_columns": alpha_summary.get("sample_columns") or [],
+                    "sample_rows": alpha_summary.get("sample_rows") or [],
+                    "group_columns": alpha_summary.get("group_columns") or [],
+                    "group_rows": alpha_summary.get("group_rows") or [],
+                    "boxplots": alpha_summary.get("boxplots") or {},
+                    "pairwise": alpha_summary.get("pairwise") or {},
+                    "rarefaction": alpha_summary.get("rarefaction") or {},
+                },
+                "beta": {
+                    "summary": beta_summary.get("summary") or {},
+                    "assets": beta_summary.get("assets") or [],
+                    "pcoa_points": beta_summary.get("pcoa_points") or [],
+                    "pcoa_preview": beta_summary.get("pcoa_preview") or {"columns": [], "rows": []},
+                    "nmds_points": beta_summary.get("nmds_points") or [],
+                    "nmds_preview": beta_summary.get("nmds_preview") or {"columns": [], "rows": []},
+                    "distance_matrix": beta_summary.get("distance_matrix") or {"samples": [], "groups": {}, "rows": [], "min": None, "max": None},
+                    "permanova": beta_summary.get("permanova") or {"columns": [], "rows": []},
+                    "anosim": beta_summary.get("anosim") or {"columns": [], "rows": []},
+                    "group_distances": beta_summary.get("group_distances") or {"columns": [], "rows": []},
+                    "group_counts": beta_summary.get("group_counts") or {"columns": [], "rows": []},
+                    "dispersion": beta_summary.get("dispersion") or {"summary": {}, "lines": []},
+                },
+                "network": {
+                    "summary": network_summary.get("summary") or {},
+                    "nodes": network_summary.get("nodes") or [],
+                    "edges": network_summary.get("edges") or [],
+                    "node_preview": network_summary.get("node_preview") or {"columns": [], "rows": []},
+                    "edge_preview": network_summary.get("edge_preview") or {"columns": [], "rows": []},
+                    "module_preview": network_summary.get("module_preview") or {"columns": [], "rows": []},
+                    "role_preview": network_summary.get("role_preview") or {"columns": [], "rows": []},
+                    "eigen_preview": network_summary.get("eigen_preview") or {"columns": [], "rows": []},
+                    "assets": network_summary.get("assets") or [],
+                },
+                "notes": summary.get("notes") if isinstance(summary.get("notes"), list) else [],
+                "report_source": {
+                    key: str(value) if isinstance(value, Path) else value
+                    for key, value in report_source.items()
+                },
+            },
+        },
+    }
+
+
+def _is_pathosource_report_task(task: dict) -> bool:
+    params = task.get("params") or {}
+    workstation_key = _resolve_workstation_module(params.get("workstation_key")).get("key", "")
+    pipeline_script = str(task.get("pipeline_script") or "").strip()
+    return workstation_key == "pathosource" or pipeline_script == "PathoSource.py"
+
+
+def _read_pathosource_distance_bins(path: Path) -> dict:
+    raw = _read_tsv_rows(path)
+    columns = raw.get("columns", [])
+    rows = raw.get("rows", [])
+    if not columns or not rows:
+        return {"status": "empty", "columns": [], "rows": [], "bars": [], "total_pairs": 0}
+    values = []
+    for value in rows[0]:
+        numeric = _safe_int(value)
+        values.append(0 if numeric is None else numeric)
+    total_pairs = sum(values)
+    max_value = max(values) if values else 0
+    bars = []
+    for label, value in zip(columns, values):
+        bars.append({
+            "label": label,
+            "value": value,
+            "ratio": round((value / max_value) * 100, 2) if max_value else 0,
+            "share": round((value / total_pairs) * 100, 2) if total_pairs else 0,
+        })
+    return {
+        "status": "ready",
+        "columns": columns,
+        "rows": [values],
+        "bars": bars,
+        "total_pairs": total_pairs,
+    }
+
+
+def _read_pathosource_snp_matrix(path: Path, preview_size: int = 18) -> dict:
+    if not path.is_file():
+        return {
+            "status": "empty",
+            "summary": {},
+            "preview": {"columns": [], "rows": []},
+        }
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.reader(handle, delimiter="\t")
+            header = next(reader, [])
+            if len(header) < 2:
+                return {"status": "empty", "summary": {}, "preview": {"columns": [], "rows": []}}
+            sample_names = header[1:]
+            preview_columns = ["样本"] + sample_names[:preview_size]
+            preview_rows: list[list[object]] = []
+            values: list[int] = []
+            for row_index, row in enumerate(reader):
+                if not row:
+                    continue
+                sample_name = row[0]
+                numeric_cells = row[1:]
+                if row_index < preview_size:
+                    preview_rows.append([sample_name] + numeric_cells[:preview_size])
+                for column_index, cell in enumerate(numeric_cells):
+                    value = _safe_int(cell)
+                    if value is None:
+                        continue
+                    if column_index < row_index:
+                        values.append(value)
+    except OSError:
+        return {"status": "empty", "summary": {}, "preview": {"columns": [], "rows": []}}
+    ordered_values = sorted(values)
+    pair_count = len(ordered_values)
+    positive_values = [value for value in ordered_values if value > 0]
+    median_value = ordered_values[pair_count // 2] if pair_count else None
+    return {
+        "status": "ready",
+        "summary": {
+            "sample_count": len(sample_names),
+            "pair_count": pair_count,
+            "min_distance": positive_values[0] if positive_values else 0,
+            "max_distance": ordered_values[-1] if ordered_values else 0,
+            "median_distance": median_value if median_value is not None else 0,
+            "zero_distance_pairs": pair_count - len(positive_values),
+        },
+        "preview": {
+            "columns": preview_columns,
+            "rows": preview_rows,
+        },
+    }
+
+
+def _read_pathosource_ani(path: Path, preview_size: int = 16, top_pair_size: int = 20) -> dict:
+    if not path.is_file():
+        return {
+            "status": "empty",
+            "summary": {},
+            "top_pairs": {"columns": [], "rows": []},
+            "preview": {"columns": [], "rows": []},
+        }
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            samples: list[str] = []
+            sample_set: set[str] = set()
+            pair_values: dict[tuple[str, str], float] = {}
+            non_self_pairs: list[tuple[str, str, float, float | None, float | None]] = []
+            for row in reader:
+                ref_name = str(row.get("Ref_name") or "").strip()
+                query_name = str(row.get("Query_name") or "").strip()
+                ani_value = _safe_float(row.get("ANI"))
+                align_ref = _safe_float(row.get("Align_fraction_ref"))
+                align_query = _safe_float(row.get("Align_fraction_query"))
+                if not ref_name or not query_name or ani_value is None:
+                    continue
+                if ref_name not in sample_set:
+                    sample_set.add(ref_name)
+                    samples.append(ref_name)
+                if query_name not in sample_set:
+                    sample_set.add(query_name)
+                    samples.append(query_name)
+                pair_values[(ref_name, query_name)] = ani_value
+                if ref_name == query_name:
+                    continue
+                key = tuple(sorted((ref_name, query_name)))
+                if (key[0], key[1]) in pair_values and key != (ref_name, query_name):
+                    continue
+                if ref_name < query_name:
+                    non_self_pairs.append((ref_name, query_name, ani_value, align_ref, align_query))
+    except OSError:
+        return {
+            "status": "empty",
+            "summary": {},
+            "top_pairs": {"columns": [], "rows": []},
+            "preview": {"columns": [], "rows": []},
+        }
+    ani_values = sorted([item[2] for item in non_self_pairs])
+    pair_count = len(ani_values)
+    preview_samples = samples[:preview_size]
+    preview_columns = ["样本"] + preview_samples
+    preview_rows: list[list[object]] = []
+    for sample in preview_samples:
+        preview_row: list[object] = [sample]
+        for target in preview_samples:
+            value = pair_values.get((sample, target))
+            if value is None:
+                value = pair_values.get((target, sample))
+            preview_row.append(f"{value:.2f}" if value is not None else "-")
+        preview_rows.append(preview_row)
+    top_pairs_rows = [
+        [left, right, f"{ani:.2f}", f"{align_ref:.2f}" if align_ref is not None else "-", f"{align_query:.2f}" if align_query is not None else "-"]
+        for left, right, ani, align_ref, align_query in sorted(non_self_pairs, key=lambda item: item[2], reverse=True)[:top_pair_size]
+    ]
+    return {
+        "status": "ready",
+        "summary": {
+            "sample_count": len(samples),
+            "pair_count": pair_count,
+            "min_ani": round(ani_values[0], 2) if ani_values else None,
+            "max_ani": round(ani_values[-1], 2) if ani_values else None,
+            "median_ani": round(ani_values[pair_count // 2], 2) if ani_values else None,
+        },
+        "top_pairs": {
+            "columns": ["样本A", "样本B", "ANI(%)", "Ref比对覆盖(%)", "Query比对覆盖(%)"],
+            "rows": top_pairs_rows,
+        },
+        "preview": {
+            "columns": preview_columns,
+            "rows": preview_rows,
+        },
+    }
+
+
+def _read_pathosource_mlst(path: Path) -> dict:
+    if not path.is_file():
+        return {
+            "status": "empty",
+            "columns": [],
+            "rows": [],
+            "summary": {"sample_count": 0, "scheme_count": 0, "st_count": 0, "dominant_st": "--"},
+        }
+    rows: list[list[str]] = []
+    scheme_counter: dict[str, int] = {}
+    st_counter: dict[str, int] = {}
+    locus_count = 0
+    locus_headers: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.reader(handle, delimiter="\t")
+            for row in reader:
+                if len(row) < 3:
+                    continue
+                sample_name = re.sub(r"\.(raw\.)?f(ast)?a(sta)?$", "", str(row[0]).strip(), flags=re.IGNORECASE)
+                scheme = str(row[1]).strip()
+                st_value = str(row[2]).strip()
+                loci = []
+                raw_loci = row[3:]
+                for index, locus in enumerate(raw_loci):
+                    locus_text = str(locus or "").strip()
+                    match = re.match(r"^\s*([^(]+?)\(([^()]*)\)\s*$", locus_text)
+                    if len(locus_headers) <= index:
+                        locus_headers.append(match.group(1).strip() if match else f"Locus{index + 1}")
+                    loci.append(match.group(2).strip() if match else locus_text)
+                locus_count = max(locus_count, len(loci))
+                rows.append([sample_name, scheme, st_value, *loci])
+                if scheme:
+                    scheme_counter[scheme] = scheme_counter.get(scheme, 0) + 1
+                if st_value:
+                    st_counter[st_value] = st_counter.get(st_value, 0) + 1
+    except OSError:
+        return {
+            "status": "empty",
+            "columns": [],
+            "rows": [],
+            "summary": {"sample_count": 0, "scheme_count": 0, "st_count": 0, "dominant_st": "--"},
+        }
+    columns = ["样本名称", "MLST方案", "ST"] + [header or f"Locus{i}" for i, header in enumerate(locus_headers[:locus_count], start=1)]
+    normalized_rows = [row + [""] * (len(columns) - len(row)) for row in rows]
+    dominant_st = max(st_counter.items(), key=lambda item: item[1])[0] if st_counter else "--"
+    return {
+        "status": "ready" if normalized_rows else "empty",
+        "columns": columns,
+        "rows": normalized_rows,
+        "summary": {
+            "sample_count": len(normalized_rows),
+            "scheme_count": len(scheme_counter),
+            "st_count": len(st_counter),
+            "dominant_st": dominant_st,
+        },
+    }
+
+
+def _read_pathosource_mutations(path: Path, top_sample_size: int = 15, preview_size: int = 200) -> dict:
+    if not path.is_file():
+        return {
+            "status": "empty",
+            "summary": {
+                "site_count": 0,
+                "mutated_site_count": 0,
+                "sample_count": 0,
+                "mutated_sample_count": 0,
+                "max_mutation_sample": "--",
+                "max_mutation_count": 0,
+            },
+            "sample_bars": [],
+            "table": {"columns": [], "rows": []},
+        }
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.reader(handle, delimiter="\t")
+            header = next(reader, [])
+            if len(header) < 4:
+                return {
+                    "status": "empty",
+                    "summary": {
+                        "site_count": 0,
+                        "mutated_site_count": 0,
+                        "sample_count": 0,
+                        "mutated_sample_count": 0,
+                        "max_mutation_sample": "--",
+                        "max_mutation_count": 0,
+                    },
+                    "sample_bars": [],
+                    "table": {"columns": [], "rows": []},
+                }
+            sample_names = [str(item or "").strip() for item in header[3:]]
+            sample_mutation_counter = {sample: 0 for sample in sample_names if sample}
+            mutation_rows: list[list[object]] = []
+            site_count = 0
+            mutated_site_count = 0
+            for row in reader:
+                if len(row) < 3:
+                    continue
+                site_count += 1
+                chrom = str(row[0] or "").strip()
+                position = str(row[1] or "").strip()
+                ref_base = str(row[2] or "").strip()
+                mutated_samples: list[str] = []
+                alt_counts: dict[str, int] = {}
+                for sample_name, base in zip(sample_names, row[3:]):
+                    sample = str(sample_name or "").strip()
+                    observed = str(base or "").strip()
+                    if not sample or not observed or observed == "-" or observed == ref_base:
+                        continue
+                    mutated_samples.append(sample)
+                    sample_mutation_counter[sample] = sample_mutation_counter.get(sample, 0) + 1
+                    alt_counts[observed] = alt_counts.get(observed, 0) + 1
+                if not mutated_samples:
+                    continue
+                mutated_site_count += 1
+                alt_summary = " / ".join(f"{allele}×{count}" for allele, count in sorted(alt_counts.items(), key=lambda item: (-item[1], item[0])))
+                preview = "，".join(mutated_samples[:8])
+                if len(mutated_samples) > 8:
+                    preview = f"{preview} 等 {len(mutated_samples)} 个样本"
+                mutation_rows.append([
+                    chrom,
+                    position,
+                    ref_base,
+                    len(mutated_samples),
+                    alt_summary or "-",
+                    preview or "-",
+                ])
+    except OSError:
+        return {
+            "status": "empty",
+            "summary": {
+                "site_count": 0,
+                "mutated_site_count": 0,
+                "sample_count": 0,
+                "mutated_sample_count": 0,
+                "max_mutation_sample": "--",
+                "max_mutation_count": 0,
+            },
+            "sample_bars": [],
+            "table": {"columns": [], "rows": []},
+        }
+    sample_items = sorted(sample_mutation_counter.items(), key=lambda item: (-item[1], item[0]))
+    max_mutation_sample, max_mutation_count = sample_items[0] if sample_items else ("--", 0)
+    mutated_sample_count = sum(1 for _, count in sample_items if count > 0)
+    max_bar_value = max((count for _, count in sample_items), default=0)
+    sample_bars = [
+        {
+            "label": sample,
+            "value": count,
+            "ratio": round((count / max_bar_value) * 100, 2) if max_bar_value else 0,
+        }
+        for sample, count in sample_items[:top_sample_size]
+        if count > 0
+    ]
+    return {
+        "status": "ready" if mutation_rows else "empty",
+        "summary": {
+            "site_count": site_count,
+            "mutated_site_count": mutated_site_count,
+            "sample_count": len(sample_names),
+            "mutated_sample_count": mutated_sample_count,
+            "max_mutation_sample": max_mutation_sample,
+            "max_mutation_count": max_mutation_count,
+        },
+        "sample_bars": sample_bars,
+        "table": {
+            "columns": ["染色体", "变异位点位置", "参考位点碱基", "突变样本数", "替代碱基统计", "发生突变的样本"],
+            "rows": mutation_rows[:preview_size],
+        },
+    }
+
+
+def _read_pathosource_tree(path: Path, label: str) -> dict:
+    if not path.is_file():
+        return {"status": "empty", "label": label, "newick": "", "leaf_count": 0, "file_name": path.name}
+    try:
+        newick = path.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        return {"status": "empty", "label": label, "newick": "", "leaf_count": 0, "file_name": path.name}
+    if not newick:
+        return {"status": "empty", "label": label, "newick": "", "leaf_count": 0, "file_name": path.name}
+    leaf_count = len(re.findall(r"(?:(?<=\()|(?<=,))\s*([^():;,]+)\s*:", newick))
+    return {
+        "status": "ready",
+        "label": label,
+        "newick": newick,
+        "leaf_count": leaf_count,
+        "char_count": len(newick),
+        "file_name": path.name,
+    }
+
+
+def _build_norovirus_gene_phylogeny(report_dir: Path) -> dict:
+    phylogeny_root = report_dir / f"{report_dir.name}_norovirus_reference_selection" / "phylogeny"
+    summary_path = phylogeny_root / "summary.tsv"
+    summary_table = _read_tsv_rows(summary_path)
+    summary_columns = summary_table.get("columns", [])
+    summary_rows = summary_table.get("rows", [])
+    if not summary_columns or not summary_rows:
+        return {"status": "empty", "trees": []}
+    trees: list[dict[str, object]] = []
+    for row in summary_rows:
+        if not isinstance(row, list):
+            continue
+        record = {
+            summary_columns[index]: row[index] if index < len(row) else ""
+            for index in range(len(summary_columns))
+        }
+        status = str(record.get("status") or "").strip().lower()
+        tree_path_text = str(record.get("tree_path") or "").strip()
+        if status != "ready" or not tree_path_text:
+            continue
+        tree_path = Path(tree_path_text)
+        gene_label = str(record.get("gene") or "").strip().upper()
+        genogroup = str(record.get("genogroup") or "").strip().upper()
+        subtype = str(record.get("subtype") or "").strip()
+        label = f"Norovirus {gene_label} {genogroup or '-'} 片段系统发育树"
+        tree_section = _read_pathosource_tree(tree_path, label)
+        tree_section["gene"] = gene_label
+        tree_section["genogroup"] = genogroup
+        tree_section["subtype"] = subtype
+        tree_section["member_count"] = str(record.get("member_count") or "")
+        trees.append(_attach_itol_payload(tree_section, tree_path))
+    return {
+        "status": "ready" if trees else "empty",
+        "trees": trees,
+        "summary": summary_table,
+    }
+
+
+def _build_rhinovirus_gene_phylogeny(report_dir: Path) -> dict:
+    phylogeny_root = report_dir / f"{report_dir.name}_rhinovirus_reference_selection" / "phylogeny"
+    summary_path = phylogeny_root / "summary.tsv"
+    summary_table = _read_tsv_rows(summary_path)
+    summary_columns = summary_table.get("columns", [])
+    summary_rows = summary_table.get("rows", [])
+    if not summary_columns or not summary_rows:
+        return {"status": "empty", "trees": []}
+    trees: list[dict[str, object]] = []
+    for row in summary_rows:
+        if not isinstance(row, list):
+            continue
+        record = {
+            summary_columns[index]: row[index] if index < len(row) else ""
+            for index in range(len(summary_columns))
+        }
+        status = str(record.get("status") or "").strip().lower()
+        tree_path_text = str(record.get("tree_path") or "").strip()
+        if status != "ready" or not tree_path_text:
+            continue
+        tree_path = Path(tree_path_text)
+        gene_label = str(record.get("gene") or "").strip().upper()
+        genogroup = str(record.get("genogroup") or "").strip().upper()
+        subtype = str(record.get("subtype") or "").strip()
+        label = f"Rhinovirus {gene_label} {genogroup or '-'} 片段系统发育树"
+        tree_section = _read_pathosource_tree(tree_path, label)
+        tree_section["gene"] = gene_label
+        tree_section["genogroup"] = genogroup
+        tree_section["subtype"] = subtype
+        tree_section["member_count"] = str(record.get("member_count") or "")
+        trees.append(_attach_itol_payload(tree_section, tree_path))
+    return {
+        "status": "ready" if trees else "empty",
+        "trees": trees,
+        "summary": summary_table,
+    }
+
+
+def _build_enterovirus_gene_phylogeny(report_dir: Path) -> dict:
+    phylogeny_root = report_dir / f"{report_dir.name}_enterovirus_reference_selection" / "phylogeny"
+    summary_path = phylogeny_root / "summary.tsv"
+    summary_table = _read_tsv_rows(summary_path)
+    summary_columns = summary_table.get("columns", [])
+    summary_rows = summary_table.get("rows", [])
+    if not summary_columns or not summary_rows:
+        return {"status": "empty", "trees": []}
+    trees: list[dict[str, object]] = []
+    for row in summary_rows:
+        if not isinstance(row, list):
+            continue
+        record = {
+            summary_columns[index]: row[index] if index < len(row) else ""
+            for index in range(len(summary_columns))
+        }
+        status = str(record.get("status") or "").strip().lower()
+        tree_path_text = str(record.get("tree_path") or "").strip()
+        if status != "ready" or not tree_path_text:
+            continue
+        tree_path = Path(tree_path_text)
+        gene_label = str(record.get("gene") or "").strip().upper()
+        genogroup = str(record.get("genogroup") or "").strip().upper()
+        subtype = str(record.get("subtype") or "").strip()
+        label = f"Enterovirus {gene_label or 'VP1'} {genogroup or '-'} 片段系统发育树"
+        tree_section = _read_pathosource_tree(tree_path, label)
+        tree_section["gene"] = gene_label
+        tree_section["genogroup"] = genogroup
+        tree_section["subtype"] = subtype
+        tree_section["member_count"] = str(record.get("member_count") or "")
+        trees.append(_attach_itol_payload(tree_section, tree_path))
+    return {
+        "status": "ready" if trees else "empty",
+        "trees": trees,
+        "summary": summary_table,
+    }
+
+
+def _build_astroviridae_gene_phylogeny(report_dir: Path) -> dict:
+    phylogeny_root = report_dir / f"{report_dir.name}_astroviridae_reference_selection" / "phylogeny"
+    summary_path = phylogeny_root / "summary.tsv"
+    summary_table = _read_tsv_rows(summary_path)
+    summary_columns = summary_table.get("columns", [])
+    summary_rows = summary_table.get("rows", [])
+    if not summary_columns or not summary_rows:
+        return {"status": "empty", "trees": []}
+    trees: list[dict[str, object]] = []
+    for row in summary_rows:
+        if not isinstance(row, list):
+            continue
+        record = {
+            summary_columns[index]: row[index] if index < len(row) else ""
+            for index in range(len(summary_columns))
+        }
+        status = str(record.get("status") or "").strip().lower()
+        tree_path_text = str(record.get("tree_path") or "").strip()
+        if status != "ready" or not tree_path_text:
+            continue
+        tree_path = Path(tree_path_text)
+        gene_label = str(record.get("gene") or "").strip().upper()
+        genus = str(record.get("genogroup") or "").strip()
+        subtype = str(record.get("subtype") or "").strip()
+        label = f"Astrovirus {gene_label or 'ORF2'} {genus or '-'} 片段系统发育树"
+        tree_section = _read_pathosource_tree(tree_path, label)
+        tree_section["gene"] = gene_label
+        tree_section["genogroup"] = genus
+        tree_section["subtype"] = subtype
+        tree_section["member_count"] = str(record.get("member_count") or "")
+        trees.append(_attach_itol_payload(tree_section, tree_path))
+    return {
+        "status": "ready" if trees else "empty",
+        "trees": trees,
+        "summary": summary_table,
+    }
+
+
+def _build_seasonal_hcov_spike_phylogeny(report_dir: Path) -> dict:
+    phylogeny_root = report_dir / f"{report_dir.name}_seasonal_hcov_reference_selection" / "phylogeny"
+    summary_path = phylogeny_root / "summary.tsv"
+    summary_table = _read_tsv_rows(summary_path)
+    summary_columns = summary_table.get("columns", [])
+    summary_rows = summary_table.get("rows", [])
+    if not summary_columns or not summary_rows:
+        return {"status": "empty", "trees": []}
+    trees: list[dict[str, object]] = []
+    for row in summary_rows:
+        if not isinstance(row, list):
+            continue
+        record = {
+            summary_columns[index]: row[index] if index < len(row) else ""
+            for index in range(len(summary_columns))
+        }
+        status = str(record.get("status") or "").strip().lower()
+        tree_path_text = str(record.get("tree_path") or "").strip()
+        if status != "ready" or not tree_path_text:
+            continue
+        tree_path = Path(tree_path_text)
+        hcov_type = str(record.get("hcov_type") or "").strip()
+        subtype = str(record.get("subtype") or "").strip()
+        label = f"{hcov_type or 'Seasonal HCoV'} Spike 系统发育树"
+        tree_section = _read_pathosource_tree(tree_path, label)
+        tree_section["gene"] = "S"
+        tree_section["subtype"] = subtype
+        tree_section["genogroup"] = hcov_type
+        tree_section["member_count"] = str(record.get("member_count") or "")
+        trees.append(_attach_itol_payload(tree_section, tree_path))
+    return {
+        "status": "ready" if trees else "empty",
+        "trees": trees,
+        "summary": summary_table,
+    }
+
+
+@lru_cache(maxsize=4)
+def _load_itol_helper(helper_name: str, helper_path: str):
+    spec = importlib.util.spec_from_file_location(helper_name, helper_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load helper: {helper_name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[helper_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _attach_itol_payload(tree_section: dict, tree_path: Path, tree_text: str | None = None) -> dict:
+    if tree_section.get("status") != "ready" or not tree_path.is_file():
+        return tree_section
+    project_root = Path(__file__).resolve().parents[1]
+    nwk2json_path = project_root / "public" / "itol" / "nwk2json.py"
+    treeinfo_path = project_root / "public" / "itol" / "newick2treeinfo.py"
+    convert_path = tree_path
+    tmp_path: Path | None = None
+    try:
+        if tree_text is not None:
+            with tempfile.NamedTemporaryFile("w", suffix=".nwk", encoding="utf-8", delete=False) as handle:
+                handle.write(tree_text)
+                tmp_path = Path(handle.name)
+            convert_path = tmp_path
+        nwk2json_module = _load_itol_helper("portal_itol_nwk2json", str(nwk2json_path))
+        treeinfo_module = _load_itol_helper("portal_itol_treeinfo", str(treeinfo_path))
+        tree_json = nwk2json_module.convert_newick_to_itol_json(convert_path, tree_name=tree_path.stem)
+        treeinfo_rows = treeinfo_module.newick_to_treeinfo(convert_path)
+    except Exception as exc:
+        tree_section["itol_error"] = str(exc)
+        return tree_section
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+    tree_section["itol_tree_json"] = tree_json
+    tree_section["itol_treeinfo"] = {
+        "columns": ["parent", "node", "branch.length", "label", "isTip", "x", "y", "branch", "angle"],
+        "rows": [
+            [
+                row.get("parent", ""),
+                row.get("node", ""),
+                row.get("branch.length", ""),
+                row.get("label", ""),
+                row.get("isTip", ""),
+                row.get("x", ""),
+                row.get("y", ""),
+                row.get("branch", ""),
+                row.get("angle", ""),
+            ]
+            for row in treeinfo_rows
+        ],
+    }
+    return tree_section
+
+
+def _discover_nextclade_tree_path(report_dir: Path) -> Path | None:
+    def _has_content(path: Path) -> bool:
+        try:
+            return path.is_file() and path.stat().st_size > 0
+        except OSError:
+            return False
+
+    preferred = report_dir / "nextclade_output" / "nextclade.nwk"
+    if _has_content(preferred):
+        return preferred
+    candidates = sorted(
+        [
+            path
+            for path in report_dir.rglob("*.nwk")
+            if not path.name.startswith(".") and _has_content(path)
+        ],
+        key=lambda item: (
+            0 if "nextclade" in str(item.relative_to(report_dir)).lower() else 1,
+            len(item.parts),
+            item.name.lower(),
+        ),
+    )
+    return candidates[0] if candidates else None
+
+
+def _load_newick_parser_module():
+    project_root = Path(__file__).resolve().parents[1]
+    parser_path = project_root / "public" / "itol" / "newick_parser.py"
+    return _load_itol_helper("portal_itol_newick_parser", str(parser_path))
+
+
+def _annotate_newick_tree(root) -> tuple[list[object], dict[int, object], dict[int, float]]:
+    parent_map: dict[int, object] = {}
+    distance_map: dict[int, float] = {}
+    leaves: list[object] = []
+    stack: list[tuple[object, object | None, float]] = [(root, None, 0.0)]
+    while stack:
+        node, parent, distance = stack.pop()
+        parent_map[id(node)] = parent
+        distance_map[id(node)] = distance
+        children = list(getattr(node, "children", []) or [])
+        if not children:
+            leaves.append(node)
+            continue
+        for child in reversed(children):
+            child_length = getattr(child, "branch_length", None)
+            stack.append((child, node, distance + (float(child_length) if child_length is not None else 0.0)))
+    return leaves, parent_map, distance_map
+
+
+def _compute_leaf_distance(node_a: object, node_b: object, parent_map: dict[int, object], distance_map: dict[int, float]) -> float:
+    ancestors: dict[int, float] = {}
+    cursor = node_a
+    while cursor is not None:
+        ancestors[id(cursor)] = distance_map.get(id(cursor), 0.0)
+        cursor = parent_map.get(id(cursor))
+    cursor = node_b
+    while cursor is not None:
+        cursor_id = id(cursor)
+        if cursor_id in ancestors:
+            lca_distance = ancestors[cursor_id]
+            return distance_map.get(id(node_a), 0.0) + distance_map.get(id(node_b), 0.0) - (2.0 * lca_distance)
+        cursor = parent_map.get(cursor_id)
+    return float("inf")
+
+
+def _clone_newick_node(parser_module, source: object, *, children: list[object] | None = None, branch_length: float | None = None):
+    clone = parser_module.NewickNode(
+        name=getattr(source, "name", None),
+        branch_length=getattr(source, "branch_length", None) if branch_length is None else branch_length,
+        confidence=getattr(source, "confidence", None),
+        children=list(children or []),
+    )
+    return clone
+
+
+def _prune_newick_tree_to_labels(root: object, keep_labels: set[str], parser_module):
+    children = list(getattr(root, "children", []) or [])
+    if not children:
+        label = str(getattr(root, "name", "") or "")
+        if label in keep_labels:
+            return _clone_newick_node(parser_module, root, children=[])
+        return None
+
+    pruned_children: list[object] = []
+    for child in children:
+        pruned = _prune_newick_tree_to_labels(child, keep_labels, parser_module)
+        if pruned is not None:
+            pruned_children.append(pruned)
+    if not pruned_children:
+        return None
+
+    if len(pruned_children) == 1:
+        only_child = pruned_children[0]
+        merged_length = (getattr(only_child, "branch_length", None) or 0.0) + (getattr(root, "branch_length", None) or 0.0)
+        only_child.branch_length = merged_length if merged_length else None
+        return only_child
+
+    return _clone_newick_node(parser_module, root, children=pruned_children)
+
+
+def _serialize_newick_node(node: object, *, is_root: bool = False) -> str:
+    children = list(getattr(node, "children", []) or [])
+    label = str(getattr(node, "name", "") or "")
+    confidence = getattr(node, "confidence", None)
+    parts: list[str] = []
+    if children:
+        parts.append("(" + ",".join(_serialize_newick_node(child, is_root=False) for child in children) + ")")
+        if label:
+            parts.append(label)
+        elif confidence is not None:
+            if float(confidence).is_integer():
+                parts.append(str(int(confidence)))
+            else:
+                parts.append(f"{float(confidence):g}")
+    elif label:
+        parts.append(label)
+    branch_length = getattr(node, "branch_length", None)
+    if branch_length is not None and not is_root:
+        parts.append(f":{float(branch_length):g}")
+    return "".join(parts)
+
+
+def _build_nextclade_nearest_subtree(newick_text: str, query_labels: list[str], neighbor_limit: int = 50) -> tuple[str, list[str]]:
+    parser_module = _load_newick_parser_module()
+    root = parser_module.parse_newick_text(newick_text)
+    leaves, parent_map, distance_map = _annotate_newick_tree(root)
+    label_to_leaf: dict[str, object] = {}
+    for leaf in leaves:
+        label = str(getattr(leaf, "name", "") or "")
+        if label and label not in label_to_leaf:
+            label_to_leaf[label] = leaf
+    target_labels = [label for label in query_labels if label in label_to_leaf]
+    if not target_labels:
+        return newick_text, []
+
+    target_leaves = [label_to_leaf[label] for label in target_labels]
+    ranked: list[tuple[float, str]] = []
+    for label, leaf in label_to_leaf.items():
+        if label in target_labels:
+            continue
+        distance = min(_compute_leaf_distance(target_leaf, leaf, parent_map, distance_map) for target_leaf in target_leaves)
+        ranked.append((distance, label))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    selected_labels = set(target_labels)
+    selected_labels.update(label for _distance, label in ranked[: max(0, neighbor_limit)])
+    pruned_root = _prune_newick_tree_to_labels(root, selected_labels, parser_module)
+    if pruned_root is None:
+        return newick_text, target_labels
+    subtree_text = _serialize_newick_node(pruned_root, is_root=True) + ";"
+    ordered_neighbors = [label for _distance, label in ranked[: max(0, neighbor_limit)]]
+    return subtree_text, ordered_neighbors
+
+
+def _build_nextclade_phylogeny_tree(report_dir: Path, sequence_names: object = "") -> dict:
+    tree_path = _discover_nextclade_tree_path(report_dir)
+    if tree_path is None:
+        return {"status": "empty", "label": "Nextclade 系统发育树", "newick": "", "leaf_count": 0, "file_name": "nextclade.nwk"}
+    tree_section = _read_pathosource_tree(tree_path, "Nextclade 系统发育树")
+    newick_text = str(tree_section.get("newick") or "")
+    if isinstance(sequence_names, str):
+        raw_names = [sequence_names]
+    elif isinstance(sequence_names, list):
+        raw_names = [str(item or "") for item in sequence_names]
+    else:
+        raw_names = []
+    sanitized_names: list[dict[str, str]] = []
+    used_names: set[str] = set()
+    for display_name in sorted({item.strip() for item in raw_names if item.strip()}, key=len, reverse=True):
+        if display_name not in newick_text:
+            continue
+        base_name = re.split(r"\s+|\|", display_name, maxsplit=1)[0].strip() or "query_sequence"
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", base_name).strip("_") or "query_sequence"
+        original_safe_name = safe_name
+        suffix = 2
+        while safe_name in used_names:
+            safe_name = f"{original_safe_name}_{suffix}"
+            suffix += 1
+        used_names.add(safe_name)
+        newick_text = newick_text.replace(display_name, safe_name)
+        sanitized_names.append({"original": display_name, "label": safe_name})
+    if sanitized_names:
+        tree_section["sanitized_labels"] = sanitized_names
+        tree_section["display_sequence_name"] = sanitized_names[0]["original"]
+        tree_section["newick"] = newick_text
+        tree_section["sanitized_label"] = sanitized_names[0]["label"]
+    query_labels = [item["label"] for item in sanitized_names]
+    if query_labels:
+        try:
+            subtree_text, neighbor_labels = _build_nextclade_nearest_subtree(str(tree_section.get("newick") or newick_text), query_labels, neighbor_limit=50)
+            tree_section["newick"] = subtree_text
+            tree_section["nearest_neighbor_labels"] = neighbor_labels
+            tree_section["query_labels"] = query_labels
+            tree_section["subset_neighbor_count"] = len(neighbor_labels)
+            tree_section["subset_leaf_count"] = len(query_labels) + len(neighbor_labels)
+        except Exception as exc:
+            tree_section["itol_error"] = f"精简子树失败: {exc}"
+    tree_section["leaf_count"] = len(re.findall(r"(?:(?<=\()|(?<=,))\s*([^():;,]+)\s*:", str(tree_section.get("newick") or "")))
+    tree_section["char_count"] = len(str(tree_section.get("newick") or ""))
+    return _attach_itol_payload(tree_section, tree_path, str(tree_section.get("newick") or "") or None)
+
+
+def _build_pathosource_report_payload(
+    *,
+    task: dict,
+    report_dir: Path,
+    report_source: dict,
+    sample_name: str,
+    sample_display_name: str,
+) -> dict:
+    params = task.get("params") or {}
+    cluster_table = _read_tsv_rows(report_dir / "Cluster.tsv")
+    distance_bins = _read_pathosource_distance_bins(report_dir / "dis_bin.tsv")
+    snp_matrix = _read_pathosource_snp_matrix(report_dir / "dis.mat.txt")
+    ani_section = _read_pathosource_ani(report_dir / "Full_ANI.txt")
+    mlst_section = _read_pathosource_mlst(report_dir / "mlst.txt")
+    mutation_section = _read_pathosource_mutations(report_dir / "Mutate.tsv")
+    grapetree_tree = _read_pathosource_tree(report_dir / "grapetree.nwk", "GrapeTree 最小生成树")
+    mlst_tree = _read_pathosource_tree(report_dir / "mlst.nwk", "MLST 进化树")
+    core_tree = _attach_itol_payload(
+        _read_pathosource_tree(report_dir / "rmref.core.aln.contree", "核心 SNP 系统发育树"),
+        report_dir / "rmref.core.aln.contree",
+    )
+
+    cluster_rows = cluster_table.get("rows", [])
+    sample_total = max(
+        snp_matrix.get("summary", {}).get("sample_count") or 0,
+        mlst_section.get("summary", {}).get("sample_count") or 0,
+    )
+    cluster_sizes = []
+    for row in cluster_rows:
+        if len(row) > 1:
+            size_value = _safe_int(row[1])
+            if size_value is not None:
+                cluster_sizes.append(size_value)
+    largest_cluster = max(cluster_sizes) if cluster_sizes else 0
+    singleton_clusters = sum(1 for size in cluster_sizes if size <= 1)
+    tree_ready_count = sum(1 for item in [grapetree_tree, mlst_tree, core_tree] if item.get("status") == "ready")
+
+    payload = {
+        "task": {
+            "id": task.get("id"),
+            "name": task.get("name"),
+            "status": task.get("status"),
+            "owner": task.get("owner"),
+            "group": task.get("owner_group", ""),
+            "created_at": task.get("created_at"),
+            "started_at": task.get("started_at"),
+            "finished_at": task.get("finished_at"),
+            "input_path": params.get("input_path", ""),
+            "output_dir": params.get("output_dir", ""),
+            "asm_type": params.get("msamethod", "") or "溯源分析",
+            "method": params.get("treemethod", "") or "PathoSource",
+            "analysis_target": "bacteria",
+            "species": params.get("species", ""),
+            "sample_name": sample_name,
+            "sample_display_name": sample_display_name or task.get("name") or "溯源进化树",
+            "samples": report_source.get("samples", []),
+            "report_mode": report_source.get("mode", "single"),
+            "report_kind": "pathosource_phylogeny",
+            "workstation_key": "pathosource",
+        },
+        "overview_metrics": [
+            {"key": "phylo_sample_count", "label": "纳入样本", "type": "single", "display": str(sample_total or "--")},
+            {"key": "phylo_cluster_count", "label": "成簇数量", "type": "single", "display": str(len(cluster_rows) or "--")},
+            {"key": "phylo_largest_cluster", "label": "最大簇规模", "type": "single", "display": str(largest_cluster or "--")},
+            {"key": "phylo_pair_count", "label": "距离比较对", "type": "single", "display": str(snp_matrix.get('summary', {}).get('pair_count') or "--")},
+            {"key": "phylo_tree_ready", "label": "可视化树数", "type": "single", "display": str(tree_ready_count or "--")},
+        ],
+        "sections": {
+            "pathosource": {
+                "status": "ready",
+                "cluster": {
+                    "table": cluster_table,
+                    "summary": {
+                        "cluster_count": len(cluster_rows),
+                        "largest_cluster": largest_cluster,
+                        "singleton_clusters": singleton_clusters,
+                    },
+                },
+                "distance_bins": distance_bins,
+                "snp_matrix": snp_matrix,
+                "ani": ani_section,
+                "mlst": mlst_section,
+                "mutations": mutation_section,
+                "trees": {
+                    "grapetree": grapetree_tree,
+                    "mlst": mlst_tree,
+                    "core": core_tree,
+                },
+            },
+        },
+    }
+    return payload
+
+
+REPORT_CACHE_VERSION = 115
+
+
+def _report_cache_dir(report_dir: Path) -> Path:
+    return report_dir / ".portal_report_cache"
+
+
+def _report_cache_path(report_dir: Path, sample_name: str) -> Path:
+    safe_sample = str(sample_name or "default").strip() or "default"
+    safe_sample = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in safe_sample)
+    return _report_cache_dir(report_dir) / f"report_payload_{safe_sample}.json"
+
+
+def _report_cache_fingerprint(task: dict, report_dir: Path, sample_name: str) -> str:
+    params = task.get("params") or {}
+    database_root = _resolve_runtime_database_root()
+    knowledge_base_root = database_root / "knowledge_base"
+    sources = [
+        Path(__file__).resolve(),
+        report_dir / "community_summary.json",
+        report_dir / "community_command_plan.tsv",
+        report_dir / "community_metadata_preview.tsv",
+        report_dir / "community_demux_summary.tsv",
+        report_dir / "community_taxonomy_preview.tsv",
+        report_dir / "taxonomy_export" / "taxonomy.tsv",
+        report_dir / "ancombc2_export" / "q.jsonl",
+        report_dir / "ancombc2_export" / "diff.jsonl",
+        report_dir / "ancombc2_export" / "lfc.jsonl",
+        report_dir / "microeco_beta" / "pcoa_plot.png",
+        report_dir / "microeco_beta" / "nmds_plot.png",
+        report_dir / "microeco_beta" / "within_group_distance_plot.png",
+        report_dir / "microeco_beta" / "pcoa_scores.tsv",
+        report_dir / "microeco_beta" / "nmds_scores.tsv",
+        report_dir / "microeco_beta" / "permanova.tsv",
+        report_dir / "microeco_beta" / "anosim.tsv",
+        report_dir / "microeco_beta" / "betadisper.txt",
+        report_dir / "microeco_beta" / "within_group_distance_stats.tsv",
+        report_dir / "microeco_beta" / "group_sample_counts.tsv",
+        report_dir / "microeco_beta" / "run_summary.txt",
+        report_dir / "microeco_biomarker" / "lefse_diff.tsv",
+        report_dir / "microeco_biomarker" / "lefse_barplot.png",
+        report_dir / "microeco_biomarker" / "lefse_barplot.pdf",
+        report_dir / "microeco_biomarker" / "rf_importance.tsv",
+        report_dir / "microeco_biomarker" / "rf_importance.png",
+        report_dir / "microeco_biomarker" / "rf_importance.pdf",
+        report_dir / "microeco_biomarker" / "run_summary.txt",
+        report_dir / "microeco_network" / "network_summary.tsv",
+        report_dir / "microeco_network" / "node_table.tsv",
+        report_dir / "microeco_network" / "edge_table.tsv",
+        report_dir / "microeco_network" / "module_summary.tsv",
+        report_dir / "microeco_network" / "role_summary.tsv",
+        report_dir / "microeco_network" / "eigen_summary.tsv",
+        report_dir / "microeco_network" / "run_summary.txt",
+        report_dir / "summary.tsv",
+        report_dir / "Assem_info.tsv",
+        report_dir / "Assem_info1.tsv",
+        report_dir / "binning_name.tsv",
+        report_dir / "tmp_combine.fa",
+        report_dir / "meta_plas_vf_card.tsv",
+        report_dir / "viral_assembly" / "viral_summary.tsv",
+        report_dir / "viral_assembly" / "viral_contig_summary.tsv",
+        report_dir / "viral_assembly" / "viral_retained_contigs.fa",
+        report_dir / "viral_assembly" / "megahit_output" / "final.contigs.fa",
+        report_dir / "viral_assembly" / "virsorter2" / "final-viral-score.tsv",
+        report_dir / "viral_assembly" / "checkv" / "contamination.tsv",
+        report_dir / "viral_assembly" / "checkv" / "quality_summary.tsv",
+        report_dir / "bin_vfdb.tsv",
+        report_dir / "bin_card.tsv",
+        report_dir / "binning_rgi_new.txt",
+        report_dir / "staramr_result" / "resfinder.tsv",
+        database_root / "who_bppl_2024_support.json",
+        database_root / "china_cdc_bacteria_support.json",
+        report_dir / "flye_output" / "assembly_info.txt",
+        report_dir / "checkm2_out" / "quality_report.tsv",
+        report_dir / "bin_checkm2out" / "quality_report.tsv",
+        report_dir / "gtdbtk_out" / "gtdbtk.bac120.summary.tsv",
+        report_dir / f"{sample_name}.fastp2.json",
+        report_dir / f"{sample_name}.assemble.result.tsv",
+        report_dir / f"{sample_name}_ngs.per-base.bed.gz",
+        report_dir / f"{sample_name}_ngs.per-base.bed",
+        report_dir / f"{sample_name}.regions.bed",
+        report_dir / f"{sample_name}.genefun_summary.tsv",
+        report_dir / f"{sample_name}_gene_raw_sum.tsv",
+        report_dir / f"{sample_name}_2.list.txt",
+        report_dir / f"{sample_name}_2.list2.txt",
+        report_dir / f"{sample_name}_assem.kraken2.txt",
+        report_dir / f"{sample_name}.mlst_Stat.txt",
+        report_dir / f"{sample_name}.neisseria_amr_calls.csv",
+        report_dir / "tb_analysis" / "tb_summary.json",
+        report_dir / "tb_analysis" / "tb_catalogue_matches.tsv",
+        report_dir / "tb_analysis" / "tbprofiler" / f"{sample_name}.results.json",
+        report_dir / "tb_analysis" / "reference_call" / "snps.filt1.vcf",
+        report_dir / "tb_analysis" / "reference_call" / "snps.anno.vcf",
+        report_dir / "tb_analysis" / "reference_call" / f"{sample_name}.anno.tsv",
+        report_dir / f"{sample_name}_serotype_result.tsv",
+        report_dir / f"{sample_name}.pathonet_result.tsv",
+        report_dir / f"{sample_name}.mge_risk_summary.tsv",
+        report_dir / f"{sample_name}.integrated_mge_summary.tsv",
+        report_dir / "nextclade_output" / "nextclade.tsv",
+        report_dir / "nextclade_output" / "nextclade.json",
+        report_dir / "nextclade_output" / "nextclade.csv",
+        report_dir / "nextclade_output" / "nextclade.auspice.json",
+        report_dir / "nextclade_output" / "nextclade.nwk",
+        database_root / "virus" / "ncov" / "genomic.gff",
+        report_dir / "genomes" / "ref.fa",
+        report_dir / "genomes" / "ref.fa.fai",
+        report_dir / "ref.mapping.bam",
+        report_dir / "ref.mapping.bam.bai",
+        report_dir / "ref" / "genes.gff",
+        report_dir / "snps.raw.vcf",
+        report_dir / "snps.filt1.vcf",
+        report_dir / "snps.anno.vcf",
+        report_dir / "snps.raw.mutation_table.json",
+        report_dir / "snps.raw.mutation_table.tsv",
+        report_dir / "snps.filt1.mutation_table.json",
+        report_dir / "snps.filt1.mutation_table.tsv",
+        report_dir / "snps.filt1.resistance_annotation.json",
+        report_dir / "snps.filt1.resistance_annotation.tsv",
+        report_dir / f"{sample_name}_rsv_reference_selection" / "selection.tsv",
+        report_dir / f"{sample_name}_denv_reference_selection" / "selection.tsv",
+        report_dir / f"{sample_name}_hpiv_reference_selection" / "selection.tsv",
+        report_dir / f"{sample_name}_hadv_reference_selection" / "selection.tsv",
+        report_dir / f"{sample_name}_hadv_reference_selection" / "phf_typing" / "phf_typing.tsv",
+        report_dir / f"{sample_name}_enterovirus_reference_selection" / "selection.tsv",
+        report_dir / f"{sample_name}_enterovirus_reference_selection" / "consensus_typing" / "consensus_typing.tsv",
+        report_dir / f"{sample_name}_hepatovirus_reference_selection" / "selection.tsv",
+        report_dir / f"{sample_name}_hepatovirus_reference_selection" / "consensus_typing" / "consensus_typing.tsv",
+        report_dir / f"{sample_name}_bandavirus_reference_selection" / "selection.tsv",
+        report_dir / f"{sample_name}_bandavirus_reference_selection" / "consensus_typing.tsv",
+        report_dir / f"{sample_name}_bandavirus_reference_selection" / "selected_segments.tsv",
+        report_dir / f"{sample_name}_bandavirus_reference_selection" / "cj_typing" / "selected_segments.tsv",
+        report_dir / f"{sample_name}_orthohantavirus_reference_selection" / "selection.tsv",
+        report_dir / f"{sample_name}_orthohantavirus_reference_selection" / "consensus_typing.tsv",
+        report_dir / f"{sample_name}_orthohantavirus_reference_selection" / "selected_segments.tsv",
+        report_dir / f"{sample_name}_orthohantavirus_reference_selection" / "snpeff_reference.gff3",
+        report_dir / f"{sample_name}_orthohantavirus_reference_selection" / "snpeff_vadr_ref" / "ref" / "genes.gff",
+        report_dir / f"{sample_name}_orthoebolavirus_reference_selection" / "selection.tsv",
+        report_dir / f"{sample_name}_orthoebolavirus_reference_selection" / "consensus_typing" / "consensus_typing.tsv",
+        report_dir / f"{sample_name}_astroviridae_reference_selection" / "selection.tsv",
+        report_dir / f"{sample_name}_astroviridae_reference_selection" / "consensus_typing" / "consensus_typing.tsv",
+        report_dir / f"{sample_name}_astroviridae_reference_selection" / "phylogeny" / "summary.tsv",
+        report_dir / f"{sample_name}_rhinovirus_reference_selection" / "selection.tsv",
+        report_dir / f"{sample_name}_rhinovirus_reference_selection" / "consensus_typing" / "consensus_typing.tsv",
+        report_dir / f"{sample_name}_rhinovirus_reference_selection" / "phylogeny" / "summary.tsv",
+        report_dir / "hpiv_coverage" / "hpiv.coverage.summary.tsv",
+        report_dir / "hpiv_coverage" / "hpiv.coverage.regions.bed",
+        database_root / "virus" / "rsv" / "nmdc_hrsv_variation_list.tsv",
+        database_root / "virus" / "rsv" / "nmdc_hrsv_variation_list_zh.tsv",
+        report_dir / "vadr" / f"{sample_name}.vadr.gff3",
+        report_dir / f"{sample_name}_virus_typing" / "vadr" / f"{sample_name}.vadr.gff3",
+        report_dir / "Cluster.tsv",
+        report_dir / "dis_bin.tsv",
+        report_dir / "dis.mat.txt",
+        report_dir / "Full_ANI.txt",
+        report_dir / "grapetree.nwk",
+        report_dir / "mlst.nwk",
+        report_dir / "mlst.txt",
+        report_dir / "rmref.core.aln.contree",
+    ]
+    if knowledge_base_root.is_dir():
+        for path in sorted(knowledge_base_root.rglob("*.json"), key=lambda item: str(item).lower()):
+            sources.append(path)
+    fallback_artifacts = [
+        _resolve_report_artifact_path(report_dir, [f"{sample_name}.fastp2.json"] if sample_name else [], ["*.fastp2.json"]),
+        _resolve_report_artifact_path(
+            report_dir,
+            [f"{sample_name}_ngs.per-base.bed.gz", f"{sample_name}_ngs.per-base.bed", f"{sample_name}.regions.bed"] if sample_name else [],
+            ["*_ngs.per-base.bed.gz", "*_ngs.per-base.bed", "*.regions.bed.gz", "*.regions.bed", "*.per-base.bed.gz", "*.per-base.bed"],
+        ),
+    ]
+    for artifact in fallback_artifacts:
+        if artifact and artifact not in sources:
+            sources.append(artifact)
+    if sample_name:
+        prokka_dir = report_dir / f"{sample_name}_prokka"
+        if prokka_dir.is_dir():
+            faa_path = prokka_dir / f"{sample_name}.faa"
+            if faa_path.is_file():
+                sources.append(faa_path)
+            sources.extend(
+                sorted(
+                    [
+                        child
+                        for child in prokka_dir.iterdir()
+                        if child.is_file() and child.suffix.lower() == ".gbk" and not child.name.startswith(".")
+                    ],
+                    key=lambda item: item.name.lower(),
+                )
+            )
+    site_table = Path(__file__).resolve().parent.parent / "database" / "NM_mutate" / "neisseria_meningitidis_snp_amr_associations_literature_updated.csv"
+    if site_table.is_file():
+        sources.append(site_table)
+    stamp = {
+        "version": REPORT_CACHE_VERSION,
+        "task_id": str(task.get("id") or ""),
+        "task_status": str(task.get("status") or ""),
+        "method": str(params.get("method") or ""),
+        "sample_name": sample_name,
+        "files": [],
+    }
+    for path in sources:
+        try:
+            if path.exists():
+                stat = path.stat()
+                stamp["files"].append({
+                    "path": str(path.relative_to(report_dir)) if path.is_relative_to(report_dir) else str(path),
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                })
+        except OSError:
+            continue
+    return hashlib.sha256(json.dumps(stamp, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _read_report_cache(report_dir: Path, sample_name: str, fingerprint: str) -> dict | None:
+    cache_path = _report_cache_path(report_dir, sample_name)
+    if not cache_path.is_file():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if int(payload.get("version") or 0) != REPORT_CACHE_VERSION:
+        return None
+    if str(payload.get("fingerprint") or "") != fingerprint:
+        return None
+    return payload.get("data") if isinstance(payload.get("data"), dict) else None
+
+
+def _refresh_cached_report_payload(
+    payload: dict,
+    *,
+    task: dict,
+    report_dir: Path,
+    report_source: dict,
+    sample_name: str,
+    sample_display_name: str,
+) -> dict:
+    refreshed = copy.deepcopy(payload)
+    cached_task = refreshed.get("task") if isinstance(refreshed.get("task"), dict) else {}
+    params = task.get("params") or {}
+    root_dir = report_source.get("root_dir")
+    root_dir_text = str(root_dir) if root_dir else str(params.get("output_dir") or report_dir)
+    cached_task.update({
+        "id": task.get("id"),
+        "name": task.get("name"),
+        "status": task.get("status"),
+        "owner": task.get("owner"),
+        "group": task.get("owner_group", ""),
+        "created_at": task.get("created_at"),
+        "started_at": task.get("started_at"),
+        "finished_at": task.get("finished_at"),
+        "input_path": params.get("input_path", ""),
+        "output_dir": root_dir_text,
+        "sample_name": sample_name,
+        "sample_display_name": sample_display_name,
+        "samples": report_source.get("samples", []),
+        "report_mode": report_source.get("mode", "single"),
+        "multi_sample_summary": _build_multi_sample_queue_summary(report_source),
+    })
+    refreshed["task"] = cached_task
+    refreshed_sections = refreshed.get("sections") if isinstance(refreshed.get("sections"), dict) else {}
+    overview_section = refreshed_sections.get("overview") if isinstance(refreshed_sections.get("overview"), dict) else {}
+    overview_section["multi_sample_summary"] = cached_task.get("multi_sample_summary") or {}
+    refreshed_sections["overview"] = overview_section
+    refreshed["sections"] = refreshed_sections
+    return refreshed
+
+
+_NCOV_NGDC_KB_DIR = Path(__file__).resolve().parent.parent / "database" / "virus" / "ncov" / "ngdc_mutation_kb"
+_NCOV_NGDC_KB_INDEX_PATH = _NCOV_NGDC_KB_DIR / "knowledge_index.json"
+_NCOV_ORF1A_AA_LENGTH = 4401
+
+
+def _resolve_report_artifact_path(report_dir: Path, preferred_names: list[str], fallback_patterns: list[str] | None = None) -> Path:
+    for name in preferred_names:
+        candidate = report_dir / name
+        if candidate.is_file():
+            return candidate
+    for pattern in fallback_patterns or []:
+        matches = sorted(
+            [item for item in report_dir.glob(pattern) if item.is_file() and not item.name.startswith(".")],
+            key=lambda item: item.name.lower(),
+        )
+        if matches:
+            return matches[0]
+    return Path("")
+
+
+def _parse_gff_attributes(raw_text: str) -> dict[str, str]:
+    attributes: dict[str, str] = {}
+    for item in str(raw_text or "").strip().split(";"):
+        if not item or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        key = key.strip()
+        value = unquote(value.strip())
+        if key:
+            attributes[key] = value
+    return attributes
+
+
+def _read_gff_genome_features(gff_path: Path) -> list[dict[str, object]]:
+    if not gff_path.is_file():
+        return []
+    features: list[dict[str, object]] = []
+    sequence_regions: list[tuple[str, int, int]] = []
+    try:
+        with gff_path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                text = line.strip()
+                if not text:
+                    continue
+                if text.startswith("##sequence-region"):
+                    parts = text.split()
+                    if len(parts) >= 4:
+                        try:
+                            sequence_regions.append((parts[1], int(parts[2]), int(parts[3])))
+                        except (TypeError, ValueError):
+                            pass
+                    continue
+                if text.startswith("#"):
+                    continue
+                parts = text.split("\t")
+                if len(parts) < 9:
+                    continue
+                seqid, _source, feature_type, start_text, end_text, _score, strand, _phase, attributes_text = parts[:9]
+                if feature_type not in {"gene", "CDS", "five_prime_UTR", "three_prime_UTR"}:
+                    continue
+                try:
+                    start = int(start_text)
+                    end = int(end_text)
+                except (TypeError, ValueError):
+                    continue
+                if end < start:
+                    continue
+                attributes = _parse_gff_attributes(attributes_text)
+                if feature_type in {"gene", "CDS"}:
+                    primary_product = attributes.get("product") if feature_type == "CDS" else None
+                    label = (
+                        attributes.get("gene_name")
+                        or attributes.get("gene")
+                        or primary_product
+                        or attributes.get("Name")
+                        or attributes.get("locus_tag")
+                        or attributes.get("ID")
+                        or "Gene"
+                    )
+                    category = "gene"
+                elif feature_type == "five_prime_UTR":
+                    label = "5'UTR"
+                    category = "utr"
+                else:
+                    label = "3'UTR"
+                    category = "utr"
+                features.append(
+                    {
+                        "seqid": seqid,
+                        "feature_type": feature_type,
+                        "category": category,
+                        "label": label,
+                        "start": start,
+                        "end": end,
+                        "length": end - start + 1,
+                        "strand": strand or "+",
+                    }
+                )
+    except OSError:
+        return []
+    if len(sequence_regions) > 1:
+        offsets: dict[str, int] = {}
+        cursor = 0
+        for seqid, region_start, region_end in sequence_regions:
+            offsets[seqid] = cursor - region_start + 1
+            cursor += max(0, region_end - region_start + 1)
+        for item in features:
+            offset = offsets.get(str(item.get("seqid") or ""))
+            if offset is None:
+                continue
+            item["segment_start"] = item.get("start")
+            item["segment_end"] = item.get("end")
+            item["start"] = int(item.get("start") or 0) + offset
+            item["end"] = int(item.get("end") or 0) + offset
+            item["length"] = int(item["end"]) - int(item["start"]) + 1
+    gene_features = [item for item in features if str(item.get("feature_type") or "") == "gene"]
+    utr_features = [item for item in features if str(item.get("category") or "") == "utr"]
+    cds_features = [item for item in features if str(item.get("feature_type") or "") == "CDS"]
+    display_features = utr_features + (gene_features if gene_features else cds_features)
+    return sorted(display_features, key=lambda item: (int(item.get("start") or 0), int(item.get("end") or 0)))
+
+
+def _simplify_virus_coverage_features(features: list[dict[str, object]], species_hint: str) -> list[dict[str, object]]:
+    if not features:
+        return []
+    normalized_species = str(species_hint or "").strip().lower()
+    if any(token in normalized_species for token in ("hantavirus", "orthohantavirus", "汉坦", "汉他")):
+        return _simplify_orthohantavirus_coverage_features(features)
+    if not any(token in normalized_species for token in ("ebola", "ebolavirus", "orthoebolavirus", "ebov", "埃博拉")):
+        return features
+
+    canonical_order = ["5'UTR", "NP", "VP35", "VP40", "GP", "VP30", "VP24", "L", "3'UTR"]
+    canonical_rank = {label: index for index, label in enumerate(canonical_order)}
+
+    def normalize_ebola_label(value: object, feature_type: object) -> str:
+        text = str(value or "").strip()
+        compact = re.sub(r"[^a-z0-9]+", "", text.lower())
+        if str(feature_type or "").strip() == "five_prime_UTR":
+            return "5'UTR"
+        if str(feature_type or "").strip() == "three_prime_UTR":
+            return "3'UTR"
+        mapping = {
+            "np": "NP",
+            "nucleoprotein": "NP",
+            "vp35": "VP35",
+            "vp40": "VP40",
+            "matrixprotein": "VP40",
+            "gp": "GP",
+            "sgp": "GP",
+            "ssgp": "GP",
+            "glycoprotein": "GP",
+            "virionspikeglycoproteinprecursor": "GP",
+            "vp30": "VP30",
+            "polymerasecomplexprotein": "VP30",
+            "vp24": "VP24",
+            "l": "L",
+            "polymerase": "L",
+            "rnadependentrnapolymerase": "L",
+        }
+        return mapping.get(compact, text)
+
+    merged: dict[str, dict[str, object]] = {}
+    for feature in features:
+        label = normalize_ebola_label(feature.get("label"), feature.get("feature_type"))
+        if label not in canonical_rank:
+            continue
+        start = _safe_int(feature.get("start"))
+        end = _safe_int(feature.get("end"))
+        if start is None or end is None:
+            continue
+        if label not in merged:
+            merged[label] = {**feature, "label": label, "start": start, "end": end}
+            if label not in {"5'UTR", "3'UTR"}:
+                merged[label]["feature_type"] = "gene"
+                merged[label]["category"] = "gene"
+            continue
+        merged[label]["start"] = min(int(merged[label].get("start") or start), start)
+        merged[label]["end"] = max(int(merged[label].get("end") or end), end)
+        merged[label]["length"] = int(merged[label]["end"]) - int(merged[label]["start"]) + 1
+
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            canonical_rank.get(str(item.get("label") or ""), 999),
+            int(item.get("start") or 0),
+            int(item.get("end") or 0),
+        ),
+    )
+
+
+def _simplify_orthohantavirus_coverage_features(features: list[dict[str, object]]) -> list[dict[str, object]]:
+    canonical_order = ["5'UTR", "N", "GPC", "Gn", "Gc", "L", "3'UTR"]
+    canonical_rank = {label: index for index, label in enumerate(canonical_order)}
+
+    def normalize_hantavirus_label(value: object, feature_type: object) -> str:
+        text = str(value or "").strip()
+        compact = re.sub(r"[^a-z0-9]+", "", text.lower())
+        if str(feature_type or "").strip() == "five_prime_UTR":
+            return "5'UTR"
+        if str(feature_type or "").strip() == "three_prime_UTR":
+            return "3'UTR"
+        if compact in {"n", "np", "nucleocapsid", "nucleocapsidprotein"}:
+            return "N"
+        if compact in {"gpc", "glycoprotein", "glycoproteinprecursor", "glycoproteinprecusor", "envelopeglycoproteinprecursor"}:
+            return "GPC"
+        if compact in {"gn", "glycoproteinn"}:
+            return "Gn"
+        if compact in {"gc", "glycoproteinc"}:
+            return "Gc"
+        if compact in {"l", "polymerase", "rdrp", "rnadependentrnapolymerase"}:
+            return "L"
+        return text
+
+    merged: dict[str, dict[str, object]] = {}
+    fallback: list[dict[str, object]] = []
+    for feature in features:
+        label = normalize_hantavirus_label(feature.get("label"), feature.get("feature_type"))
+        start = _safe_int(feature.get("start"))
+        end = _safe_int(feature.get("end"))
+        if start is None or end is None:
+            continue
+        if label not in canonical_rank:
+            fallback.append({**feature, "label": label, "start": start, "end": end})
+            continue
+        if label not in merged:
+            merged[label] = {**feature, "label": label, "start": start, "end": end}
+            if label not in {"5'UTR", "3'UTR"}:
+                merged[label]["feature_type"] = "gene"
+                merged[label]["category"] = "gene"
+            continue
+        merged[label]["start"] = min(int(merged[label].get("start") or start), start)
+        merged[label]["end"] = max(int(merged[label].get("end") or end), end)
+        merged[label]["length"] = int(merged[label]["end"]) - int(merged[label]["start"]) + 1
+
+    display_features = list(merged.values()) or fallback
+    return sorted(
+        display_features,
+        key=lambda item: (
+            int(item.get("start") or 0),
+            int(item.get("end") or 0),
+            canonical_rank.get(str(item.get("label") or ""), 999),
+        ),
+    )
+
+
+def _read_ncov_genome_features() -> list[dict[str, object]]:
+    gff_path = Path(__file__).resolve().parent.parent / "database" / "virus" / "ncov" / "genomic.gff"
+    return _read_gff_genome_features(gff_path)
+
+
+def _normalize_sars_cov_2_gene_name(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized = text.lower().replace(" ", "")
+    mapping = {
+        "orf1ab": "ORF1ab",
+        "orf1a": "ORF1a",
+        "orf1b": "ORF1b",
+        "orf3a": "ORF3a",
+        "orf6": "ORF6",
+        "orf7a": "ORF7a",
+        "orf7b": "ORF7b",
+        "orf8": "ORF8",
+        "orf9b": "ORF9b",
+        "orf10": "ORF10",
+        "spike": "S",
+    }
+    return mapping.get(normalized, text)
+
+
+def _replace_first_numeric_token(text: str, replacement: int) -> str:
+    return re.sub(r"\d+", str(replacement), text, count=1)
+
+
+def _build_ncov_aa_alias_keys(gene: object, mutation: object) -> list[str]:
+    gene_name = _normalize_sars_cov_2_gene_name(gene)
+    change = str(mutation or "").strip()
+    if not gene_name or not change:
+        return []
+    aliases = {f"{gene_name}:{change}"}
+    match = re.search(r"(\d+)", change)
+    if not match:
+        return sorted(aliases)
+    position = int(match.group(1))
+    if gene_name == "ORF1ab":
+        if position <= _NCOV_ORF1A_AA_LENGTH:
+            aliases.add(f"ORF1a:{_replace_first_numeric_token(change, position)}")
+        else:
+            aliases.add(f"ORF1b:{_replace_first_numeric_token(change, position - _NCOV_ORF1A_AA_LENGTH)}")
+    elif gene_name == "ORF1a":
+        aliases.add(f"ORF1ab:{_replace_first_numeric_token(change, position)}")
+    elif gene_name == "ORF1b":
+        aliases.add(f"ORF1ab:{_replace_first_numeric_token(change, position + _NCOV_ORF1A_AA_LENGTH)}")
+    return sorted(aliases)
+
+
+def _split_comma_tokens(value: object) -> list[str]:
+    if value is None:
+        return []
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+@lru_cache(maxsize=1)
+def _load_ncov_ngdc_mutation_knowledge() -> dict:
+    if not _NCOV_NGDC_KB_INDEX_PATH.is_file():
+        return {}
+    try:
+        payload = json.loads(_NCOV_NGDC_KB_INDEX_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _collect_ncov_ngdc_matches(columns: list[str], row: list[object]) -> dict:
+    knowledge_payload = _load_ncov_ngdc_mutation_knowledge()
+    by_aa_key = knowledge_payload.get("by_aa_key") if isinstance(knowledge_payload, dict) else {}
+    if not isinstance(by_aa_key, dict) or not by_aa_key:
+        return {
+            "status": "missing",
+            "source": "NGDC",
+            "source_page": "https://ngdc.cncb.ac.cn/ncov/knowledge/mutation",
+            "downloaded_at": "",
+            "record_count": 0,
+            "matched_record_count": 0,
+            "aa_matches": {},
+        }
+
+    row_map = {
+        str(column): row[index] if index < len(row) else ""
+        for index, column in enumerate(columns)
+    }
+    aa_tokens: list[tuple[str, str, str]] = []
+    for field_name, change_type in [
+        ("aaSubstitutions", "substitution"),
+        ("aaDeletions", "deletion"),
+        ("aaInsertions", "insertion"),
+    ]:
+        for token in _split_comma_tokens(row_map.get(field_name)):
+            gene, _, change = token.partition(":")
+            if not gene or not change:
+                continue
+            aa_tokens.append((gene.strip(), change.strip(), change_type))
+
+    aa_matches: dict[str, list[dict]] = {}
+    matched_total = 0
+    for gene, change, change_type in aa_tokens:
+        label = f"{_normalize_sars_cov_2_gene_name(gene)}:{change}"
+        record_pool: list[dict] = []
+        seen: set[tuple[str, str, str, str, str]] = set()
+        for alias in _build_ncov_aa_alias_keys(gene, change):
+            for item in by_aa_key.get(alias, []):
+                if not isinstance(item, dict):
+                    continue
+                dedupe_key = (
+                    str(item.get("section_key") or ""),
+                    str(item.get("gene") or ""),
+                    str(item.get("mutation") or ""),
+                    str(item.get("effect") or ""),
+                    str(item.get("detail") or ""),
+                )
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                record_pool.append({
+                    "source": str(item.get("source") or "NGDC"),
+                    "section_key": str(item.get("section_key") or "").strip(),
+                    "section_label": str(item.get("section_label") or "").strip(),
+                    "gene": str(item.get("gene") or "").strip(),
+                    "mutation": str(item.get("mutation") or "").strip(),
+                    "display_label": f"{str(item.get('gene') or '').strip()}:{str(item.get('mutation') or '').strip()}".strip(":"),
+                    "genomic_position": str(item.get("genomic_position") or "").strip(),
+                    "nuc_change": str(item.get("nuc_change") or "").strip(),
+                    "effect": str(item.get("effect") or "").strip(),
+                    "effect_zh": str(item.get("effect_zh") or item.get("effect") or "").strip(),
+                    "detail": str(item.get("detail") or "").strip(),
+                    "detail_zh": str(item.get("detail_zh") or item.get("detail") or "").strip(),
+                    "method": str(item.get("method") or "").strip(),
+                    "method_zh": str(item.get("method_zh") or item.get("method") or "").strip(),
+                    "pmid": str(item.get("pmid") or "").strip(),
+                    "extra": item.get("extra") if isinstance(item.get("extra"), dict) else {},
+                })
+        if record_pool:
+            aa_matches[label] = record_pool
+            matched_total += len(record_pool)
+
+    return {
+        "status": "ready",
+        "source": str(knowledge_payload.get("source") or "NGDC"),
+        "source_page": str(knowledge_payload.get("source_page") or "https://ngdc.cncb.ac.cn/ncov/knowledge/mutation"),
+        "downloaded_at": str(knowledge_payload.get("downloaded_at") or ""),
+        "record_count": int(knowledge_payload.get("record_count") or 0),
+        "matched_record_count": matched_total,
+        "aa_matches": aa_matches,
+    }
+
+
+def _make_json_safe(value: object) -> object:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _make_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_make_json_safe(item) for item in value]
+    if isinstance(value, set):
+        return [_make_json_safe(item) for item in sorted(value, key=lambda item: str(item))]
+    return value
+
+
+def _write_report_cache(report_dir: Path, sample_name: str, fingerprint: str, data: dict) -> None:
+    cache_dir = _report_cache_dir(report_dir)
+    cache_path = _report_cache_path(report_dir, sample_name)
+    temp_path = cache_path.with_suffix(".tmp")
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        payload = _make_json_safe({"version": REPORT_CACHE_VERSION, "fingerprint": fingerprint, "data": data})
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        temp_path.replace(cache_path)
+    except OSError:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
 
 
 def _read_summary_metrics(path: Path) -> dict:
     if not path.is_file():
         return {}
     total_sum_len = 0
+    total_reads = 0
     weighted_q20 = 0.0
     weighted_q30 = 0.0
     try:
@@ -1121,6 +14320,15 @@ def _read_summary_metrics(path: Path) -> dict:
             reader = csv.DictReader(handle, delimiter="\t")
             for row in reader:
                 value = _safe_int(row.get("sum_len"))
+                reads_value = _safe_int(
+                    row.get("sum_reads")
+                    or row.get("reads")
+                    or row.get("read_count")
+                    or row.get("序列数量")
+                    or row.get("sum_num")
+                )
+                if reads_value is not None:
+                    total_reads += reads_value
                 if value is not None:
                     total_sum_len += value
                     q20 = _safe_float(row.get("Q20(%)"))
@@ -1133,6 +14341,7 @@ def _read_summary_metrics(path: Path) -> dict:
         return {}
     return {
         "sum_len": total_sum_len or None,
+        "sum_reads": total_reads or None,
         "q20_rate": round(weighted_q20 / total_sum_len, 2) if total_sum_len else None,
         "q30_rate": round(weighted_q30 / total_sum_len, 2) if total_sum_len else None,
     }
@@ -1155,6 +14364,2355 @@ def _read_checkm_metrics(path: Path) -> dict:
             }
     except OSError:
         return {}
+
+
+def _is_bordetella_pertussis(checkm_info: dict) -> bool:
+    candidates = [
+        checkm_info.get("species_name"),
+        checkm_info.get("mlst_species_name"),
+    ]
+    for value in candidates:
+        text = str(value or "").strip().lower()
+        if "bordetella" in text and "pertussis" in text:
+            return True
+    return False
+
+
+def _read_influenza_typing_section(report_dir: Path, sample_name: str) -> dict | None:
+    summary_path = report_dir / "wf_flu" / "typing_summary.tsv"
+    if not summary_path.is_file():
+        return None
+    try:
+        with summary_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            first = next(reader, None)
+    except OSError:
+        return None
+    if not first:
+        return None
+    status = str(first.get("status") or "").strip() or "-"
+    influenza_type = str(first.get("influenza_type") or "").strip() or "-"
+    ha_subtype = str(first.get("ha_subtype") or "").strip() or "-"
+    na_subtype = str(first.get("na_subtype") or "").strip() or "-"
+    subtype_call = str(first.get("subtype_call") or "").strip() or "-"
+    reference_path = str(first.get("reference_path") or "").strip()
+    segment_manifest = _read_tsv_rows(report_dir / "wf_flu" / "reference_sets" / "final_segments.tsv")
+    variant_annotation = _read_influenza_variant_annotation_table(report_dir)
+    resistance_annotation = _read_influenza_resistance_annotation_table(report_dir)
+    igv_view = _discover_influenza_igv_assets(report_dir, sample_name)
+    raw_mutation_table = variant_annotation if str(variant_annotation.get("status") or "") == "ready" else (
+        _read_tsv_rows(report_dir / f"{sample_name}.anno.tsv") if sample_name else {"columns": [], "rows": []}
+    )
+    mutation_table = _build_influenza_mutation_display_table(report_dir, raw_mutation_table)
+    summary_columns = ["样本名称", "流感类型", "HA亚型", "NA亚型", "分型结果", "状态"]
+    summary_rows = [[sample_name, influenza_type, ha_subtype, na_subtype, subtype_call, status]]
+    segment_count = len(segment_manifest.get("rows") or [])
+    mutation_rows = mutation_table.get("rows") or []
+    mutation_columns = mutation_table.get("columns") or []
+    mutation_segment_count = 0
+    if mutation_rows and mutation_columns:
+        segment_column = "染色体" if "染色体" in mutation_columns else (mutation_columns[0] if mutation_columns else "")
+        if segment_column in mutation_columns:
+            segment_index = mutation_columns.index(segment_column)
+            mutation_segment_count = len(
+                {
+                    str(row[segment_index]).strip()
+                    for row in mutation_rows
+                    if row and segment_index < len(row) and str(row[segment_index]).strip()
+                }
+            )
+    summary_cards = [
+        {"label": "流感类型", "value": influenza_type},
+        {"label": "HA 亚型", "value": ha_subtype},
+        {"label": "NA 亚型", "value": na_subtype},
+        {"label": "分型结果", "value": subtype_call},
+        {"label": "突变位点数", "value": int(variant_annotation.get("total_variants") or len(mutation_rows)) if mutation_rows else "--"},
+    ]
+    note_parts = []
+    if segment_count:
+        note_parts.append(f"已拼装 {segment_count} 个 segment 参考片段")
+    if reference_path:
+        note_parts.append(f"参考集合: {Path(reference_path).name}")
+    if str(variant_annotation.get("status") or "") == "ready" and mutation_rows:
+        note_parts.append("已基于 VADR GFF3 与 consensus FASTA 生成 snpEff 变异注释表")
+    if status == "screening_stop":
+        note_parts.append("初筛未满足后续流感组装条件")
+    return {
+        "status": "ready",
+        "mode": "influenza_typing",
+        "influenza_type": influenza_type,
+        "ha_subtype": ha_subtype,
+        "na_subtype": na_subtype,
+        "predicted_serotype": subtype_call,
+        "reference_path": reference_path,
+        "summary_cards": summary_cards,
+        "segment_manifest": segment_manifest,
+        "mutation_table": mutation_table,
+        "mutation_summary": {
+            "count": int(variant_annotation.get("total_variants") or len(mutation_rows)),
+            "segment_count": mutation_segment_count,
+            "columns": mutation_columns,
+        },
+        "variant_annotation": variant_annotation,
+        "resistance_annotation": resistance_annotation,
+        "igv": igv_view,
+        "notes": "；".join(note_parts),
+        "columns": summary_columns,
+        "rows": summary_rows,
+    }
+
+
+def _build_serotype_section(report_dir: Path, sample_name: str, checkm_info: dict) -> dict:
+    nextclade_tsv = report_dir / "nextclade_output" / "nextclade.tsv"
+    if nextclade_tsv.is_file():
+        raw = _read_tsv_rows(nextclade_tsv)
+        columns = raw.get("columns", [])
+        rows = raw.get("rows", [])
+        first_row = rows[0] if rows and isinstance(rows[0], list) else []
+
+        def _value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in columns:
+                return fallback
+            index = columns.index(column_name)
+            value = str(first_row[index] if index < len(first_row) else "").strip()
+            return value or fallback
+
+        seq_name = _value("seqName", sample_name or "-")
+        seq_names: list[str] = []
+        if "seqName" in columns:
+            seq_name_index = columns.index("seqName")
+            for row in rows:
+                if isinstance(row, list) and seq_name_index < len(row):
+                    current_seq_name = str(row[seq_name_index] or "").strip()
+                    if current_seq_name:
+                        seq_names.append(current_seq_name)
+        clade = _value("clade")
+        clade_display = _value("clade_display")
+        clade_who = _value("clade_who")
+        pango = _value("Nextclade_pango")
+        qc_status = _value("qc.overallStatus")
+        qc_score = _value("qc.overallScore")
+        total_substitutions = _value("totalSubstitutions")
+        total_deletions = _value("totalDeletions")
+        total_insertions = _value("totalInsertions")
+        total_aa_substitutions = _value("totalAminoacidSubstitutions")
+        coverage = _value("coverage")
+        missing = _value("missing")
+        private_nuc = _value("privateNucMutations.unlabeledSubstitutions")
+        aa_substitutions = _value("aaSubstitutions")
+        serotype_summary = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+        summary_columns = serotype_summary.get("columns", [])
+        summary_rows = serotype_summary.get("rows", [])
+
+        def _summary_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in summary_columns:
+                return fallback
+            first_summary_row = summary_rows[0] if summary_rows and isinstance(summary_rows[0], list) else []
+            index = summary_columns.index(column_name)
+            value = str(first_summary_row[index] if index < len(first_summary_row) else "").strip()
+            return value or fallback
+
+        virus_type = _summary_value("病毒类型")
+        nextclade_dataset = _summary_value("Nextclade数据集")
+        monkeypox_lineage = _value("lineage")
+        monkeypox_outbreak = _value("outbreak")
+        rsv_lineage = next(
+            (
+                candidate
+                for candidate in [
+                    _value("lineage", ""),
+                    _value("genotype", ""),
+                    _value("Nextclade_pango", ""),
+                ]
+                if candidate and candidate != "-"
+            ),
+            "-",
+        )
+        hmpv_lineage = next(
+            (
+                candidate
+                for candidate in [
+                    _value("lineage", ""),
+                    _value("genotype", ""),
+                    _value("Nextclade_pango", ""),
+                ]
+                if candidate and candidate != "-"
+            ),
+            "-",
+        )
+        denv_lineage = next(
+            (
+                candidate
+                for candidate in [
+                    _value("lineage", ""),
+                    _value("genotype", ""),
+                    _value("serotype", ""),
+                    _value("Nextclade_pango", ""),
+                ]
+                if candidate and candidate != "-"
+            ),
+            "-",
+        )
+        zikav_lineage = next(
+            (
+                candidate
+                for candidate in [
+                    _value("lineage", ""),
+                    _value("genotype", ""),
+                    _value("Nextclade_pango", ""),
+                ]
+                if candidate and candidate != "-"
+            ),
+            "-",
+        )
+        chikv_lineage = next(
+            (
+                candidate
+                for candidate in [
+                    _value("lineage", ""),
+                    _value("genotype", ""),
+                    _value("Nextclade_pango", ""),
+                ]
+                if candidate and candidate != "-"
+            ),
+            "-",
+        )
+        ebola_lineage = next(
+            (
+                candidate
+                for candidate in [
+                    _value("lineage", ""),
+                    _value("genotype", ""),
+                    _value("Nextclade_pango", ""),
+                ]
+                if candidate and candidate != "-"
+            ),
+            "-",
+        )
+        is_hmpv_nextclade = (
+            "Human metapneumovirus" in virus_type
+            or "人偏肺病毒" in virus_type
+            or "metapneumovirus" in virus_type.lower()
+            or "/hmpv" in nextclade_dataset.lower()
+            or "nextclade_db/hmpv" in nextclade_dataset.lower()
+        )
+        if is_hmpv_nextclade:
+            notes: list[str] = []
+            summary_note = _sanitize_virus_demo_note(_summary_value("说明", ""))
+            mutation_table = _read_rsv_variant_annotation_table(report_dir)
+            if nextclade_dataset != "-":
+                notes.append(f"数据集：{nextclade_dataset}")
+            if summary_note:
+                notes.append(summary_note)
+            return {
+                "status": "ready",
+                "mode": "hmpv_nextclade",
+                "predicted_clade": clade,
+                "predicted_lineage": hmpv_lineage,
+                "summary_cards": [
+                    {"label": "Nextclade Clade", "value": clade},
+                    {"label": "Lineage / Genotype", "value": hmpv_lineage},
+                    {"label": "QC 状态", "value": qc_status},
+                    {"label": "覆盖度", "value": coverage},
+                ],
+                "quality_metrics": [
+                    {"label": "QC 分数", "value": qc_score},
+                    {"label": "核苷酸替换", "value": total_substitutions},
+                    {"label": "缺失数", "value": total_deletions},
+                    {"label": "插入数", "value": total_insertions},
+                    {"label": "氨基酸替换", "value": total_aa_substitutions},
+                    {"label": "缺失区段", "value": missing},
+                ],
+                "sequence_name": seq_name,
+                "notes": "；".join(notes),
+                "mutation_table": mutation_table,
+                "igv": _discover_hmpv_igv_assets(report_dir),
+                "phylogeny_tree": _build_nextclade_phylogeny_tree(report_dir, seq_names or seq_name),
+                "columns": columns,
+                "rows": rows[:1],
+            }
+        is_denv_nextclade = (
+            "dengue virus" in virus_type.lower()
+            or "登革热" in virus_type
+            or virus_type.lower().startswith("denv")
+            or "/denv1" in nextclade_dataset.lower()
+            or "/denv2" in nextclade_dataset.lower()
+            or "/denv3" in nextclade_dataset.lower()
+            or "/denv4" in nextclade_dataset.lower()
+            or "nextclade_db/denv1" in nextclade_dataset.lower()
+            or "nextclade_db/denv2" in nextclade_dataset.lower()
+            or "nextclade_db/denv3" in nextclade_dataset.lower()
+            or "nextclade_db/denv4" in nextclade_dataset.lower()
+        )
+        if is_denv_nextclade:
+            notes: list[str] = []
+            summary_note = _sanitize_virus_demo_note(_summary_value("说明", ""))
+            selection_path = report_dir / f"{sample_name}_denv_reference_selection" / "selection.tsv"
+            selection_table = _read_tsv_rows(selection_path)
+            selection_columns = selection_table.get("columns", [])
+            selection_rows = selection_table.get("rows", [])
+            denv_type_hint = ""
+            dataset_hint = nextclade_dataset.lower()
+            virus_type_hint = virus_type.lower()
+            clade_hint = clade.strip()
+            virus_type_match = re.search(r"dengue virus\s*([1-4])", virus_type_hint)
+            dataset_match = re.search(r"denv([1-4])", dataset_hint)
+            clade_match = re.match(r"\s*([1-4])", clade_hint)
+            for match in [virus_type_match, dataset_match, clade_match]:
+                if match:
+                    denv_type_hint = match.group(1)
+                    break
+
+            first_selection: list[object] = []
+            if selection_rows and isinstance(selection_rows[0], list):
+                first_selection = selection_rows[0]
+                if "denv_type" in selection_columns:
+                    denv_type_index = selection_columns.index("denv_type")
+                    coverage_index = selection_columns.index("coverage") if "coverage" in selection_columns else -1
+                    best_row = None
+                    best_score = (-1, -1.0)
+                    for row in selection_rows:
+                        if not isinstance(row, list):
+                            continue
+                        row_type = str(row[denv_type_index] if denv_type_index < len(row) else "").strip()
+                        type_score = 1 if denv_type_hint and row_type == denv_type_hint else 0
+                        try:
+                            coverage_score = float(row[coverage_index]) if coverage_index >= 0 and coverage_index < len(row) else 0.0
+                        except (TypeError, ValueError):
+                            coverage_score = 0.0
+                        score = (type_score, coverage_score)
+                        if score > best_score:
+                            best_score = score
+                            best_row = row
+                    if isinstance(best_row, list):
+                        first_selection = best_row
+
+            def _denv_selection_value(column_name: str, fallback: str = "-") -> str:
+                if column_name not in selection_columns:
+                    return fallback
+                index = selection_columns.index(column_name)
+                value = str(first_selection[index] if index < len(first_selection) else "").strip()
+                return value or fallback
+
+            selected_denv_type = _denv_selection_value("denv_type")
+            selected_reference = Path(_denv_selection_value("reference_path", "")).name or "-"
+            mutation_table = _read_rsv_variant_annotation_table(report_dir)
+            if nextclade_dataset != "-":
+                notes.append(f"数据集：{nextclade_dataset}")
+            if selected_denv_type != "-":
+                notes.append(f"自动选择参考型别：DENV{selected_denv_type}")
+            if selected_reference != "-":
+                notes.append(f"参考序列：{selected_reference}")
+            if summary_note:
+                notes.append(summary_note)
+            return {
+                "status": "ready",
+                "mode": "denv_nextclade",
+                "predicted_serotype": f"DENV-{selected_denv_type}" if selected_denv_type not in {"", "-"} else "",
+                "predicted_clade": clade,
+                "predicted_lineage": denv_lineage,
+                "summary_cards": [
+                    {"label": "Nextclade Clade", "value": clade},
+                    {"label": "Lineage / Genotype", "value": denv_lineage},
+                    {"label": "QC 状态", "value": qc_status},
+                    {"label": "覆盖度", "value": coverage},
+                ],
+                "quality_metrics": [
+                    {"label": "QC 分数", "value": qc_score},
+                    {"label": "核苷酸替换", "value": total_substitutions},
+                    {"label": "缺失数", "value": total_deletions},
+                    {"label": "插入数", "value": total_insertions},
+                    {"label": "氨基酸替换", "value": total_aa_substitutions},
+                    {"label": "缺失区段", "value": missing},
+                ],
+                "sequence_name": seq_name,
+                "notes": "；".join(notes),
+                "mutation_table": mutation_table,
+                "igv": _discover_denv_igv_assets(report_dir),
+                "phylogeny_tree": _build_nextclade_phylogeny_tree(report_dir, seq_names or seq_name),
+                "columns": columns,
+                "rows": rows[:1],
+            }
+        is_zikav_nextclade = (
+            "zika virus" in virus_type.lower()
+            or "寨卡" in virus_type
+            or virus_type.lower().startswith("zik")
+            or "/zikav" in nextclade_dataset.lower()
+            or "nextclade_db/zikav" in nextclade_dataset.lower()
+        )
+        if is_zikav_nextclade:
+            notes: list[str] = []
+            summary_note = _sanitize_virus_demo_note(_summary_value("说明", ""))
+            mutation_table = _read_rsv_variant_annotation_table(report_dir)
+            if nextclade_dataset != "-":
+                notes.append(f"数据集：{nextclade_dataset}")
+            if summary_note:
+                notes.append(summary_note)
+            return {
+                "status": "ready",
+                "mode": "zikav_nextclade",
+                "predicted_clade": clade,
+                "predicted_lineage": zikav_lineage,
+                "summary_cards": [
+                    {"label": "Nextclade Clade", "value": clade},
+                    {"label": "Lineage / Genotype", "value": zikav_lineage},
+                    {"label": "QC 状态", "value": qc_status},
+                    {"label": "覆盖度", "value": coverage},
+                ],
+                "quality_metrics": [
+                    {"label": "QC 分数", "value": qc_score},
+                    {"label": "核苷酸替换", "value": total_substitutions},
+                    {"label": "缺失数", "value": total_deletions},
+                    {"label": "插入数", "value": total_insertions},
+                    {"label": "氨基酸替换", "value": total_aa_substitutions},
+                    {"label": "缺失区段", "value": missing},
+                ],
+                "sequence_name": seq_name,
+                "notes": "；".join(notes),
+                "mutation_table": mutation_table,
+                "igv": _discover_zikav_igv_assets(report_dir),
+                "phylogeny_tree": _build_nextclade_phylogeny_tree(report_dir, seq_names or seq_name),
+                "columns": columns,
+                "rows": rows[:1],
+            }
+        is_chikv_nextclade = (
+            "chikungunya virus" in virus_type.lower()
+            or "chikungunya" in virus_type.lower()
+            or "基孔肯雅" in virus_type
+            or virus_type.lower().startswith("chikv")
+            or "/chikv" in nextclade_dataset.lower()
+            or "nextclade_db/chikv" in nextclade_dataset.lower()
+        )
+        if is_chikv_nextclade:
+            notes: list[str] = []
+            summary_note = _sanitize_virus_demo_note(_summary_value("说明", ""))
+            mutation_table = _read_rsv_variant_annotation_table(report_dir)
+            selected_reference = "reference.fasta" if (report_dir / "genomes" / "ref.fa").is_file() else "-"
+            display_columns = ["样本名称", "病毒类型", "Clade", "Lineage / Genotype", "参考序列", "QC 状态", "覆盖度", "说明"]
+            display_rows = [[
+                sample_name or seq_name or "-",
+                "Chikungunya virus",
+                clade,
+                chikv_lineage,
+                selected_reference,
+                qc_status,
+                coverage,
+                summary_note or "基于 CHIKV 固定参考与 Nextclade 数据集完成 clade / lineage 判读，并结合突变位点表和 IGV 比对结果组织展示。",
+            ]]
+            if nextclade_dataset != "-":
+                notes.append(f"数据集：{nextclade_dataset}")
+            if selected_reference != "-":
+                notes.append(f"参考序列：{selected_reference}")
+            if summary_note:
+                notes.append(summary_note)
+            return {
+                "status": "ready",
+                "mode": "chikv_nextclade",
+                "predicted_clade": clade,
+                "predicted_lineage": chikv_lineage,
+                "reference_name": selected_reference,
+                "summary_cards": [
+                    {"label": "Nextclade Clade", "value": clade},
+                    {"label": "Lineage / Genotype", "value": chikv_lineage},
+                    {"label": "参考序列", "value": selected_reference},
+                    {"label": "QC 状态", "value": qc_status},
+                    {"label": "覆盖度", "value": coverage},
+                ],
+                "quality_metrics": [
+                    {"label": "QC 分数", "value": qc_score},
+                    {"label": "核苷酸替换", "value": total_substitutions},
+                    {"label": "缺失数", "value": total_deletions},
+                    {"label": "插入数", "value": total_insertions},
+                    {"label": "氨基酸替换", "value": total_aa_substitutions},
+                    {"label": "缺失区段", "value": missing},
+                ],
+                "sequence_name": seq_name,
+                "notes": "；".join(notes),
+                "mutation_table": mutation_table,
+                "igv": _discover_chikv_igv_assets(report_dir),
+                "phylogeny_tree": _build_nextclade_phylogeny_tree(report_dir, seq_names or seq_name),
+                "columns": display_columns,
+                "rows": display_rows,
+            }
+        is_ebola_nextclade = (
+            "ebola virus" in virus_type.lower()
+            or "ebolavirus" in virus_type.lower()
+            or "orthoebolavirus" in virus_type.lower()
+            or "埃博拉" in virus_type
+            or "/ebola" in nextclade_dataset.lower()
+            or "nextclade_db/ebola" in nextclade_dataset.lower()
+        )
+        if is_ebola_nextclade:
+            notes: list[str] = []
+            summary_note = _sanitize_virus_demo_note(_summary_value("说明", ""))
+            selection_path = report_dir / f"{sample_name}_orthoebolavirus_reference_selection" / "selection.tsv"
+            selection_table = _read_tsv_rows(selection_path)
+            selection_columns = selection_table.get("columns", [])
+            selection_rows = selection_table.get("rows", [])
+            first_selection = selection_rows[0] if selection_rows and isinstance(selection_rows[0], list) else []
+
+            def _ebola_selection_value(column_name: str, fallback: str = "-") -> str:
+                if column_name not in selection_columns:
+                    return fallback
+                index = selection_columns.index(column_name)
+                value = str(first_selection[index] if index < len(first_selection) else "").strip()
+                return value or fallback
+
+            selected_type = _ebola_selection_value("predicted_type")
+            selected_reference = Path(_ebola_selection_value("reference_path", "")).name or "-"
+            mutation_table = _read_rsv_variant_annotation_table(report_dir)
+            display_columns = ["样本名称", "病毒类型", "本地参考分型", "Nextclade Clade", "Lineage / Genotype", "参考序列", "QC 状态", "覆盖度", "说明"]
+            display_rows = [[
+                sample_name or seq_name or "-",
+                "Ebola virus",
+                selected_type,
+                clade,
+                ebola_lineage,
+                selected_reference,
+                qc_status,
+                coverage,
+                summary_note or "基于 Orthoebolavirus 本地参考库完成最优参考筛选；EBOV 样本继续进入 Ebola Nextclade 数据集完成 clade / lineage 判读。",
+            ]]
+            if nextclade_dataset != "-":
+                notes.append(f"数据集：{nextclade_dataset}")
+            if selected_type != "-":
+                notes.append(f"本地参考筛选：{selected_type}")
+            if selected_reference != "-":
+                notes.append(f"参考序列：{selected_reference}")
+            if summary_note:
+                notes.append(summary_note)
+            return {
+                "status": "ready",
+                "mode": "ebola_nextclade",
+                "predicted_serotype": selected_type if selected_type != "-" else "",
+                "predicted_clade": clade,
+                "predicted_lineage": ebola_lineage,
+                "reference_name": selected_reference,
+                "summary_cards": [
+                    {"label": "Nextclade Clade", "value": clade},
+                    {"label": "Lineage / Genotype", "value": ebola_lineage},
+                    {"label": "本地参考分型", "value": selected_type},
+                    {"label": "QC 状态", "value": qc_status},
+                    {"label": "覆盖度", "value": coverage},
+                ],
+                "quality_metrics": [
+                    {"label": "QC 分数", "value": qc_score},
+                    {"label": "核苷酸替换", "value": total_substitutions},
+                    {"label": "缺失数", "value": total_deletions},
+                    {"label": "插入数", "value": total_insertions},
+                    {"label": "氨基酸替换", "value": total_aa_substitutions},
+                    {"label": "缺失区段", "value": missing},
+                ],
+                "sequence_name": seq_name,
+                "notes": "；".join(notes),
+                "mutation_table": mutation_table,
+                "igv": _discover_ebola_igv_assets(report_dir),
+                "phylogeny_tree": _build_nextclade_phylogeny_tree(report_dir, seq_names or seq_name),
+                "orthoebolavirus_selection": selection_table,
+                "nextclade_columns": columns,
+                "nextclade_rows": rows[:1],
+                "columns": display_columns,
+                "rows": display_rows,
+            }
+        is_rsv_nextclade = (
+            "Respiratory syncytial" in virus_type
+            or "合胞病毒" in virus_type
+            or "orthopneumovirus" in virus_type.lower()
+            or "/rsv_" in nextclade_dataset.lower()
+            or "nextclade_db/rsv_" in nextclade_dataset.lower()
+        )
+        if is_rsv_nextclade:
+            notes: list[str] = []
+            summary_note = _sanitize_virus_demo_note(_summary_value("说明", ""))
+            selection_path = report_dir / f"{sample_name}_rsv_reference_selection" / "selection.tsv"
+            selection_table = _read_tsv_rows(selection_path)
+            selection_columns = selection_table.get("columns", [])
+            selection_rows = selection_table.get("rows", [])
+            rsv_type_hint = ""
+            dataset_hint = nextclade_dataset.lower()
+            virus_type_hint = virus_type.lower()
+            clade_hint = clade.strip().upper()
+            if "rsv_b" in dataset_hint or "respiratory syncytial virus b" in virus_type_hint or clade_hint.startswith("B"):
+                rsv_type_hint = "B"
+            elif "rsv_a" in dataset_hint or "respiratory syncytial virus a" in virus_type_hint or clade_hint.startswith("A"):
+                rsv_type_hint = "A"
+
+            first_selection: list[object] = []
+            if selection_rows and isinstance(selection_rows[0], list):
+                first_selection = selection_rows[0]
+                if "rsv_type" in selection_columns:
+                    rsv_type_index = selection_columns.index("rsv_type")
+                    coverage_index = selection_columns.index("coverage") if "coverage" in selection_columns else -1
+                    best_row = None
+                    best_score = (-1, -1.0)
+                    for row in selection_rows:
+                        if not isinstance(row, list):
+                            continue
+                        row_type = str(row[rsv_type_index] if rsv_type_index < len(row) else "").strip()
+                        type_score = 1 if rsv_type_hint and row_type == rsv_type_hint else 0
+                        try:
+                            coverage_score = float(row[coverage_index]) if coverage_index >= 0 and coverage_index < len(row) else 0.0
+                        except (TypeError, ValueError):
+                            coverage_score = 0.0
+                        score = (type_score, coverage_score)
+                        if score > best_score:
+                            best_score = score
+                            best_row = row
+                    if isinstance(best_row, list):
+                        first_selection = best_row
+
+            def _selection_value(column_name: str, fallback: str = "-") -> str:
+                if column_name not in selection_columns:
+                    return fallback
+                index = selection_columns.index(column_name)
+                value = str(first_selection[index] if index < len(first_selection) else "").strip()
+                return value or fallback
+
+            selected_rsv_type = _selection_value("rsv_type")
+            selected_reference = Path(_selection_value("reference_path", "")).name or "-"
+            mutation_table = _read_rsv_variant_annotation_table(report_dir)
+            nmdc_annotation = _read_rsv_nmdc_annotation_table(report_dir, mutation_table, selected_rsv_type or virus_type)
+            if nextclade_dataset != "-":
+                notes.append(f"数据集：{nextclade_dataset}")
+            if selected_rsv_type != "-":
+                notes.append(f"自动选择参考型别：RSV {selected_rsv_type}")
+            if selected_reference != "-":
+                notes.append(f"参考序列：{selected_reference}")
+            if summary_note:
+                notes.append(summary_note)
+            return {
+                "status": "ready",
+                "mode": "rsv_nextclade",
+                "predicted_serotype": f"RSV-{selected_rsv_type}" if selected_rsv_type not in {"", "-"} else "",
+                "predicted_clade": clade,
+                "predicted_lineage": rsv_lineage,
+                "summary_cards": [
+                    {"label": "Nextclade Clade", "value": clade},
+                    {"label": "Lineage / Genotype", "value": rsv_lineage},
+                    {"label": "QC 状态", "value": qc_status},
+                    {"label": "覆盖度", "value": coverage},
+                ],
+                "quality_metrics": [
+                    {"label": "QC 分数", "value": qc_score},
+                    {"label": "核苷酸替换", "value": total_substitutions},
+                    {"label": "缺失数", "value": total_deletions},
+                    {"label": "插入数", "value": total_insertions},
+                    {"label": "氨基酸替换", "value": total_aa_substitutions},
+                    {"label": "缺失区段", "value": missing},
+                ],
+                "sequence_name": seq_name,
+                "notes": "；".join(notes),
+                "mutation_table": mutation_table,
+                "nmdc_annotation": nmdc_annotation,
+                "igv": _discover_rsv_igv_assets(report_dir),
+                "phylogeny_tree": _build_nextclade_phylogeny_tree(report_dir, seq_names or seq_name),
+                "columns": columns,
+                "rows": rows[:1],
+            }
+        is_monkeypox_nextclade = (
+            "Monkeypox" in virus_type
+            or "猴痘" in virus_type
+            or ("lineage" in columns and "outbreak" in columns and "Nextclade_pango" not in columns)
+        )
+        if is_monkeypox_nextclade:
+            notes: list[str] = []
+            dataset_path = _summary_value("Nextclade数据集")
+            summary_note = _sanitize_virus_demo_note(_summary_value("说明", ""))
+            mutation_table = _read_monkeypox_variant_annotation_table(report_dir)
+            if dataset_path != "-":
+                notes.append(f"数据集：{dataset_path}")
+            if summary_note:
+                notes.append(summary_note)
+            return {
+                "status": "ready",
+                "mode": "monkeypox_nextclade",
+                "predicted_clade": clade,
+                "predicted_lineage": monkeypox_lineage,
+                "predicted_outbreak": monkeypox_outbreak,
+                "summary_cards": [
+                    {"label": "Nextclade Clade", "value": clade},
+                    {"label": "Lineage", "value": monkeypox_lineage},
+                    {"label": "Outbreak", "value": monkeypox_outbreak},
+                    {"label": "QC 状态", "value": qc_status},
+                ],
+                "quality_metrics": [
+                    {"label": "QC 分数", "value": qc_score},
+                    {"label": "覆盖度", "value": coverage},
+                    {"label": "核苷酸替换", "value": total_substitutions},
+                    {"label": "缺失数", "value": total_deletions},
+                    {"label": "插入数", "value": total_insertions},
+                    {"label": "氨基酸替换", "value": total_aa_substitutions},
+                    {"label": "移码数", "value": _value("totalFrameShifts")},
+                    {"label": "缺失区段", "value": missing},
+                ],
+                "sequence_name": seq_name,
+                "notes": "；".join(notes),
+                "mutation_table": mutation_table,
+                "igv": _discover_monkeypox_igv_assets(report_dir),
+                "phylogeny_tree": _build_nextclade_phylogeny_tree(report_dir, seq_names or seq_name),
+                "columns": columns,
+                "rows": rows[:1],
+            }
+
+        raw_ncov_variant_annotation = _read_ncov_variant_annotation_table(report_dir)
+        ncov_variant_annotation = _build_ncov_mutation_display_table(report_dir, raw_ncov_variant_annotation)
+        ncov_igv_view = _discover_ncov_igv_assets(report_dir)
+        ngdc_mutation_knowledge = _collect_ncov_ngdc_matches(columns, first_row)
+        notes: list[str] = []
+        if clade_who != "-":
+            notes.append(f"WHO 命名：{clade_who}")
+        if clade_display != "-" and clade_display != clade:
+            notes.append(f"显示分型：{clade_display}")
+        note_text = "；".join(notes)
+        mutation_preview = [item.strip() for item in private_nuc.split(",") if item.strip()][:12]
+        aa_preview = [item.strip() for item in aa_substitutions.split(",") if item.strip()][:20]
+        return {
+            "status": "ready",
+            "mode": "sars_cov_2_nextclade",
+            "predicted_clade": clade,
+            "pango_lineage": pango,
+            "summary_cards": [
+                {"label": "Nextclade Clade", "value": clade},
+                {"label": "Pango 谱系", "value": pango},
+                {"label": "QC 状态", "value": qc_status},
+                {"label": "覆盖度", "value": coverage},
+            ],
+            "quality_metrics": [
+                {"label": "QC 分数", "value": qc_score},
+                {"label": "核苷酸替换", "value": total_substitutions},
+                {"label": "缺失数", "value": total_deletions},
+                {"label": "插入数", "value": total_insertions},
+                {"label": "氨基酸替换", "value": total_aa_substitutions},
+                {"label": "缺失区段", "value": missing},
+            ],
+            "sequence_name": seq_name,
+            "notes": note_text,
+            "mutation_preview": mutation_preview,
+            "aa_mutation_preview": aa_preview,
+            "mutation_knowledge": ngdc_mutation_knowledge,
+            "variant_annotation": ncov_variant_annotation,
+            "igv": ncov_igv_view,
+            "phylogeny_tree": _build_nextclade_phylogeny_tree(report_dir, seq_names or seq_name),
+            "columns": columns,
+            "rows": rows[:1],
+        }
+
+    influenza_typing = _read_influenza_typing_section(report_dir, sample_name)
+    if influenza_typing:
+        return influenza_typing
+
+    hadv_summary = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    hadv_columns = hadv_summary.get("columns", [])
+    hadv_rows = hadv_summary.get("rows", [])
+    if any(str(column).strip() == "HAdV分型" for column in hadv_columns):
+        first_summary_row = hadv_rows[0] if hadv_rows and isinstance(hadv_rows[0], list) else []
+
+        def _hadv_summary_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in hadv_columns:
+                return fallback
+            index = hadv_columns.index(column_name)
+            value = str(first_summary_row[index] if index < len(first_summary_row) else "").strip()
+            return value or fallback
+
+        selection_path = report_dir / f"{sample_name}_hadv_reference_selection" / "selection.tsv"
+        phf_path = report_dir / f"{sample_name}_hadv_reference_selection" / "phf_typing" / "phf_typing.tsv"
+        selection_table = _read_tsv_rows(selection_path)
+        phf_table = _read_tsv_rows(phf_path)
+        selection_columns = selection_table.get("columns", [])
+        selection_rows = selection_table.get("rows", [])
+        first_selection = selection_rows[0] if selection_rows and isinstance(selection_rows[0], list) else []
+
+        def _hadv_selection_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in selection_columns:
+                return fallback
+            index = selection_columns.index(column_name)
+            value = str(first_selection[index] if index < len(first_selection) else "").strip()
+            return value or fallback
+
+        selected_hadv_type = _hadv_summary_value("HAdV分型", _hadv_selection_value("hadv_type"))
+        penton_type = _hadv_summary_value("Penton分型", _hadv_selection_value("penton_type"))
+        hexon_type = _hadv_summary_value("Hexon分型", _hadv_selection_value("hexon_type"))
+        fiber_type = _hadv_summary_value("Fiber分型", _hadv_selection_value("fiber_type"))
+        selected_reference = _hadv_summary_value("参考序列", Path(_hadv_selection_value("reference_path", "")).name or _hadv_selection_value("reference_name"))
+        selected_gff = _hadv_summary_value("注释文件", Path(_hadv_selection_value("gff_path", "")).name or "-")
+        coverage_value = _hadv_summary_value("覆盖度", _hadv_selection_value("coverage"))
+        mean_depth_value = _hadv_summary_value("平均深度", _hadv_selection_value("mean_depth"))
+        summary_note = _sanitize_virus_demo_note(_hadv_summary_value("说明", ""))
+        notes: list[str] = []
+        if selected_hadv_type != "-":
+            notes.append(f"总分型：{selected_hadv_type}")
+        if penton_type != "-" or hexon_type != "-" or fiber_type != "-":
+            notes.append(f"PHF 分型：{penton_type}/{hexon_type}/{fiber_type}")
+        if selected_reference != "-":
+            notes.append(f"参考序列：{selected_reference}")
+        if selected_gff != "-":
+            notes.append(f"注释文件：{selected_gff}")
+        if summary_note and summary_note != "-":
+            notes.append(summary_note)
+        mutation_table = _read_rsv_variant_annotation_table(report_dir)
+        phf_coverage = _read_hadv_phf_coverage_section(report_dir, sample_name)
+        phf_snp = _read_hadv_phf_snp_section(report_dir, sample_name, mutation_table)
+        display_columns = hadv_columns
+        display_rows = hadv_rows[:1]
+        if not display_rows and selection_rows:
+            display_columns = [
+                column
+                for column in selection_columns
+                if str(column).strip() not in {"reference_path", "gff_path", "phf_summary_path"}
+            ]
+            selected_indexes = [selection_columns.index(column) for column in display_columns]
+            display_rows = [
+                [row[index] if index < len(row) else "" for index in selected_indexes]
+                for row in selection_rows
+                if isinstance(row, list)
+            ]
+        return {
+            "status": "ready",
+            "mode": "hadv_typing",
+            "predicted_clade": selected_hadv_type,
+            "reference_name": selected_reference,
+            "summary_cards": [
+                {"label": "HAdV 分型", "value": selected_hadv_type},
+                {"label": "Penton", "value": penton_type},
+                {"label": "Hexon", "value": hexon_type},
+                {"label": "Fiber", "value": fiber_type},
+                {"label": "参考序列", "value": selected_reference},
+                {"label": "覆盖度", "value": coverage_value},
+                *(
+                    [
+                        {"label": f"{str(item[0])} SNP", "value": int(item[3])}
+                        for item in phf_snp.get("rows", [])
+                        if isinstance(item, list) and len(item) > 3
+                    ]
+                ),
+            ],
+            "quality_metrics": [
+                {"label": "平均深度", "value": mean_depth_value},
+            ] if mean_depth_value != "-" else [],
+            "sequence_name": sample_name or "-",
+            "notes": "；".join(notes),
+            "mutation_table": mutation_table,
+            "phf_table": phf_table,
+            "phf_coverage": phf_coverage,
+            "phf_snp": phf_snp,
+            "igv": _discover_hadv_igv_assets(report_dir),
+            "columns": display_columns,
+            "rows": display_rows,
+        }
+
+    norovirus_summary = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    norovirus_columns = norovirus_summary.get("columns", [])
+    norovirus_rows = norovirus_summary.get("rows", [])
+    norovirus_selection = _read_tsv_rows(report_dir / f"{sample_name}_norovirus_reference_selection" / "selection.tsv")
+    norovirus_dual_typing = _read_tsv_rows(report_dir / f"{sample_name}_norovirus_reference_selection" / "typing" / "dual_typing.tsv")
+    norovirus_consensus_typing = _read_tsv_rows(report_dir / f"{sample_name}_norovirus_reference_selection" / "consensus_typing" / "consensus_typing.tsv")
+    has_norovirus_assets = (
+        any(str(column).strip() in {"双位点分型", "RdRp分型"} for column in norovirus_columns)
+        or bool(norovirus_selection.get("rows"))
+        or bool(norovirus_dual_typing.get("rows"))
+    )
+    if has_norovirus_assets:
+        selection_columns = norovirus_selection.get("columns", [])
+        selection_rows = norovirus_selection.get("rows", [])
+        first_selection = selection_rows[0] if selection_rows and isinstance(selection_rows[0], list) else []
+
+        def _norovirus_selection_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in selection_columns:
+                return fallback
+            index = selection_columns.index(column_name)
+            value = str(first_selection[index] if index < len(first_selection) else "").strip()
+            return value or fallback
+
+        dual_columns = norovirus_dual_typing.get("columns", [])
+        dual_rows = [
+            row for row in norovirus_dual_typing.get("rows", [])
+            if isinstance(row, list)
+        ]
+
+        def _norovirus_dual_value(gene_name: str, column_name: str, fallback: str = "-") -> str:
+            if not dual_rows or column_name not in dual_columns or "gene" not in dual_columns:
+                return fallback
+            gene_index = dual_columns.index("gene")
+            column_index = dual_columns.index(column_name)
+            for row in dual_rows:
+                gene_value = str(row[gene_index] if gene_index < len(row) else "").strip().lower()
+                if gene_value != gene_name.lower():
+                    continue
+                value = str(row[column_index] if column_index < len(row) else "").strip()
+                if value:
+                    return value
+            return fallback
+
+        consensus_columns = norovirus_consensus_typing.get("columns", [])
+        consensus_rows = norovirus_consensus_typing.get("rows", [])
+        first_consensus = consensus_rows[0] if consensus_rows and isinstance(consensus_rows[0], list) else []
+
+        def _norovirus_consensus_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in consensus_columns:
+                return fallback
+            index = consensus_columns.index(column_name)
+            value = str(first_consensus[index] if index < len(first_consensus) else "").strip()
+            return value or fallback
+
+        dual_type = _norovirus_selection_value("dual_type", _norovirus_consensus_value("dual_type", "-"))
+        rdrp_type = _norovirus_selection_value("rdrp_type", _norovirus_dual_value("rdrp", "matched_type", _norovirus_consensus_value("rdrp_type", "-")))
+        vp1_type = _norovirus_selection_value("vp1_type", _norovirus_dual_value("vp1", "matched_type", _norovirus_consensus_value("vp1_type", "-")))
+        selected_reference = _norovirus_selection_value("reference_name", Path(_norovirus_selection_value("reference_path", "")).name or "-")
+        selected_gff = Path(_norovirus_selection_value("gff_path", "")).name if _norovirus_selection_value("gff_path", "") not in {"", "-", "nogtf"} else "-"
+        coverage_value = _norovirus_selection_value("coverage", "-")
+        mean_depth_value = _norovirus_selection_value("mean_depth", "-")
+        covered_bases = _norovirus_selection_value("covered_bases", "-")
+        num_reads = _norovirus_selection_value("num_reads", "-")
+        if coverage_value not in {"-", ""}:
+            try:
+                coverage_value = f"{float(coverage_value):.2f}%"
+            except ValueError:
+                pass
+        if mean_depth_value not in {"-", ""}:
+            try:
+                mean_depth_value = f"{float(mean_depth_value):.2f}"
+            except ValueError:
+                pass
+        summary_note = ""
+        if norovirus_columns and norovirus_rows:
+            first_summary_row = norovirus_rows[0] if isinstance(norovirus_rows[0], list) else []
+            if "说明" in norovirus_columns:
+                note_index = norovirus_columns.index("说明")
+                summary_note = _sanitize_virus_demo_note(first_summary_row[note_index] if note_index < len(first_summary_row) else "")
+        notes: list[str] = []
+        if dual_type != "-":
+            notes.append(f"双位点分型：{dual_type}")
+        if rdrp_type != "-" or vp1_type != "-":
+            notes.append(f"RdRp/VP1：{rdrp_type}/{vp1_type}")
+        if selected_reference != "-":
+            notes.append(f"参考序列：{selected_reference}")
+        if selected_gff != "-":
+            notes.append(f"注释文件：{selected_gff}")
+        if summary_note and summary_note != "-":
+            notes.append(summary_note)
+        mutation_table = _read_rsv_variant_annotation_table(report_dir)
+        gene_phylogeny = _build_norovirus_gene_phylogeny(report_dir)
+        display_columns = ["样本名称", "病毒类型", "双位点分型", "RdRp分型", "VP1分型", "参考序列", "覆盖度", "平均深度", "说明"]
+        display_rows = [[
+            sample_name or "-",
+            f"Norovirus {dual_type}" if dual_type != "-" else "Norovirus",
+            dual_type,
+            rdrp_type,
+            vp1_type,
+            selected_reference,
+            coverage_value,
+            mean_depth_value,
+            summary_note or "基于 CDC RdRp/VP1 双位点分型后选择最优全基因组参考。",
+        ]]
+        return {
+            "status": "ready",
+            "mode": "norovirus_typing",
+            "predicted_clade": dual_type,
+            "reference_name": selected_reference,
+            "summary_cards": [
+                {"label": "双位点分型", "value": dual_type},
+                {"label": "RdRp 分型", "value": rdrp_type},
+                {"label": "VP1 分型", "value": vp1_type},
+                {"label": "参考序列", "value": selected_reference},
+                {"label": "覆盖度", "value": coverage_value},
+            ],
+            "quality_metrics": [
+                {"label": "平均深度", "value": mean_depth_value},
+                {"label": "覆盖碱基", "value": covered_bases},
+                {"label": "支持 reads", "value": num_reads},
+            ],
+            "sequence_name": sample_name or "-",
+            "notes": "；".join([item for item in notes if item]),
+            "mutation_table": mutation_table,
+            "typing_table": norovirus_dual_typing,
+            "consensus_typing": norovirus_consensus_typing,
+            "igv": _discover_norovirus_igv_assets(report_dir),
+            "gene_phylogeny": gene_phylogeny,
+            "columns": display_columns,
+            "rows": display_rows,
+        }
+
+    enterovirus_summary = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    enterovirus_columns = enterovirus_summary.get("columns", [])
+    enterovirus_rows = enterovirus_summary.get("rows", [])
+    enterovirus_selection = _read_tsv_rows(report_dir / f"{sample_name}_enterovirus_reference_selection" / "selection.tsv")
+    enterovirus_consensus_typing = _read_tsv_rows(report_dir / f"{sample_name}_enterovirus_reference_selection" / "consensus_typing" / "consensus_typing.tsv")
+    enterovirus_phylogeny = _build_enterovirus_gene_phylogeny(report_dir)
+    has_enterovirus_assets = (
+        any(str(column).strip() in {"VP1分型", "VP1 分型"} for column in enterovirus_columns)
+        or bool(enterovirus_selection.get("rows"))
+        or bool(enterovirus_consensus_typing.get("rows"))
+        or str(enterovirus_phylogeny.get("status") or "").strip().lower() == "ready"
+    )
+    if has_enterovirus_assets:
+        selection_columns = enterovirus_selection.get("columns", [])
+        selection_rows = enterovirus_selection.get("rows", [])
+        first_selection = selection_rows[0] if selection_rows and isinstance(selection_rows[0], list) else []
+
+        def _enterovirus_selection_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in selection_columns:
+                return fallback
+            index = selection_columns.index(column_name)
+            value = str(first_selection[index] if index < len(first_selection) else "").strip()
+            return value or fallback
+
+        consensus_columns = enterovirus_consensus_typing.get("columns", [])
+        consensus_rows = enterovirus_consensus_typing.get("rows", [])
+        first_consensus = consensus_rows[0] if consensus_rows and isinstance(consensus_rows[0], list) else []
+
+        def _enterovirus_consensus_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in consensus_columns:
+                return fallback
+            index = consensus_columns.index(column_name)
+            value = str(first_consensus[index] if index < len(first_consensus) else "").strip()
+            return value or fallback
+
+        vp1_type = _enterovirus_selection_value("vp1_type", _enterovirus_consensus_value("vp1_type", "-"))
+        big_group = _enterovirus_selection_value("big_group", _enterovirus_consensus_value("big_group", "-")).upper()
+        selected_reference = _enterovirus_selection_value("reference_name", Path(_enterovirus_selection_value("reference_path", "")).name or "-")
+        selected_gff = Path(_enterovirus_selection_value("gff_path", "")).name if _enterovirus_selection_value("gff_path", "") not in {"", "-", "nogtf"} else "-"
+        coverage_value = _enterovirus_selection_value("coverage", "-")
+        mean_depth_value = _enterovirus_selection_value("mean_depth", "-")
+        covered_bases = _enterovirus_selection_value("covered_bases", "-")
+        num_reads = _enterovirus_selection_value("num_reads", "-")
+        anchor_accession = _enterovirus_selection_value("anchor_accession", "-")
+        candidate_count = _enterovirus_selection_value("candidate_count", "-")
+        dedup_candidate_count = _enterovirus_selection_value("dedup_candidate_count", "-")
+        if coverage_value not in {"-", ""}:
+            try:
+                coverage_value = f"{float(coverage_value):.2f}%"
+            except ValueError:
+                pass
+        if mean_depth_value not in {"-", ""}:
+            try:
+                mean_depth_value = f"{float(mean_depth_value):.2f}"
+            except ValueError:
+                pass
+        summary_note = ""
+        if enterovirus_columns and enterovirus_rows:
+            first_summary_row = enterovirus_rows[0] if isinstance(enterovirus_rows[0], list) else []
+            if "说明" in enterovirus_columns:
+                note_index = enterovirus_columns.index("说明")
+                summary_note = _sanitize_virus_demo_note(first_summary_row[note_index] if note_index < len(first_summary_row) else "")
+        notes: list[str] = []
+        if vp1_type != "-":
+            notes.append(f"VP1 分型：{vp1_type}")
+        if big_group != "-":
+            notes.append(f"大亚型：{big_group}")
+        if selected_reference != "-":
+            notes.append(f"参考序列：{selected_reference}")
+        if anchor_accession not in {"", "-"}:
+            notes.append(f"批次锚点参考：{anchor_accession}")
+        if candidate_count not in {"", "-"} and dedup_candidate_count not in {"", "-"}:
+            notes.append(f"候选基因组：{candidate_count} 条，95% 去冗余后 {dedup_candidate_count} 条")
+        if summary_note and summary_note != "-":
+            notes.append(summary_note)
+        mutation_table = _read_rsv_variant_annotation_table(report_dir)
+        display_columns = ["样本名称", "病毒类型", "大亚型", "VP1分型", "参考序列", "覆盖度", "平均深度", "说明"]
+        display_rows = [[
+            sample_name or "-",
+            f"Human enterovirus {big_group}" if big_group != "-" else "Human enterovirus",
+            big_group,
+            vp1_type,
+            selected_reference,
+            coverage_value,
+            mean_depth_value,
+            summary_note or "基于 EV-A/B/C/D 的 VP1 分型结果，在对应亚型全基因组候选集中选择覆盖度最优参考；组装后再按大亚型使用 VADR 生成 GFF。",
+        ]]
+        return {
+            "status": "ready",
+            "mode": "enterovirus_typing",
+            "predicted_clade": vp1_type,
+            "predicted_group": big_group,
+            "reference_name": selected_reference,
+            "summary_cards": [
+                {"label": "VP1 分型", "value": vp1_type},
+                {"label": "大亚型", "value": big_group},
+                {"label": "参考序列", "value": selected_reference},
+                {"label": "覆盖度", "value": coverage_value},
+            ],
+            "quality_metrics": [
+                {"label": "平均深度", "value": mean_depth_value},
+                {"label": "覆盖碱基", "value": covered_bases},
+                {"label": "支持 reads", "value": num_reads},
+                {"label": "去冗余候选数", "value": dedup_candidate_count},
+            ],
+            "sequence_name": sample_name or "-",
+            "notes": "；".join([item for item in notes if item]),
+            "mutation_table": mutation_table,
+            "consensus_typing": enterovirus_consensus_typing,
+            "igv": _discover_enterovirus_igv_assets(report_dir),
+            "gene_phylogeny": enterovirus_phylogeny,
+            "columns": display_columns,
+            "rows": display_rows,
+        }
+
+    hepatovirus_summary = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    hepatovirus_columns = hepatovirus_summary.get("columns", [])
+    hepatovirus_rows = hepatovirus_summary.get("rows", [])
+    hepatovirus_selection = _read_tsv_rows(report_dir / f"{sample_name}_hepatovirus_reference_selection" / "selection.tsv")
+    hepatovirus_consensus_typing = _read_tsv_rows(report_dir / f"{sample_name}_hepatovirus_reference_selection" / "consensus_typing" / "consensus_typing.tsv")
+    hepatovirus_first_row = hepatovirus_rows[0] if hepatovirus_rows and isinstance(hepatovirus_rows[0], list) else []
+    hepatovirus_virus_type = ""
+    if "病毒类型" in hepatovirus_columns:
+        virus_type_index = hepatovirus_columns.index("病毒类型")
+        hepatovirus_virus_type = str(hepatovirus_first_row[virus_type_index] if virus_type_index < len(hepatovirus_first_row) else "").strip()
+    has_hiv_resistance_markers = any(
+        str(column).strip() in {"NRTI最高等级", "NNRTI最高等级", "PI最高等级", "INSTI最高等级"}
+        for column in hepatovirus_columns
+    )
+    has_hepatovirus_assets = (
+        any(str(column).strip() in {"大亚型", "子亚型", "HAV子亚型", "HAV 子亚型"} for column in hepatovirus_columns)
+        or bool(hepatovirus_selection.get("rows"))
+        or bool(hepatovirus_consensus_typing.get("rows"))
+    ) and not (
+        has_hiv_resistance_markers
+        or "hiv" in hepatovirus_virus_type.lower()
+        or "immunodeficiency" in hepatovirus_virus_type.lower()
+    )
+    if has_hepatovirus_assets:
+        selection_columns = hepatovirus_selection.get("columns", [])
+        selection_rows = hepatovirus_selection.get("rows", [])
+        first_selection = selection_rows[0] if selection_rows and isinstance(selection_rows[0], list) else []
+
+        def _hepatovirus_selection_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in selection_columns:
+                return fallback
+            index = selection_columns.index(column_name)
+            value = str(first_selection[index] if index < len(first_selection) else "").strip()
+            return value or fallback
+
+        consensus_columns = hepatovirus_consensus_typing.get("columns", [])
+        consensus_rows = hepatovirus_consensus_typing.get("rows", [])
+        first_consensus = consensus_rows[0] if consensus_rows and isinstance(consensus_rows[0], list) else []
+
+        def _hepatovirus_consensus_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in consensus_columns:
+                return fallback
+            index = consensus_columns.index(column_name)
+            value = str(first_consensus[index] if index < len(first_consensus) else "").strip()
+            return value or fallback
+
+        broad_type = _hepatovirus_selection_value("broad_type", _hepatovirus_consensus_value("broad_type", "-")).upper()
+        subtype = _hepatovirus_selection_value("subtype", _hepatovirus_consensus_value("subtype", "-")).upper()
+        hav_subtype = _hepatovirus_selection_value("hav_subtype", _hepatovirus_consensus_value("hav_subtype", "-")).upper()
+        if subtype == "-" and hav_subtype != "-":
+            subtype = hav_subtype
+        selected_reference = _hepatovirus_selection_value("reference_name", Path(_hepatovirus_selection_value("reference_path", "")).name or "-")
+        selected_gff = Path(_hepatovirus_selection_value("gff_path", "")).name if _hepatovirus_selection_value("gff_path", "") not in {"", "-", "nogtf"} else "-"
+        coverage_value = _hepatovirus_selection_value("coverage", "-")
+        mean_depth_value = _hepatovirus_selection_value("mean_depth", "-")
+        covered_bases = _hepatovirus_selection_value("covered_bases", "-")
+        num_reads = _hepatovirus_selection_value("num_reads", "-")
+        isolate_label = _hepatovirus_selection_value("isolate", "-")
+        if coverage_value not in {"-", ""}:
+            try:
+                coverage_value = f"{float(coverage_value):.2f}%"
+            except ValueError:
+                pass
+        if mean_depth_value not in {"-", ""}:
+            try:
+                mean_depth_value = f"{float(mean_depth_value):.2f}"
+            except ValueError:
+                pass
+        summary_note = ""
+        if hepatovirus_columns and hepatovirus_rows:
+            first_summary_row = hepatovirus_rows[0] if isinstance(hepatovirus_rows[0], list) else []
+            if "说明" in hepatovirus_columns:
+                note_index = hepatovirus_columns.index("说明")
+                summary_note = _sanitize_virus_demo_note(first_summary_row[note_index] if note_index < len(first_summary_row) else "")
+        notes: list[str] = []
+        if broad_type != "-":
+            notes.append(f"大亚型：{broad_type}")
+        if subtype != "-":
+            notes.append(f"子亚型：{subtype}")
+        if isolate_label not in {"", "-"}:
+            notes.append(f"参考株：{isolate_label}")
+        if selected_reference != "-":
+            notes.append(f"参考序列：{selected_reference}")
+        if selected_gff != "-":
+            notes.append(f"注释文件：{selected_gff}")
+        if summary_note and summary_note != "-":
+            notes.append(summary_note)
+        mutation_table = _read_rsv_variant_annotation_table(report_dir)
+        species_label = _hepatovirus_selection_value("species_label", "")
+        if not species_label or species_label == "-":
+            species_label = {
+                "HAV": "Hepatitis A virus",
+                "HBV": "Hepatitis B virus",
+                "HCV": "Hepatitis C virus",
+                "HDV": "Hepatitis D virus",
+                "HEV": "Hepatitis E virus",
+            }.get(broad_type, "Hepatovirus")
+        display_columns = ["样本名称", "病毒类型", "大亚型", "子亚型", "参考序列", "覆盖度", "平均深度", "说明"]
+        display_rows = [[
+            sample_name or "-",
+            species_label,
+            broad_type,
+            subtype,
+            selected_reference,
+            coverage_value,
+            mean_depth_value,
+            summary_note or "先基于肝炎病毒 broad 参考库完成大亚型判定；再进入对应大亚型参考库选择覆盖度最优的子亚型参考。",
+        ]]
+        return {
+            "status": "ready",
+            "mode": "hepatovirus_typing",
+            "predicted_clade": subtype if subtype != "-" else broad_type,
+            "predicted_subtype": subtype,
+            "predicted_group": broad_type,
+            "reference_name": selected_reference,
+            "summary_cards": [
+                {"label": "大亚型", "value": broad_type},
+                {"label": "子亚型", "value": subtype},
+                {"label": "参考序列", "value": selected_reference},
+                {"label": "覆盖度", "value": coverage_value},
+            ],
+            "quality_metrics": [
+                {"label": "平均深度", "value": mean_depth_value},
+                {"label": "覆盖碱基", "value": covered_bases},
+                {"label": "支持 reads", "value": num_reads},
+            ],
+            "sequence_name": sample_name or "-",
+            "notes": "；".join([item for item in notes if item]),
+            "mutation_table": mutation_table,
+            "consensus_typing": hepatovirus_consensus_typing,
+            "igv": _discover_hepatovirus_igv_assets(report_dir),
+            "columns": display_columns,
+            "rows": display_rows,
+        }
+
+    bandavirus_summary = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    bandavirus_columns = bandavirus_summary.get("columns", [])
+    bandavirus_rows = bandavirus_summary.get("rows", [])
+    bandavirus_selection = _read_tsv_rows(report_dir / f"{sample_name}_bandavirus_reference_selection" / "selection.tsv")
+    bandavirus_consensus_typing = _read_tsv_rows(report_dir / f"{sample_name}_bandavirus_reference_selection" / "consensus_typing.tsv")
+    bandavirus_af_segments = _read_tsv_rows(report_dir / f"{sample_name}_bandavirus_reference_selection" / "selected_segments.tsv")
+    bandavirus_cj_segments = _read_tsv_rows(report_dir / f"{sample_name}_bandavirus_reference_selection" / "cj_typing" / "selected_segments.tsv")
+    has_bandavirus_assets = (
+        any(str(column).strip() in {"A_F(LMS)", "CJ(LMS)"} for column in bandavirus_columns)
+        or bool(bandavirus_selection.get("rows"))
+        or bool(bandavirus_consensus_typing.get("rows"))
+        or bool(bandavirus_af_segments.get("rows"))
+        or bool(bandavirus_cj_segments.get("rows"))
+    )
+    if has_bandavirus_assets:
+        summary_first_row = bandavirus_rows[0] if bandavirus_rows and isinstance(bandavirus_rows[0], list) else []
+        selection_columns = bandavirus_selection.get("columns", [])
+        selection_rows = bandavirus_selection.get("rows", [])
+        first_selection = selection_rows[0] if selection_rows and isinstance(selection_rows[0], list) else []
+        consensus_columns = bandavirus_consensus_typing.get("columns", [])
+        consensus_rows = bandavirus_consensus_typing.get("rows", [])
+        first_consensus = consensus_rows[0] if consensus_rows and isinstance(consensus_rows[0], list) else []
+
+        def _bandavirus_summary_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in bandavirus_columns:
+                return fallback
+            index = bandavirus_columns.index(column_name)
+            value = str(summary_first_row[index] if index < len(summary_first_row) else "").strip()
+            return value or fallback
+
+        def _bandavirus_selection_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in selection_columns:
+                return fallback
+            index = selection_columns.index(column_name)
+            value = str(first_selection[index] if index < len(first_selection) else "").strip()
+            return value or fallback
+
+        def _bandavirus_consensus_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in consensus_columns:
+                return fallback
+            index = consensus_columns.index(column_name)
+            value = str(first_consensus[index] if index < len(first_consensus) else "").strip()
+            return value or fallback
+
+        broad_type = _bandavirus_selection_value("broad_type", _bandavirus_consensus_value("broad_type", "-")).upper()
+        af_group = _bandavirus_selection_value("af_group", _bandavirus_consensus_value("af_group", "-")).upper()
+        af_lms = _bandavirus_summary_value("A_F(LMS)", _bandavirus_selection_value("segment_groups", "-"))
+        cj_lms = _bandavirus_summary_value("CJ(LMS)", "-")
+        typing_result = _bandavirus_summary_value("分型结果", "-")
+        reference_name = _bandavirus_summary_value("参考命中", "-")
+        summary_note = _sanitize_virus_demo_note(_bandavirus_summary_value("说明", ""))
+        reassortment_flag = _bandavirus_selection_value("reassortment_flag", _bandavirus_consensus_value("reassortment_flag", "no"))
+        segment_groups = _bandavirus_selection_value("segment_groups", _bandavirus_consensus_value("segment_groups", "-"))
+        notes: list[str] = []
+        if broad_type not in {"", "-"}:
+            notes.append(f"大亚型：{broad_type}")
+        if af_lms not in {"", "-"}:
+            notes.append(f"A_F(LMS)：{af_lms}")
+        if cj_lms not in {"", "-"}:
+            notes.append(f"CJ(LMS)：{cj_lms}")
+        if segment_groups not in {"", "-"}:
+            notes.append(f"三片段判定：{segment_groups}")
+        if reassortment_flag == "yes":
+            notes.append("L/M/S 最优分型不一致，提示疑似重组/重配")
+        if summary_note and summary_note != "-":
+            notes.append(summary_note)
+        mutation_table = _read_rsv_variant_annotation_table(report_dir)
+        display_columns = ["样本名称", "病毒类型", "大亚型", "A_F(LMS)", "CJ(LMS)", "分型结果", "参考命中", "说明"]
+        display_rows = [[
+            sample_name or "-",
+            _bandavirus_summary_value("病毒类型", "Bandavirus"),
+            broad_type,
+            af_lms,
+            cj_lms,
+            typing_result,
+            reference_name,
+            summary_note or "先根据 Bandavirus reference_genomes 判定大亚型；若为 SFTSV，再结合 A_F 分型与 CJ 三片段分型结果完成参考选择和结果汇总。",
+        ]]
+        return {
+            "status": "ready",
+            "mode": "bandavirus_typing",
+            "predicted_clade": af_group if af_group not in {"", "-"} else af_lms,
+            "predicted_group": broad_type,
+            "predicted_lineage": cj_lms,
+            "reference_name": reference_name,
+            "summary_cards": [
+                {"label": "大亚型", "value": broad_type or "--"},
+                {"label": "A_F(LMS)", "value": af_lms or "--"},
+                {"label": "CJ(LMS)", "value": cj_lms or "--"},
+                {"label": "重组提示", "value": "疑似重组/重配" if reassortment_flag == "yes" else "未见异常"},
+            ],
+            "quality_metrics": [
+                {"label": "A_F 子亚型", "value": af_group or "--"},
+                {"label": "三片段判定", "value": segment_groups or "--"},
+                {"label": "A_F 片段数", "value": str(len(bandavirus_af_segments.get("rows") or []))},
+                {"label": "CJ 片段数", "value": str(len(bandavirus_cj_segments.get("rows") or []))},
+            ],
+            "sequence_name": sample_name or "-",
+            "notes": "；".join([item for item in notes if item]),
+            "mutation_table": mutation_table,
+            "bandavirus_selection": bandavirus_selection,
+            "consensus_typing": bandavirus_consensus_typing,
+            "af_segment_typing": bandavirus_af_segments,
+            "cj_segment_typing": bandavirus_cj_segments,
+            "igv": _discover_bandavirus_igv_assets(report_dir),
+            "columns": display_columns,
+            "rows": display_rows,
+        }
+
+    orthohantavirus_summary = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    orthohantavirus_columns = orthohantavirus_summary.get("columns", [])
+    orthohantavirus_rows = orthohantavirus_summary.get("rows", [])
+    orthohantavirus_selection = _read_tsv_rows(report_dir / f"{sample_name}_orthohantavirus_reference_selection" / "selection.tsv")
+    orthohantavirus_consensus_typing = _read_tsv_rows(report_dir / f"{sample_name}_orthohantavirus_reference_selection" / "consensus_typing.tsv")
+    orthohantavirus_segments = _read_tsv_rows(report_dir / f"{sample_name}_orthohantavirus_reference_selection" / "selected_segments.tsv")
+    orthohantavirus_broad_typing = _read_tsv_rows(report_dir / f"{sample_name}_orthohantavirus_reference_selection" / "broad_typing" / "typing_summary.tsv")
+    has_orthohantavirus_assets = (
+        any(str(column).strip() in {"S分型", "LMS参考"} for column in orthohantavirus_columns)
+        or bool(orthohantavirus_selection.get("rows"))
+        or bool(orthohantavirus_consensus_typing.get("rows"))
+        or bool(orthohantavirus_segments.get("rows"))
+        or bool(orthohantavirus_broad_typing.get("rows"))
+    )
+    if has_orthohantavirus_assets:
+        summary_first_row = orthohantavirus_rows[0] if orthohantavirus_rows and isinstance(orthohantavirus_rows[0], list) else []
+        selection_columns = orthohantavirus_selection.get("columns", [])
+        selection_rows = orthohantavirus_selection.get("rows", [])
+        first_selection = selection_rows[0] if selection_rows and isinstance(selection_rows[0], list) else []
+        consensus_columns = orthohantavirus_consensus_typing.get("columns", [])
+        consensus_rows = orthohantavirus_consensus_typing.get("rows", [])
+        first_consensus = consensus_rows[0] if consensus_rows and isinstance(consensus_rows[0], list) else []
+        broad_columns = orthohantavirus_broad_typing.get("columns", [])
+        broad_rows = orthohantavirus_broad_typing.get("rows", [])
+        first_broad = broad_rows[0] if broad_rows and isinstance(broad_rows[0], list) else []
+
+        def _orthohantavirus_summary_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in orthohantavirus_columns:
+                return fallback
+            index = orthohantavirus_columns.index(column_name)
+            value = str(summary_first_row[index] if index < len(summary_first_row) else "").strip()
+            return value or fallback
+
+        def _orthohantavirus_selection_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in selection_columns:
+                return fallback
+            index = selection_columns.index(column_name)
+            value = str(first_selection[index] if index < len(first_selection) else "").strip()
+            return value or fallback
+
+        def _orthohantavirus_consensus_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in consensus_columns:
+                return fallback
+            index = consensus_columns.index(column_name)
+            value = str(first_consensus[index] if index < len(first_consensus) else "").strip()
+            return value or fallback
+
+        def _orthohantavirus_broad_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in broad_columns:
+                return fallback
+            index = broad_columns.index(column_name)
+            value = str(first_broad[index] if index < len(first_broad) else "").strip()
+            return value or fallback
+
+        predicted_type = _orthohantavirus_selection_value("predicted_type", _orthohantavirus_consensus_value("predicted_type", "-")).upper()
+        s_segment_type = _orthohantavirus_summary_value("S分型", _orthohantavirus_selection_value("s_segment_type", _orthohantavirus_consensus_value("s_segment_type", "-"))).upper()
+        selected_segments = _orthohantavirus_summary_value("LMS参考", _orthohantavirus_selection_value("selected_segments", _orthohantavirus_consensus_value("selected_segments", "-")))
+        typing_result = _orthohantavirus_summary_value("分型结果", predicted_type or "-")
+        reference_name = _orthohantavirus_summary_value("参考命中", "-")
+        summary_note = _sanitize_virus_demo_note(_orthohantavirus_summary_value("说明", ""))
+        segment_count = _orthohantavirus_selection_value("segment_count", _orthohantavirus_consensus_value("segment_count", str(len(orthohantavirus_segments.get("rows") or []))))
+        broad_segment_count = _orthohantavirus_broad_value("segment_count", segment_count or "--")
+        broad_coverage_sum = _orthohantavirus_broad_value("coverage_sum", "--")
+        broad_depth_sum = _orthohantavirus_broad_value("depth_sum", "--")
+        broad_reads_sum = _orthohantavirus_broad_value("num_reads_sum", "--")
+        notes: list[str] = []
+        if predicted_type not in {"", "-"}:
+            notes.append(f"分型：{predicted_type}")
+        if s_segment_type not in {"", "-"}:
+            notes.append(f"S片段：{s_segment_type}")
+        if selected_segments not in {"", "-"}:
+            notes.append(f"L/M/S参考：{selected_segments}")
+        if broad_segment_count not in {"", "-"}:
+            notes.append(f"broad 命中片段数：{broad_segment_count}")
+        if broad_coverage_sum not in {"", "-"}:
+            notes.append(f"broad coverage_sum：{broad_coverage_sum}")
+        if summary_note and summary_note != "-":
+            notes.append(summary_note)
+        mutation_table = _read_influenza_variant_annotation_table(report_dir)
+        display_columns = ["样本名称", "病毒类型", "S分型", "LMS参考", "分型结果", "参考命中", "说明"]
+        display_rows = [[
+            sample_name or "-",
+            _orthohantavirus_summary_value("病毒类型", "Orthohantavirus"),
+            s_segment_type,
+            selected_segments,
+            typing_result,
+            reference_name,
+            summary_note or "基于 Orthohantavirus 本地三片段参考库进行型别筛选，并优先以 S 片段分型结果辅助解释。",
+        ]]
+        return {
+            "status": "ready",
+            "mode": "orthohantavirus_typing",
+            "predicted_clade": predicted_type,
+            "predicted_group": s_segment_type,
+            "reference_name": reference_name,
+            "summary_cards": [
+                {"label": "Orthohantavirus 分型", "value": predicted_type or "--"},
+                {"label": "S片段分型", "value": s_segment_type or "--"},
+                {"label": "L/M/S参考", "value": selected_segments or "--"},
+                {"label": "参考片段数", "value": segment_count or "--"},
+            ],
+            "quality_metrics": [
+                {"label": "broad 片段数", "value": broad_segment_count or "--"},
+                {"label": "broad coverage_sum", "value": broad_coverage_sum or "--"},
+                {"label": "broad depth_sum", "value": broad_depth_sum or "--"},
+                {"label": "支持 reads", "value": broad_reads_sum or "--"},
+            ],
+            "sequence_name": sample_name or "-",
+            "notes": "；".join([item for item in notes if item]),
+            "orthohantavirus_selection": orthohantavirus_selection,
+            "broad_typing": orthohantavirus_broad_typing,
+            "consensus_typing": orthohantavirus_consensus_typing,
+            "segment_typing": orthohantavirus_segments,
+            "mutation_table": mutation_table,
+            "igv": _discover_orthohantavirus_igv_assets(report_dir),
+            "columns": display_columns,
+            "rows": display_rows,
+        }
+
+    orthoebolavirus_summary = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    orthoebolavirus_columns = orthoebolavirus_summary.get("columns", [])
+    orthoebolavirus_rows = orthoebolavirus_summary.get("rows", [])
+    orthoebolavirus_selection = _read_tsv_rows(report_dir / f"{sample_name}_orthoebolavirus_reference_selection" / "selection.tsv")
+    orthoebolavirus_consensus_typing = _read_tsv_rows(report_dir / f"{sample_name}_orthoebolavirus_reference_selection" / "consensus_typing" / "consensus_typing.tsv")
+    has_orthoebolavirus_assets = (
+        any(str(column).strip() == "Orthoebolavirus分型" for column in orthoebolavirus_columns)
+        or bool(orthoebolavirus_selection.get("rows"))
+        or bool(orthoebolavirus_consensus_typing.get("rows"))
+    )
+    if has_orthoebolavirus_assets:
+        summary_first_row = orthoebolavirus_rows[0] if orthoebolavirus_rows and isinstance(orthoebolavirus_rows[0], list) else []
+        selection_columns = orthoebolavirus_selection.get("columns", [])
+        selection_rows = orthoebolavirus_selection.get("rows", [])
+        first_selection = selection_rows[0] if selection_rows and isinstance(selection_rows[0], list) else []
+        consensus_columns = orthoebolavirus_consensus_typing.get("columns", [])
+        consensus_rows = orthoebolavirus_consensus_typing.get("rows", [])
+        first_consensus = consensus_rows[0] if consensus_rows and isinstance(consensus_rows[0], list) else []
+
+        def _orthoebolavirus_summary_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in orthoebolavirus_columns:
+                return fallback
+            index = orthoebolavirus_columns.index(column_name)
+            value = str(summary_first_row[index] if index < len(summary_first_row) else "").strip()
+            return value or fallback
+
+        def _orthoebolavirus_selection_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in selection_columns:
+                return fallback
+            index = selection_columns.index(column_name)
+            value = str(first_selection[index] if index < len(first_selection) else "").strip()
+            return value or fallback
+
+        def _orthoebolavirus_consensus_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in consensus_columns:
+                return fallback
+            index = consensus_columns.index(column_name)
+            value = str(first_consensus[index] if index < len(first_consensus) else "").strip()
+            return value or fallback
+
+        predicted_type = _orthoebolavirus_selection_value("predicted_type", _orthoebolavirus_consensus_value("predicted_type", "-")).upper()
+        species_label = _orthoebolavirus_selection_value("species_label", _orthoebolavirus_summary_value("病毒类型", "Orthoebolavirus"))
+        virus_name = _orthoebolavirus_selection_value("virus_name", _orthoebolavirus_summary_value("病毒名称", "-"))
+        reference_name = _orthoebolavirus_selection_value("reference_name", _orthoebolavirus_summary_value("参考序列", "-"))
+        coverage_value = _orthoebolavirus_selection_value("coverage", _orthoebolavirus_summary_value("覆盖度", "-"))
+        mean_depth_value = _orthoebolavirus_selection_value("mean_depth", _orthoebolavirus_summary_value("平均深度", "-"))
+        summary_note = _sanitize_virus_demo_note(_orthoebolavirus_selection_value("note", _orthoebolavirus_summary_value("说明", "")))
+        mutation_table = _read_influenza_variant_annotation_table(report_dir)
+        display_columns = ["样本名称", "病毒类型", "Orthoebolavirus分型", "病毒名称", "参考命中", "覆盖度", "平均深度", "说明"]
+        display_rows = [[
+            sample_name or "-",
+            species_label,
+            predicted_type or "-",
+            virus_name or "-",
+            reference_name or "-",
+            coverage_value,
+            mean_depth_value,
+            summary_note or "基于 Orthoebolavirus 本地完整/编码完整参考基因组库进行最优参考筛选；EBOV 样本另接 Ebola Nextclade。",
+        ]]
+        return {
+            "status": "ready",
+            "mode": "orthoebolavirus_typing",
+            "predicted_clade": predicted_type,
+            "predicted_group": virus_name,
+            "reference_name": reference_name,
+            "summary_cards": [
+                {"label": "Orthoebolavirus 分型", "value": predicted_type or "--"},
+                {"label": "病毒名称", "value": virus_name or "--"},
+                {"label": "参考序列", "value": reference_name or "--"},
+                {"label": "覆盖度", "value": coverage_value or "--"},
+            ],
+            "quality_metrics": [
+                {"label": "平均深度", "value": mean_depth_value or "--"},
+                {"label": "覆盖碱基", "value": _orthoebolavirus_selection_value("covered_bases", "--")},
+                {"label": "支持 reads", "value": _orthoebolavirus_selection_value("num_reads", "--")},
+                {"label": "Accession", "value": _orthoebolavirus_selection_value("accession", "--")},
+            ],
+            "sequence_name": sample_name or "-",
+            "notes": summary_note,
+            "orthoebolavirus_selection": orthoebolavirus_selection,
+            "consensus_typing": orthoebolavirus_consensus_typing,
+            "mutation_table": mutation_table,
+            "igv": _discover_ebola_igv_assets(report_dir),
+            "columns": display_columns,
+            "rows": display_rows,
+        }
+
+    astroviridae_summary = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    astroviridae_columns = astroviridae_summary.get("columns", [])
+    astroviridae_rows = astroviridae_summary.get("rows", [])
+    astroviridae_selection = _read_tsv_rows(report_dir / f"{sample_name}_astroviridae_reference_selection" / "selection.tsv")
+    astroviridae_consensus_typing = _read_tsv_rows(report_dir / f"{sample_name}_astroviridae_reference_selection" / "consensus_typing" / "consensus_typing.tsv")
+    astroviridae_phylogeny = _build_astroviridae_gene_phylogeny(report_dir)
+    has_astroviridae_assets = (
+        any(str(column).strip() in {"ORF2分型", "病毒属", "病毒种"} for column in astroviridae_columns)
+        or bool(astroviridae_selection.get("rows"))
+        or bool(astroviridae_consensus_typing.get("rows"))
+        or str(astroviridae_phylogeny.get("status") or "").strip().lower() == "ready"
+    )
+    if has_astroviridae_assets:
+        selection_columns = astroviridae_selection.get("columns", [])
+        selection_rows = astroviridae_selection.get("rows", [])
+        first_selection = selection_rows[0] if selection_rows and isinstance(selection_rows[0], list) else []
+
+        def _astroviridae_selection_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in selection_columns:
+                return fallback
+            index = selection_columns.index(column_name)
+            value = str(first_selection[index] if index < len(first_selection) else "").strip()
+            return value or fallback
+
+        consensus_columns = astroviridae_consensus_typing.get("columns", [])
+        consensus_rows = astroviridae_consensus_typing.get("rows", [])
+        first_consensus = consensus_rows[0] if consensus_rows and isinstance(consensus_rows[0], list) else []
+
+        def _astroviridae_consensus_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in consensus_columns:
+                return fallback
+            index = consensus_columns.index(column_name)
+            value = str(first_consensus[index] if index < len(first_consensus) else "").strip()
+            return value or fallback
+
+        orf2_type = _astroviridae_selection_value("orf2_type", _astroviridae_consensus_value("orf2_type", "-"))
+        genus = _astroviridae_selection_value("genus", _astroviridae_consensus_value("genus", "-"))
+        species = _astroviridae_selection_value("species", _astroviridae_consensus_value("species", "-"))
+        selected_reference = _astroviridae_selection_value("reference_name", Path(_astroviridae_selection_value("reference_path", "")).name or "-")
+        selected_gff = Path(_astroviridae_selection_value("gff_path", "")).name if _astroviridae_selection_value("gff_path", "") not in {"", "-", "nogtf"} else "-"
+        coverage_value = _astroviridae_selection_value("coverage", "-")
+        mean_depth_value = _astroviridae_selection_value("mean_depth", "-")
+        covered_bases = _astroviridae_selection_value("covered_bases", "-")
+        num_reads = _astroviridae_selection_value("num_reads", "-")
+        anchor_accession = _astroviridae_selection_value("anchor_accession", "-")
+        candidate_count = _astroviridae_selection_value("candidate_count", "-")
+        dedup_candidate_count = _astroviridae_selection_value("dedup_candidate_count", "-")
+        if coverage_value not in {"-", ""}:
+            try:
+                coverage_value = f"{float(coverage_value):.2f}%"
+            except ValueError:
+                pass
+        if mean_depth_value not in {"-", ""}:
+            try:
+                mean_depth_value = f"{float(mean_depth_value):.2f}"
+            except ValueError:
+                pass
+        summary_note = ""
+        if astroviridae_columns and astroviridae_rows:
+            first_summary_row = astroviridae_rows[0] if isinstance(astroviridae_rows[0], list) else []
+            if "说明" in astroviridae_columns:
+                note_index = astroviridae_columns.index("说明")
+                summary_note = _sanitize_virus_demo_note(first_summary_row[note_index] if note_index < len(first_summary_row) else "")
+        notes: list[str] = []
+        if orf2_type != "-":
+            notes.append(f"ORF2 分型：{orf2_type}")
+        if genus != "-":
+            notes.append(f"病毒属：{genus}")
+        if species != "-":
+            notes.append(f"病毒种：{species}")
+        if selected_reference != "-":
+            notes.append(f"参考序列：{selected_reference}")
+        if selected_gff != "-":
+            notes.append(f"注释文件：{selected_gff}")
+        if anchor_accession not in {"", "-"}:
+            notes.append(f"批次锚点参考：{anchor_accession}")
+        if candidate_count not in {"", "-"} and dedup_candidate_count not in {"", "-"}:
+            notes.append(f"候选基因组：{candidate_count} 条，95% 去冗余后 {dedup_candidate_count} 条")
+        if summary_note and summary_note != "-":
+            notes.append(summary_note)
+        mutation_table = _read_rsv_variant_annotation_table(report_dir)
+        display_columns = ["样本名称", "病毒种", "病毒属", "ORF2分型", "参考序列", "覆盖度", "平均深度", "说明"]
+        display_rows = [[
+            sample_name or "-",
+            species if species != "-" else "Mamastrovirus/Avastrovirus",
+            genus,
+            orf2_type,
+            selected_reference,
+            coverage_value,
+            mean_depth_value,
+            summary_note or "基于 Astroviridae ORF2 分型结果，在对应亚型全基因组候选集中选择覆盖度最优参考；组装后结合 VADR 注释并提取 ORF2 构建系统发育树进行二次分类。",
+        ]]
+        return {
+            "status": "ready",
+            "mode": "astroviridae_typing",
+            "predicted_clade": orf2_type,
+            "predicted_group": genus,
+            "predicted_lineage": species,
+            "reference_name": selected_reference,
+            "summary_cards": [
+                {"label": "ORF2 分型", "value": orf2_type},
+                {"label": "病毒属", "value": genus},
+                {"label": "病毒种", "value": species},
+                {"label": "参考序列", "value": selected_reference},
+                {"label": "覆盖度", "value": coverage_value},
+            ],
+            "quality_metrics": [
+                {"label": "平均深度", "value": mean_depth_value},
+                {"label": "覆盖碱基", "value": covered_bases},
+                {"label": "支持 reads", "value": num_reads},
+                {"label": "去冗余候选数", "value": dedup_candidate_count},
+            ],
+            "sequence_name": sample_name or "-",
+            "notes": "；".join([item for item in notes if item]),
+            "mutation_table": mutation_table,
+            "consensus_typing": astroviridae_consensus_typing,
+            "igv": _discover_astroviridae_igv_assets(report_dir),
+            "gene_phylogeny": astroviridae_phylogeny,
+            "columns": display_columns,
+            "rows": display_rows,
+        }
+
+    rhinovirus_summary = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    rhinovirus_columns = rhinovirus_summary.get("columns", [])
+    rhinovirus_rows = rhinovirus_summary.get("rows", [])
+    rhinovirus_selection = _read_tsv_rows(report_dir / f"{sample_name}_rhinovirus_reference_selection" / "selection.tsv")
+    rhinovirus_consensus_typing = _read_tsv_rows(report_dir / f"{sample_name}_rhinovirus_reference_selection" / "consensus_typing" / "consensus_typing.tsv")
+    has_rhinovirus_assets = (
+        any(str(column).strip() in {"VP1分型", "物种组"} for column in rhinovirus_columns)
+        or bool(rhinovirus_selection.get("rows"))
+        or bool(rhinovirus_consensus_typing.get("rows"))
+    )
+    if has_rhinovirus_assets:
+        selection_columns = rhinovirus_selection.get("columns", [])
+        selection_rows = rhinovirus_selection.get("rows", [])
+        first_selection = selection_rows[0] if selection_rows and isinstance(selection_rows[0], list) else []
+
+        def _rhinovirus_selection_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in selection_columns:
+                return fallback
+            index = selection_columns.index(column_name)
+            value = str(first_selection[index] if index < len(first_selection) else "").strip()
+            return value or fallback
+
+        consensus_columns = rhinovirus_consensus_typing.get("columns", [])
+        consensus_rows = rhinovirus_consensus_typing.get("rows", [])
+        first_consensus = consensus_rows[0] if consensus_rows and isinstance(consensus_rows[0], list) else []
+
+        def _rhinovirus_consensus_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in consensus_columns:
+                return fallback
+            index = consensus_columns.index(column_name)
+            value = str(first_consensus[index] if index < len(first_consensus) else "").strip()
+            return value or fallback
+
+        vp1_type = _rhinovirus_selection_value("vp1_type", _rhinovirus_consensus_value("vp1_type", "-"))
+        species_group = _rhinovirus_selection_value("species_group", _rhinovirus_consensus_value("species_group", "-")).upper()
+        selected_reference = _rhinovirus_selection_value("reference_name", Path(_rhinovirus_selection_value("reference_path", "")).name or "-")
+        selected_gff = Path(_rhinovirus_selection_value("gff_path", "")).name if _rhinovirus_selection_value("gff_path", "") not in {"", "-", "nogtf"} else "-"
+        coverage_value = _rhinovirus_selection_value("coverage", "-")
+        mean_depth_value = _rhinovirus_selection_value("mean_depth", "-")
+        covered_bases = _rhinovirus_selection_value("covered_bases", "-")
+        num_reads = _rhinovirus_selection_value("num_reads", "-")
+        if coverage_value not in {"-", ""}:
+            try:
+                coverage_value = f"{float(coverage_value):.2f}%"
+            except ValueError:
+                pass
+        if mean_depth_value not in {"-", ""}:
+            try:
+                mean_depth_value = f"{float(mean_depth_value):.2f}"
+            except ValueError:
+                pass
+        summary_note = ""
+        if rhinovirus_columns and rhinovirus_rows:
+            first_summary_row = rhinovirus_rows[0] if isinstance(rhinovirus_rows[0], list) else []
+            if "说明" in rhinovirus_columns:
+                note_index = rhinovirus_columns.index("说明")
+                summary_note = _sanitize_virus_demo_note(first_summary_row[note_index] if note_index < len(first_summary_row) else "")
+        notes: list[str] = []
+        if vp1_type != "-":
+            notes.append(f"VP1 分型：{vp1_type}")
+        if species_group != "-":
+            notes.append(f"物种组：{species_group}")
+        if selected_reference != "-":
+            notes.append(f"参考序列：{selected_reference}")
+        if selected_gff != "-":
+            notes.append(f"注释文件：{selected_gff}")
+        if summary_note and summary_note != "-":
+            notes.append(summary_note)
+        mutation_table = _read_rsv_variant_annotation_table(report_dir)
+        gene_phylogeny = _build_rhinovirus_gene_phylogeny(report_dir)
+        display_columns = ["样本名称", "病毒类型", "VP1分型", "物种组", "参考序列", "覆盖度", "平均深度", "说明"]
+        display_rows = [[
+            sample_name or "-",
+            f"Rhinovirus {species_group}" if species_group != "-" else "Rhinovirus",
+            vp1_type,
+            species_group,
+            selected_reference,
+            coverage_value,
+            mean_depth_value,
+            summary_note or "基于 VP1 分型后选择最优全基因组参考，并结合 VADR 注释生成鼻病毒报告。",
+        ]]
+        return {
+            "status": "ready",
+            "mode": "rhinovirus_typing",
+            "predicted_clade": vp1_type,
+            "predicted_group": species_group,
+            "reference_name": selected_reference,
+            "summary_cards": [
+                {"label": "VP1 分型", "value": vp1_type},
+                {"label": "物种组", "value": species_group},
+                {"label": "参考序列", "value": selected_reference},
+                {"label": "覆盖度", "value": coverage_value},
+            ],
+            "quality_metrics": [
+                {"label": "平均深度", "value": mean_depth_value},
+                {"label": "覆盖碱基", "value": covered_bases},
+                {"label": "支持 reads", "value": num_reads},
+            ],
+            "sequence_name": sample_name or "-",
+            "notes": "；".join([item for item in notes if item]),
+            "mutation_table": mutation_table,
+            "consensus_typing": rhinovirus_consensus_typing,
+            "igv": _discover_rhinovirus_igv_assets(report_dir),
+            "gene_phylogeny": gene_phylogeny,
+            "columns": display_columns,
+            "rows": display_rows,
+        }
+
+    seasonal_hcov_summary = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    seasonal_hcov_columns = seasonal_hcov_summary.get("columns", [])
+    seasonal_hcov_rows = seasonal_hcov_summary.get("rows", [])
+    seasonal_hcov_selection = _read_tsv_rows(report_dir / f"{sample_name}_seasonal_hcov_reference_selection" / "selection.tsv")
+    seasonal_hcov_consensus_typing = _read_tsv_rows(report_dir / f"{sample_name}_seasonal_hcov_reference_selection" / "consensus_typing" / "consensus_typing.tsv")
+    seasonal_hcov_phylogeny = _build_seasonal_hcov_spike_phylogeny(report_dir)
+    has_seasonal_hcov_assets = (
+        any(str(column).strip() in {"大类分型", "S子亚型"} for column in seasonal_hcov_columns)
+        or bool(seasonal_hcov_selection.get("rows"))
+        or bool(seasonal_hcov_consensus_typing.get("rows"))
+        or str(seasonal_hcov_phylogeny.get("status") or "").strip().lower() == "ready"
+    )
+    if has_seasonal_hcov_assets:
+        selection_columns = seasonal_hcov_selection.get("columns", [])
+        selection_rows = seasonal_hcov_selection.get("rows", [])
+        first_selection = selection_rows[0] if selection_rows and isinstance(selection_rows[0], list) else []
+
+        def _seasonal_hcov_selection_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in selection_columns:
+                return fallback
+            index = selection_columns.index(column_name)
+            value = str(first_selection[index] if index < len(first_selection) else "").strip()
+            return value or fallback
+
+        summary_columns = seasonal_hcov_columns
+        summary_rows = seasonal_hcov_rows
+        first_summary = summary_rows[0] if summary_rows and isinstance(summary_rows[0], list) else []
+
+        def _seasonal_hcov_summary_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in summary_columns:
+                return fallback
+            index = summary_columns.index(column_name)
+            value = str(first_summary[index] if index < len(first_summary) else "").strip()
+            return value or fallback
+
+        consensus_columns = seasonal_hcov_consensus_typing.get("columns", [])
+        consensus_rows = seasonal_hcov_consensus_typing.get("rows", [])
+        first_consensus = consensus_rows[0] if consensus_rows and isinstance(consensus_rows[0], list) else []
+
+        def _seasonal_hcov_consensus_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in consensus_columns:
+                return fallback
+            index = consensus_columns.index(column_name)
+            value = str(first_consensus[index] if index < len(first_consensus) else "").strip()
+            return value or fallback
+
+        major_type = _seasonal_hcov_summary_value("大类分型", _seasonal_hcov_selection_value("hcov_type", "-"))
+        spike_subtype = _seasonal_hcov_summary_value("S子亚型", _seasonal_hcov_consensus_value("subtype", "-"))
+        selected_reference = _seasonal_hcov_summary_value("病毒类型", _seasonal_hcov_selection_value("reference_name", Path(_seasonal_hcov_selection_value("reference_path", "")).name or "-"))
+        nearest_reference = _seasonal_hcov_summary_value("最近参考", _seasonal_hcov_consensus_value("nearest_tree_label", "-"))
+        selected_gff = _seasonal_hcov_summary_value("注释文件", Path(_seasonal_hcov_selection_value("gff_path", "")).name if _seasonal_hcov_selection_value("gff_path", "") not in {"", "-", "nogtf"} else "-")
+        coverage_value = _seasonal_hcov_summary_value("覆盖度", _seasonal_hcov_selection_value("coverage", "-"))
+        mean_depth_value = _seasonal_hcov_summary_value("平均深度", _seasonal_hcov_selection_value("mean_depth", "-"))
+        covered_bases = _seasonal_hcov_selection_value("covered_bases", "-")
+        num_reads = _seasonal_hcov_selection_value("num_reads", "-")
+        if coverage_value not in {"-", ""} and not str(coverage_value).endswith("%"):
+            try:
+                coverage_value = f"{float(coverage_value):.2f}%"
+            except ValueError:
+                pass
+        if mean_depth_value not in {"-", ""}:
+            try:
+                mean_depth_value = f"{float(mean_depth_value):.2f}"
+            except ValueError:
+                pass
+        summary_note = _sanitize_virus_demo_note(_seasonal_hcov_summary_value("说明", ""))
+        notes: list[str] = []
+        if major_type != "-":
+            notes.append(f"大类分型：{major_type}")
+        if spike_subtype != "-":
+            notes.append(f"S 子亚型：{spike_subtype}")
+        if nearest_reference != "-":
+            notes.append(f"最近参考：{nearest_reference}")
+        if selected_gff != "-":
+            notes.append(f"注释文件：{selected_gff}")
+        if summary_note and summary_note != "-":
+            notes.append(summary_note)
+        mutation_table = _read_rsv_variant_annotation_table(report_dir)
+        display_columns = ["样本名称", "病毒类型", "大类分型", "S子亚型", "最近参考", "注释文件", "覆盖度", "平均深度", "说明"]
+        display_rows = [[
+            sample_name or "-",
+            selected_reference,
+            major_type,
+            spike_subtype,
+            nearest_reference,
+            selected_gff,
+            coverage_value,
+            mean_depth_value,
+            summary_note or "基于季节性冠状病毒参考选择、VADR 注释和 S 基因系统发育树完成型别与子亚型判定。",
+        ]]
+        return {
+            "status": "ready",
+            "mode": "seasonal_hcov_typing",
+            "predicted_clade": major_type,
+            "predicted_subtype": spike_subtype,
+            "reference_name": selected_reference,
+            "nearest_reference": nearest_reference,
+            "summary_cards": [
+                {"label": "大类分型", "value": major_type},
+                {"label": "S 子亚型", "value": spike_subtype},
+                {"label": "参考序列", "value": selected_reference},
+                {"label": "最近参考", "value": nearest_reference},
+                {"label": "覆盖度", "value": coverage_value},
+            ],
+            "quality_metrics": [
+                {"label": "平均深度", "value": mean_depth_value},
+                {"label": "覆盖碱基", "value": covered_bases},
+                {"label": "支持 reads", "value": num_reads},
+            ],
+            "sequence_name": sample_name or "-",
+            "notes": "；".join([item for item in notes if item]),
+            "mutation_table": mutation_table,
+            "consensus_typing": seasonal_hcov_consensus_typing,
+            "igv": _discover_seasonal_hcov_igv_assets(report_dir),
+            "gene_phylogeny": seasonal_hcov_phylogeny,
+            "columns": display_columns,
+            "rows": display_rows,
+        }
+
+    rotavirus_summary = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    rotavirus_columns = rotavirus_summary.get("columns", [])
+    rotavirus_rows = rotavirus_summary.get("rows", [])
+    rotavirus_selection = _read_tsv_rows(report_dir / f"{sample_name}_rotavirus_reference_selection" / "selection.tsv")
+    rotavirus_consensus_typing = _read_tsv_rows(report_dir / f"{sample_name}_rotavirus_reference_selection" / "consensus_typing.tsv")
+    rotavirus_group_typing = _read_tsv_rows(report_dir / f"{sample_name}_rotavirus_reference_selection" / "group_typing" / "group_typing.tsv")
+    rotavirus_subtype_typing = _read_tsv_rows(report_dir / f"{sample_name}_rotavirus_reference_selection" / "subtype_typing" / "subtype_typing.tsv")
+    has_rotavirus_assets = (
+        any(str(column).strip() in {"大组分型", "G分型", "P分型", "组合分型"} for column in rotavirus_columns)
+        or bool(rotavirus_selection.get("rows"))
+        or bool(rotavirus_group_typing.get("rows"))
+        or bool(rotavirus_subtype_typing.get("rows"))
+        or bool(rotavirus_consensus_typing.get("rows"))
+    )
+    if has_rotavirus_assets:
+        selection_columns = rotavirus_selection.get("columns", [])
+        selection_rows = rotavirus_selection.get("rows", [])
+        first_selection = selection_rows[0] if selection_rows and isinstance(selection_rows[0], list) else []
+
+        def _rotavirus_selection_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in selection_columns:
+                return fallback
+            index = selection_columns.index(column_name)
+            value = str(first_selection[index] if index < len(first_selection) else "").strip()
+            return value or fallback
+
+        consensus_columns = rotavirus_consensus_typing.get("columns", [])
+        consensus_rows = rotavirus_consensus_typing.get("rows", [])
+        first_consensus = consensus_rows[0] if consensus_rows and isinstance(consensus_rows[0], list) else []
+
+        def _rotavirus_consensus_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in consensus_columns:
+                return fallback
+            index = consensus_columns.index(column_name)
+            value = str(first_consensus[index] if index < len(first_consensus) else "").strip()
+            return value or fallback
+
+        group_columns = rotavirus_group_typing.get("columns", [])
+        group_rows = rotavirus_group_typing.get("rows", [])
+        selected_group_row: list | None = None
+        is_selected_index = group_columns.index("is_selected") if "is_selected" in group_columns else -1
+        for row in group_rows:
+            if not isinstance(row, list):
+                continue
+            if is_selected_index >= 0 and is_selected_index < len(row) and str(row[is_selected_index] or "").strip().lower() == "yes":
+                selected_group_row = row
+                break
+        if selected_group_row is None and group_rows and isinstance(group_rows[0], list):
+            selected_group_row = group_rows[0]
+
+        def _rotavirus_group_value(column_name: str, fallback: str = "-") -> str:
+            if selected_group_row is None or column_name not in group_columns:
+                return fallback
+            index = group_columns.index(column_name)
+            value = str(selected_group_row[index] if index < len(selected_group_row) else "").strip()
+            return value or fallback
+
+        summary_columns = rotavirus_columns
+        summary_rows = rotavirus_rows
+        first_summary = summary_rows[0] if summary_rows and isinstance(summary_rows[0], list) else []
+
+        def _rotavirus_summary_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in summary_columns:
+                return fallback
+            index = summary_columns.index(column_name)
+            value = str(first_summary[index] if index < len(first_summary) else "").strip()
+            return value or fallback
+
+        group_type = _rotavirus_summary_value(
+            "大组分型",
+            _rotavirus_selection_value("group_type", _rotavirus_consensus_value("group_type", _rotavirus_group_value("selected_group_type", _rotavirus_group_value("group_type", "-")))),
+        )
+        g_genotype = _rotavirus_summary_value("G分型", _rotavirus_selection_value("g_genotype", _rotavirus_consensus_value("g_genotype", "-")))
+        p_genotype = _rotavirus_summary_value("P分型", _rotavirus_selection_value("p_genotype", _rotavirus_consensus_value("p_genotype", "-")))
+        subtype_combo = _rotavirus_summary_value("组合分型", _rotavirus_selection_value("subtype_combo", _rotavirus_consensus_value("subtype_combo", "-")))
+        isolate_label = _rotavirus_selection_value("isolate_label", _rotavirus_group_value("isolate_label", "-"))
+        reference_accession = _rotavirus_group_value("reference_name", Path(_rotavirus_selection_value("reference_path", "")).stem or "-")
+        selected_reference = isolate_label if isolate_label != "-" else reference_accession
+        segment_count = _rotavirus_group_value("segment_count", "-")
+        full_length_coverage = _rotavirus_group_value("full_length_coverage_pct", "-")
+        covered_bases = _rotavirus_group_value("covered_bases_sum", "-")
+        reference_bases = _rotavirus_group_value("reference_bases_sum", "-")
+        supported_reads = _rotavirus_group_value("num_reads_sum", "-")
+        coverage_sum = _rotavirus_group_value("coverage_sum", "-")
+        if full_length_coverage not in {"-", ""} and not str(full_length_coverage).endswith("%"):
+            try:
+                full_length_coverage = f"{float(full_length_coverage):.2f}%"
+            except ValueError:
+                pass
+        if coverage_sum not in {"-", ""}:
+            try:
+                coverage_sum = f"{float(coverage_sum):.2f}"
+            except ValueError:
+                pass
+        summary_note = _sanitize_virus_demo_note(_rotavirus_summary_value("说明", ""))
+        if not summary_note:
+            summary_note = "先按 A/B/C 大组完整参考覆盖度选择最优组别，再对 A 组样本结合 VP4/VP7 分型确定最优参考株。"
+        notes: list[str] = []
+        if group_type != "-":
+            notes.append(f"大组分型：{group_type}")
+        if subtype_combo != "-" and subtype_combo:
+            notes.append(f"组合分型：{subtype_combo}")
+        elif g_genotype != "-" or p_genotype != "-":
+            notes.append(f"G/P 分型：{g_genotype} / {p_genotype}")
+        if selected_reference != "-":
+            notes.append(f"最优参考株：{selected_reference}")
+        if reference_accession != "-" and reference_accession != selected_reference:
+            notes.append(f"参考 accession：{reference_accession}")
+        if summary_note and summary_note != "-":
+            notes.append(summary_note)
+        display_columns = ["样本名称", "病毒类型", "大组分型", "G分型", "P分型", "组合分型", "最优参考株", "参考片段数", "全长覆盖度", "说明"]
+        display_rows = [[
+            sample_name or "-",
+            f"Human rotavirus {group_type}" if group_type != "-" else "Human rotavirus",
+            group_type,
+            g_genotype,
+            p_genotype,
+            subtype_combo,
+            selected_reference,
+            segment_count,
+            full_length_coverage,
+            summary_note,
+        ]]
+        return {
+            "status": "ready",
+            "mode": "rotavirus_typing",
+            "predicted_clade": group_type,
+            "predicted_lineage": subtype_combo if subtype_combo not in {"", "-"} else "-",
+            "predicted_group": group_type,
+            "predicted_subtype": subtype_combo if subtype_combo not in {"", "-"} else "-",
+            "reference_name": selected_reference,
+            "reference_accession": reference_accession,
+            "summary_cards": [
+                {"label": "大组分型", "value": group_type},
+                {"label": "G 分型", "value": g_genotype},
+                {"label": "P 分型", "value": p_genotype},
+                {"label": "组合分型", "value": subtype_combo},
+                {"label": "最优参考株", "value": selected_reference},
+            ],
+            "quality_metrics": [
+                {"label": "全长覆盖度", "value": full_length_coverage},
+                {"label": "命中片段数", "value": segment_count},
+                {"label": "覆盖碱基", "value": covered_bases},
+                {"label": "参考总长度", "value": reference_bases},
+                {"label": "支持 reads", "value": supported_reads},
+                {"label": "coverage_sum", "value": coverage_sum},
+            ],
+            "sequence_name": sample_name or "-",
+            "notes": "；".join([item for item in notes if item]),
+            "mutation_table": {"status": "empty", "columns": [], "rows": []},
+            "group_typing": rotavirus_group_typing,
+            "subtype_typing": rotavirus_subtype_typing,
+            "consensus_typing": rotavirus_consensus_typing,
+            "igv": {"status": "empty"},
+            "columns": display_columns,
+            "rows": display_rows,
+        }
+
+    hpiv_summary = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    hpiv_columns = hpiv_summary.get("columns", [])
+    hpiv_rows = hpiv_summary.get("rows", [])
+    if any(str(column).strip() == "HPIV亚型" for column in hpiv_columns):
+        first_summary_row = hpiv_rows[0] if hpiv_rows and isinstance(hpiv_rows[0], list) else []
+
+        def _hpiv_summary_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in hpiv_columns:
+                return fallback
+            index = hpiv_columns.index(column_name)
+            value = str(first_summary_row[index] if index < len(first_summary_row) else "").strip()
+            return value or fallback
+
+        selection_path = report_dir / f"{sample_name}_hpiv_reference_selection" / "selection.tsv"
+        coverage_summary_path = report_dir / "hpiv_coverage" / "hpiv.coverage.summary.tsv"
+        selection_table = _read_tsv_rows(selection_path)
+        coverage_summary_table = _read_tsv_rows(coverage_summary_path)
+        selection_columns = selection_table.get("columns", [])
+        selection_rows = selection_table.get("rows", [])
+        coverage_summary_columns = coverage_summary_table.get("columns", [])
+        coverage_summary_rows = coverage_summary_table.get("rows", [])
+        first_selection = selection_rows[0] if selection_rows and isinstance(selection_rows[0], list) else []
+        first_coverage_summary = coverage_summary_rows[0] if coverage_summary_rows and isinstance(coverage_summary_rows[0], list) else []
+
+        display_selection_columns = [
+            column
+            for column in selection_columns
+            if str(column).strip() not in {"reference_path", "gff_path"}
+        ]
+        display_selection_rows = []
+        if display_selection_columns and selection_rows:
+            selected_indexes = [selection_columns.index(column) for column in display_selection_columns]
+            for row in selection_rows:
+                if not isinstance(row, list):
+                    continue
+                display_selection_rows.append([row[index] if index < len(row) else "" for index in selected_indexes])
+
+        def _hpiv_selection_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in selection_columns:
+                return fallback
+            index = selection_columns.index(column_name)
+            value = str(first_selection[index] if index < len(first_selection) else "").strip()
+            return value or fallback
+
+        def _hpiv_coverage_summary_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in coverage_summary_columns:
+                return fallback
+            index = coverage_summary_columns.index(column_name)
+            value = str(first_coverage_summary[index] if index < len(first_coverage_summary) else "").strip()
+            return value or fallback
+
+        selected_hpiv_type = _hpiv_summary_value("HPIV亚型", _hpiv_selection_value("hpiv_type"))
+        selected_reference = _hpiv_summary_value("参考序列", Path(_hpiv_selection_value("reference_path", "")).name or "-")
+        selected_gff = _hpiv_summary_value("注释文件", Path(_hpiv_selection_value("gff_path", "")).name or "-")
+        coverage_value = _hpiv_summary_value("覆盖度", _hpiv_coverage_summary_value("coverage", _hpiv_selection_value("coverage")))
+        mean_depth_value = _hpiv_summary_value("平均深度", _hpiv_coverage_summary_value("mean_depth", _hpiv_selection_value("mean_depth")))
+        summary_note = _sanitize_virus_demo_note(_hpiv_summary_value("说明", ""))
+        coverage_reference_name = _hpiv_coverage_summary_value("coverage_reference_name", "")
+        notes: list[str] = []
+        if selected_hpiv_type != "-":
+            notes.append(f"自动选择参考型别：HPIV{selected_hpiv_type}")
+        if selected_reference != "-":
+            notes.append(f"参考序列：{selected_reference}")
+        if selected_gff != "-":
+            notes.append(f"注释文件：{selected_gff}")
+        if coverage_reference_name:
+            notes.append(f"覆盖度参考：{coverage_reference_name}")
+        if summary_note != "-":
+            notes.append(summary_note)
+        mutation_table = _read_rsv_variant_annotation_table(report_dir)
+        functional_annotation = _read_hpiv_functional_annotation_table(report_dir, mutation_table, selected_hpiv_type)
+        return {
+            "status": "ready",
+            "mode": "hpiv_typing",
+            "predicted_clade": selected_hpiv_type,
+            "reference_name": selected_reference,
+            "summary_cards": [
+                {"label": "HPIV 亚型", "value": selected_hpiv_type},
+                {"label": "参考序列", "value": selected_reference},
+                {"label": "注释文件", "value": selected_gff},
+                {"label": "覆盖度", "value": coverage_value},
+            ],
+            "quality_metrics": [
+                {"label": "平均深度", "value": mean_depth_value},
+            ] if mean_depth_value != "-" else [],
+            "sequence_name": sample_name or "-",
+            "notes": "；".join(notes),
+            "mutation_table": mutation_table,
+            "functional_annotation": functional_annotation,
+            "igv": _discover_hpiv_igv_assets(report_dir),
+            "columns": display_selection_columns or hpiv_columns,
+            "rows": display_selection_rows or hpiv_rows[:1],
+        }
+
+    hiv_summary = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    hiv_columns = hiv_summary.get("columns", [])
+    hiv_rows = hiv_summary.get("rows", [])
+    hiv_resistance = _read_tsv_rows(report_dir / f"{sample_name}_hiv_resistance.tsv")
+    has_hiv_assets = (
+        any(str(column).strip() in {"NRTI最高等级", "NNRTI最高等级", "PI最高等级", "INSTI最高等级"} for column in hiv_columns)
+        or bool(hiv_resistance.get("rows"))
+    )
+    if has_hiv_assets:
+        first_summary_row = hiv_rows[0] if hiv_rows and isinstance(hiv_rows[0], list) else []
+
+        def _hiv_summary_value(column_name: str, fallback: str = "-") -> str:
+            if column_name not in hiv_columns:
+                return fallback
+            index = hiv_columns.index(column_name)
+            value = str(first_summary_row[index] if index < len(first_summary_row) else "").strip()
+            return value or fallback
+
+        notes: list[str] = []
+        for label in ("候选父本", "输入序列", "耐药输入序列", "序列告警", "说明"):
+            value = _hiv_summary_value(label, "-")
+            if value != "-":
+                prefix = "" if label == "说明" else f"{label}："
+                notes.append(f"{prefix}{value}")
+
+        display_columns = hiv_columns or hiv_resistance.get("columns", [])
+        display_rows = hiv_rows[:1] if hiv_rows else []
+        broad_type = _hiv_summary_value("大亚型", _hiv_summary_value("病毒类型", "HIV"))
+        subtype = _hiv_summary_value("子亚型", "-")
+        recombination = _hiv_summary_value("重组判定", "-")
+        representative_reference = _hiv_summary_value("代表株参考", "-")
+        mutation_table = _read_rsv_variant_annotation_table(report_dir)
+        hiv_reference_root = report_dir / f"{sample_name}_hiv_reference_selection"
+        broad_typing = _read_tsv_rows(hiv_reference_root / "broad_typing.tsv")
+        subtype_reference_typing = _read_tsv_rows(hiv_reference_root / "representative_subtype_typing.tsv")
+        reference_selection = _read_tsv_rows(hiv_reference_root / "selection.tsv")
+        subtyping_json_path = report_dir / f"{sample_name}_hiv_subtyping.json"
+        subtyping_payload: dict[str, object] = {}
+        if subtyping_json_path.is_file():
+            try:
+                subtyping_payload = json.loads(subtyping_json_path.read_text(encoding="utf-8", errors="ignore"))
+            except (OSError, json.JSONDecodeError):
+                subtyping_payload = {}
+        resistance_json_path = report_dir / f"{sample_name}_hiv_resistance.json"
+        resistance_payload: dict[str, object] = {}
+        if resistance_json_path.is_file():
+            try:
+                raw_resistance_payload = json.loads(resistance_json_path.read_text(encoding="utf-8", errors="ignore"))
+                if isinstance(raw_resistance_payload, dict):
+                    resistance_payload = raw_resistance_payload
+            except (OSError, json.JSONDecodeError):
+                resistance_payload = {}
+        subtyping_sample = {}
+        if isinstance(subtyping_payload.get("samples"), list) and subtyping_payload["samples"]:
+            candidate = subtyping_payload["samples"][0]
+            if isinstance(candidate, dict):
+                subtyping_sample = candidate
+        resistance_sample = {}
+        if isinstance(resistance_payload.get("samples"), list) and resistance_payload["samples"]:
+            candidate = resistance_payload["samples"][0]
+            if isinstance(candidate, dict):
+                resistance_sample = candidate
+        resistance_algorithm = resistance_payload.get("algorithm") if isinstance(resistance_payload.get("algorithm"), dict) else {}
+        bootscan_assets: dict[str, str] = {}
+        raw_bootscan_assets = subtyping_sample.get("bootscan_assets")
+        if isinstance(raw_bootscan_assets, dict):
+            for key, value in raw_bootscan_assets.items():
+                path_text = str(value or "").strip()
+                if not path_text:
+                    continue
+                candidate_path = Path(path_text)
+                if not candidate_path.is_absolute():
+                    candidate_path = report_dir / candidate_path
+                try:
+                    if candidate_path.is_file() and candidate_path.is_relative_to(report_dir):
+                        bootscan_assets[key] = str(candidate_path.relative_to(report_dir))
+                except OSError:
+                    continue
+        candidate_parent_parts: list[str] = []
+        for item in subtyping_sample.get("candidate_parents", []) if isinstance(subtyping_sample, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            group = str(item.get("group") or "").strip()
+            if not group:
+                continue
+            fraction = item.get("fraction")
+            try:
+                fraction_text = f"{float(fraction):.3f}"
+            except (TypeError, ValueError):
+                fraction_text = ""
+            candidate_parent_parts.append(f"{group}{f' ({fraction_text})' if fraction_text else ''}")
+        broad_coverage = "-"
+        broad_depth = "-"
+        if broad_typing.get("columns") and broad_typing.get("rows"):
+            broad_columns = broad_typing["columns"]
+            broad_row = broad_typing["rows"][0] if broad_typing["rows"] and isinstance(broad_typing["rows"][0], list) else []
+            if "coverage" in broad_columns:
+                idx = broad_columns.index("coverage")
+                broad_coverage = str(broad_row[idx] if idx < len(broad_row) else "").strip() or "-"
+            if "mean_depth" in broad_columns:
+                idx = broad_columns.index("mean_depth")
+                broad_depth = str(broad_row[idx] if idx < len(broad_row) else "").strip() or "-"
+        subtype_coverage = "-"
+        subtype_depth = "-"
+        if subtype_reference_typing.get("columns") and subtype_reference_typing.get("rows"):
+            subtype_columns = subtype_reference_typing["columns"]
+            subtype_row = subtype_reference_typing["rows"][0] if subtype_reference_typing["rows"] and isinstance(subtype_reference_typing["rows"][0], list) else []
+            if "coverage" in subtype_columns:
+                idx = subtype_columns.index("coverage")
+                subtype_coverage = str(subtype_row[idx] if idx < len(subtype_row) else "").strip() or "-"
+            if "mean_depth" in subtype_columns:
+                idx = subtype_columns.index("mean_depth")
+                subtype_depth = str(subtype_row[idx] if idx < len(subtype_row) else "").strip() or "-"
+        knowledge_summary = _build_viral_serotype_knowledge_summary(
+            str(Path(__file__).resolve().parents[1]),
+            "Human immunodeficiency virus",
+            {
+                "mode": "hiv_resistance",
+                "predicted_group": broad_type,
+                "predicted_clade": subtype if subtype != "-" else broad_type,
+            },
+        )
+        return {
+            "status": "ready",
+            "mode": "hiv_resistance",
+            "predicted_group": broad_type,
+            "predicted_clade": subtype if subtype != "-" else broad_type,
+            "summary_cards": [
+                {"label": "HIV 大亚型", "value": broad_type},
+                {"label": "子亚型", "value": subtype},
+                {"label": "重组判定", "value": recombination},
+                {"label": "代表株参考", "value": representative_reference},
+                {"label": "NRTI 最高等级", "value": _hiv_summary_value("NRTI最高等级", "-")},
+                {"label": "NNRTI 最高等级", "value": _hiv_summary_value("NNRTI最高等级", "-")},
+                {"label": "PI 最高等级", "value": _hiv_summary_value("PI最高等级", "-")},
+                {"label": "INSTI 最高等级", "value": _hiv_summary_value("INSTI最高等级", "-")},
+            ],
+            "quality_metrics": [
+                {"label": "大亚型覆盖度", "value": broad_coverage},
+                {"label": "大亚型平均深度", "value": broad_depth},
+                {"label": "子亚型覆盖度", "value": subtype_coverage},
+                {"label": "子亚型平均深度", "value": subtype_depth},
+            ],
+            "sequence_name": sample_name or "-",
+            "notes": "；".join(notes),
+            "knowledge_summary": knowledge_summary,
+            "mutation_panels": [
+                {"label": "PR 突变", "value": _hiv_summary_value("PR突变", "-")},
+                {"label": "RT 突变", "value": _hiv_summary_value("RT突变", "-")},
+                {"label": "IN 突变", "value": _hiv_summary_value("IN突变", "-")},
+                {"label": "候选父本", "value": "；".join(candidate_parent_parts) if candidate_parent_parts else _hiv_summary_value("候选父本", "-")},
+            ],
+            "reference_selection": reference_selection,
+            "broad_typing": broad_typing,
+            "subtype_reference_typing": subtype_reference_typing,
+            "subtyping_summary": {
+                "assignment_label": str(subtyping_sample.get("assignment_label") or recombination or "-"),
+                "predicted_group": str(subtyping_sample.get("predicted_group") or broad_type or "-"),
+                "predicted_clade": str(subtyping_sample.get("predicted_clade") or subtype or "-"),
+                "pure_tree_support": str(((subtyping_sample.get("pure_tree") or {}) if isinstance(subtyping_sample, dict) else {}).get("support") or "-"),
+                "overall_tree_support": str(((subtyping_sample.get("overall_tree") or {}) if isinstance(subtyping_sample, dict) else {}).get("support") or "-"),
+                "candidate_parent_count": len(candidate_parent_parts),
+            },
+            "bootscan_assets": bootscan_assets,
+            "resistance_table": hiv_resistance,
+            "resistance_payload": {
+                "algorithm": resistance_algorithm,
+                "sample": resistance_sample,
+            },
+            "mutation_table": mutation_table,
+            "igv": _discover_hiv_igv_assets(report_dir),
+            "columns": display_columns,
+            "rows": display_rows,
+        }
+
+    default_table = _read_tsv_rows(report_dir / f"{sample_name}_serotype_result.tsv")
+    if not _is_bordetella_pertussis(checkm_info):
+        return {
+            "status": "ready" if default_table.get("rows") else "empty",
+            "mode": "generic",
+            "columns": default_table.get("columns", []),
+            "rows": default_table.get("rows", []),
+        }
+    rrn_path = report_dir / f"{sample_name}.2037.tsv"
+    scheme_table = _read_tsv_rows(report_dir / f"{sample_name}_scheme.tsv")
+    scheme_summary = ""
+    if scheme_table.get("columns") and "分型" in scheme_table["columns"]:
+        type_index = scheme_table["columns"].index("分型")
+        parts: list[str] = []
+        for row in scheme_table.get("rows", []):
+            value = str((row[type_index] if type_index < len(row) else "") or "").strip()
+            if value and value != "-" and value not in parts:
+                parts.append(value)
+        scheme_summary = "/".join(parts)
+    notes = [
+        {
+            "label": "rrn A2037G",
+            "state": "success" if rrn_path.is_file() else "neutral",
+            "text": "鉴定到了rrn A2037G" if rrn_path.is_file() else "未鉴定到rrn A2037G",
+        },
+        {
+            "label": "抗原基因",
+            "state": "success" if scheme_table.get("rows") else "neutral",
+            "text": "检测到抗原基因" if scheme_table.get("rows") else "未检测到抗原基因",
+        },
+    ]
+    status = "ready" if rrn_path.is_file() or scheme_table.get("rows") else "empty"
+    return {
+        "status": status,
+        "mode": "bordetella_pertussis",
+        "columns": scheme_table.get("columns", []),
+        "rows": scheme_table.get("rows", []),
+        "notes": notes,
+        "scheme_summary": scheme_summary,
+    }
 
 
 def _read_assembly_profile(path: Path) -> dict:
@@ -1187,6 +16745,245 @@ def _read_assembly_profile(path: Path) -> dict:
         "plasmid_count": plasmid_count,
         "total_count": total_count,
         "total_length": total_length or None,
+    }
+
+
+def _discover_cgview_assets(report_dir: Path, sample_name: str) -> dict:
+    if not report_dir.is_dir() or not sample_name:
+        return {"status": "empty", "summary": {"map_count": 0}, "maps": []}
+    prokka_dir = report_dir / f"{sample_name}_prokka"
+    if not prokka_dir.is_dir():
+        return {"status": "empty", "summary": {"map_count": 0}, "maps": []}
+    maps: list[dict[str, str]] = []
+    main_gbk = prokka_dir / "main.gbk"
+    fallback_main_gbk = prokka_dir / f"{sample_name}.gbk"
+    if main_gbk.is_file():
+        maps.append({
+            "key": "main",
+            "label": "主基因组环形图",
+            "asset_name": f"{prokka_dir.name}/main.gbk",
+            "role": "main",
+        })
+    elif fallback_main_gbk.is_file():
+        maps.append({
+            "key": sample_name,
+            "label": "主基因组环形图",
+            "asset_name": f"{prokka_dir.name}/{sample_name}.gbk",
+            "role": "main",
+        })
+    for path in sorted(prokka_dir.glob("*.gbk"), key=lambda item: item.name.lower()):
+        if path.name.startswith("."):
+            continue
+        if path.name in {"main.gbk", f"{sample_name}.gbk"}:
+            continue
+        maps.append({
+            "key": path.stem,
+            "label": f"{path.stem} 环形图",
+            "asset_name": f"{prokka_dir.name}/{path.name}",
+            "role": "plasmid" if "plasmid" in path.stem.lower() else "contig",
+        })
+
+    return {
+        "status": "ready" if maps else "empty",
+        "summary": {"map_count": len(maps)},
+        "maps": maps,
+    }
+
+
+def _build_cgview_json_from_gbk(report_dir: Path, gbk_path: Path, map_name: str) -> Path:
+    cache_dir = report_dir / ".portal_report_cache" / "cgview"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    json_path = cache_dir / f"{map_name}.cgview.json"
+    if json_path.is_file():
+        try:
+            if json_path.stat().st_mtime >= gbk_path.stat().st_mtime:
+                return json_path
+        except OSError:
+            pass
+
+    builder_command = str(
+        os.environ.get("CGVIEW_BUILDER_BIN")
+        or "ruby /data/deploy/bio-elite/bio/script/cgview_builder_cli.rb"
+    ).strip()
+    config_path = str(
+        os.environ.get("CGVIEW_CONFIG_PATH")
+        or "/data/deploy/bio-elite/bio/script/CGview.yaml"
+    ).strip()
+    command = shlex.split(builder_command) + [
+        "-s", str(gbk_path),
+        "-o", str(json_path),
+        "-c", config_path,
+        "-n", map_name,
+    ]
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode == 0 and json_path.is_file():
+        return json_path
+
+    builder_error = completed.stderr.strip() or completed.stdout.strip() or "CGView builder 执行失败"
+    try:
+        return _build_cgview_json_with_biopython(report_dir, gbk_path, map_name)
+    except Exception as fallback_error:
+        raise RuntimeError(f"{builder_error}; Python fallback 也失败: {fallback_error}") from fallback_error
+    return json_path
+
+
+def _build_cgview_json_with_biopython(report_dir: Path, gbk_path: Path, map_name: str) -> Path:
+    try:
+        from Bio import BiopythonParserWarning, SeqIO
+    except ImportError as error:
+        raise RuntimeError("Biopython 不可用，无法执行 CGView JSON 回退构建") from error
+
+    import warnings
+
+    cache_dir = report_dir / ".portal_report_cache" / "cgview"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    json_path = cache_dir / f"{map_name}.cgview.json"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", BiopythonParserWarning)
+        record = SeqIO.read(str(gbk_path), "genbank")
+
+    contig_name = str(getattr(record, "id", "") or map_name or gbk_path.stem).strip() or gbk_path.stem
+    sequence = str(getattr(record, "seq", "") or "").lower()
+    contig_length = len(sequence)
+    if contig_length <= 0:
+        raise RuntimeError(f"GenBank 文件 {gbk_path.name} 不包含可绘制的序列长度")
+
+    features: list[dict[str, Any]] = []
+    for feature in getattr(record, "features", []) or []:
+        if not feature or getattr(feature, "type", "") == "source":
+            continue
+        try:
+            start = int(feature.location.start) + 1
+            stop = int(feature.location.end)
+        except Exception:
+            continue
+        if start <= 0 or stop <= 0:
+            continue
+        start, stop = sorted((start, stop))
+        qualifiers = getattr(feature, "qualifiers", {}) or {}
+        name = (
+            next(iter(qualifiers.get("gene", [])), "")
+            or next(iter(qualifiers.get("locus_tag", [])), "")
+            or next(iter(qualifiers.get("product", [])), "")
+            or str(getattr(feature, "type", "") or "feature")
+        )
+        sanitized_qualifiers = {
+            str(key): [str(item) for item in value]
+            for key, value in qualifiers.items()
+            if isinstance(value, list)
+        }
+        features.append({
+            "start": start,
+            "stop": stop,
+            "strand": -1 if getattr(feature.location, "strand", 1) == -1 else 1,
+            "name": str(name).strip() or str(getattr(feature, "type", "") or "feature"),
+            "type": str(getattr(feature, "type", "") or "misc_feature"),
+            "contig": contig_name,
+            "source": "genbank-features",
+            "legend": str(getattr(feature, "type", "") or "misc_feature"),
+            "qualifiers": sanitized_qualifiers,
+        })
+
+    if not features:
+        features.append({
+            "start": 1,
+            "stop": contig_length,
+            "strand": 1,
+            "name": contig_name,
+            "type": "misc_feature",
+            "contig": contig_name,
+            "source": "genbank-features",
+            "legend": "misc_feature",
+            "qualifiers": {"note": ["fallback genome span"]},
+        })
+
+    payload = {
+        "cgview": {
+            "name": map_name,
+            "settings": {
+                "format": "circular",
+                "backgroundColor": "rgb(255,255,255)",
+                "geneticCode": 11,
+            },
+            "backbone": {},
+            "ruler": {},
+            "dividers": {},
+            "annotation": {},
+            "sequence": {
+                "contigs": [{
+                    "name": contig_name,
+                    "length": contig_length,
+                    "seq": sequence,
+                }],
+            },
+            "legend": {"visible": True},
+            "tracks": [{
+                "name": "Features",
+                "separateFeaturesBy": "strand",
+                "position": "both",
+                "dataType": "feature",
+                "dataMethod": "source",
+                "dataKeys": "genbank-features",
+            }],
+            "captions": [],
+            "version": "1.7.0",
+            "features": features,
+        },
+    }
+    json_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return json_path
+
+
+def _fallback_assembly_profile(assembly_profile: dict, contig_annotation: dict, assembly_summary: dict) -> dict:
+    if assembly_profile.get("contig_count") is not None:
+        return assembly_profile
+    columns = contig_annotation.get("columns") or []
+    rows = contig_annotation.get("rows") or []
+    if columns and rows:
+        length_index = columns.index("序列长度") if "序列长度" in columns else -1
+        genome_type_index = columns.index("基因组/质粒") if "基因组/质粒" in columns else -1
+        contig_count = len(rows)
+        plasmid_count = 0
+        total_length = 0
+        has_total_length = False
+        for row in rows:
+            if genome_type_index >= 0 and genome_type_index < len(row):
+                raw_type = str(row[genome_type_index] or "")
+                if "plasmid" in raw_type.lower():
+                    plasmid_count += 1
+            if length_index >= 0 and length_index < len(row):
+                length_value = _safe_int(row[length_index])
+                if length_value is not None:
+                    total_length += length_value
+                    has_total_length = True
+        return {
+            "contig_count": contig_count,
+            "plasmid_count": plasmid_count,
+            "total_count": contig_count,
+            "total_length": total_length if has_total_length else None,
+        }
+    columns = assembly_summary.get("columns") or []
+    rows = assembly_summary.get("rows") or []
+    if not columns or not rows:
+        return assembly_profile
+    try:
+        contig_index = columns.index("Contig数量")
+    except ValueError:
+        return assembly_profile
+    first_row = rows[0] if rows else []
+    contig_count = _safe_int(first_row[contig_index] if contig_index < len(first_row) else None)
+    if contig_count is None:
+        return assembly_profile
+    return {
+        "contig_count": contig_count,
+        "plasmid_count": 0,
+        "total_count": contig_count,
+        "total_length": assembly_profile.get("total_length"),
     }
 
 
@@ -1236,44 +17033,133 @@ def _read_contig_depth_relationship(path: Path) -> dict:
     }
 
 
+def _read_fasta_assembly_summary(path: Path) -> dict:
+    if not path.is_file():
+        return {"columns": [], "rows": []}
+    contig_count = 0
+    total_length = 0
+    max_length = 0
+    lengths: list[int] = []
+    current_length = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if line.startswith(">"):
+                    if current_length:
+                        lengths.append(current_length)
+                        total_length += current_length
+                        max_length = max(max_length, current_length)
+                        current_length = 0
+                    contig_count += 1
+                else:
+                    current_length += len(line.strip())
+            if current_length:
+                lengths.append(current_length)
+                total_length += current_length
+                max_length = max(max_length, current_length)
+    except OSError:
+        return {"columns": [], "rows": []}
+    if not contig_count:
+        return {"columns": [], "rows": []}
+    lengths.sort(reverse=True)
+    half_total = total_length / 2 if total_length else 0
+    cumulative = 0
+    n50 = 0
+    for length in lengths:
+        cumulative += length
+        if cumulative >= half_total:
+            n50 = length
+            break
+    avg_length = round(total_length / contig_count, 2) if contig_count else 0
+    return {
+        "columns": ["结果文件", "Contig数量", "总长度(bp)", "最大Contig(bp)", "N50(bp)", "平均长度(bp)"],
+        "rows": [[path.name, str(contig_count), str(total_length), str(max_length), str(n50), f"{avg_length:.2f}"]],
+    }
+
+
+def _read_meta_annotation_subset(path: Path) -> dict:
+    raw = _read_tsv_rows(path)
+    columns = raw.get("columns") or []
+    rows = raw.get("rows") or []
+    if not columns or not rows:
+        return {"columns": [], "rows": []}
+    selected_columns = [columns[0], columns[1], columns[-1]]
+    selected_indexes = [0, 1, len(columns) - 1]
+    return {
+        "columns": ["Contig名称", "质粒基因组预测", "TPM"],
+        "rows": [[row[index] if index < len(row) else "" for index in selected_indexes] for row in rows],
+    }
+
+
 def _read_coverage_profile(path: Path, target_points: int = 800) -> dict:
     if not path.is_file():
         return {"status": "empty", "points": []}
     depths: list[int] = []
     contigs: set[str] = set()
+    contig_depths: dict[str, list[int]] = {}
+    opener = gzip.open if path.suffix == ".gz" else open
     try:
-        with gzip.open(path, "rt", encoding="utf-8", errors="ignore") as handle:
+        with opener(path, "rt", encoding="utf-8", errors="ignore") as handle:
             for line in handle:
                 parts = line.rstrip("\n").split("\t")
                 if len(parts) < 4:
                     continue
-                contigs.add(parts[0])
+                contig_name = str(parts[0]).strip() or "unknown"
+                contigs.add(contig_name)
                 depth = _safe_float(parts[3])
                 if depth is None:
                     continue
-                depths.append(int(round(depth)))
+                depth_value = int(round(depth))
+                depths.append(depth_value)
+                contig_depths.setdefault(contig_name, []).append(depth_value)
     except OSError:
         return {"status": "empty", "points": []}
     if not depths:
         return {"status": "empty", "points": []}
 
-    total_bases = len(depths)
-    if total_bases <= target_points:
-        points = [round(value, 2) for value in depths]
-        x_values = list(range(1, total_bases + 1))
-    else:
-        chunk_size = max(1, (total_bases + target_points - 1) // target_points)
-        points = []
-        x_values = []
-        for start in range(0, total_bases, chunk_size):
-            chunk = depths[start:start + chunk_size]
+    def _compress_depths(raw_depths: list[int], max_points: int) -> tuple[list[float], list[int]]:
+        total = len(raw_depths)
+        if total <= max_points:
+            return [round(value, 2) for value in raw_depths], list(range(1, total + 1))
+        chunk_size = max(1, (total + max_points - 1) // max_points)
+        compressed_points: list[float] = []
+        compressed_x: list[int] = []
+        for start in range(0, total, chunk_size):
+            chunk = raw_depths[start:start + chunk_size]
             if not chunk:
                 continue
-            points.append(round(sum(chunk) / len(chunk), 2))
-            x_values.append(start + 1)
+            compressed_points.append(round(sum(chunk) / len(chunk), 2))
+            compressed_x.append(start + 1)
+        return compressed_points, compressed_x
+
+    total_bases = len(depths)
+    points, x_values = _compress_depths(depths, target_points)
     max_depth = max(points) if points else None
     mean_depth = round(sum(depths) / total_bases, 2) if depths else None
+    covered_bases = sum(1 for depth in depths if depth > 0)
+    covered_10x_bases = sum(1 for depth in depths if depth >= 10)
+    covered_100x_bases = sum(1 for depth in depths if depth >= 100)
     x_ticks = [1, max(1, total_bases // 2), total_bases]
+    segment_summaries: list[dict[str, object]] = []
+    for contig_name, contig_values in sorted(contig_depths.items(), key=lambda item: item[0]):
+        contig_total = len(contig_values)
+        contig_points, contig_x_values = _compress_depths(contig_values, min(target_points, 240))
+        contig_covered = sum(1 for depth in contig_values if depth > 0)
+        contig_covered_10x = sum(1 for depth in contig_values if depth >= 10)
+        contig_covered_100x = sum(1 for depth in contig_values if depth >= 100)
+        segment_summaries.append({
+            "name": contig_name,
+            "label": contig_name,
+            "points": contig_points,
+            "x_values": contig_x_values,
+            "x_ticks": [1, max(1, contig_total // 2), contig_total],
+            "total_bases": contig_total,
+            "max_depth": max(contig_values) if contig_values else None,
+            "mean_depth": round(sum(contig_values) / contig_total, 2) if contig_total else None,
+            "coverage_fraction": round(contig_covered / contig_total, 6) if contig_total else None,
+            "coverage_10x_fraction": round(contig_covered_10x / contig_total, 6) if contig_total else None,
+            "coverage_100x_fraction": round(contig_covered_100x / contig_total, 6) if contig_total else None,
+        })
     return {
         "status": "ready",
         "label": "基因组覆盖度",
@@ -1285,7 +17171,194 @@ def _read_coverage_profile(path: Path, target_points: int = 800) -> dict:
         "contig_count": len(contigs),
         "max_depth": max_depth,
         "mean_depth": mean_depth,
+        "coverage_fraction": round(covered_bases / total_bases, 6) if total_bases else None,
+        "coverage_10x_fraction": round(covered_10x_bases / total_bases, 6) if total_bases else None,
+        "coverage_100x_fraction": round(covered_100x_bases / total_bases, 6) if total_bases else None,
         "x_ticks": x_ticks,
+        "segments": segment_summaries,
+    }
+
+
+def _normalize_bandavirus_assembly_coverage(assembly_coverage: dict, serotype_result: dict) -> dict:
+    if not isinstance(assembly_coverage, dict) or str(assembly_coverage.get("status") or "").strip() != "ready":
+        return assembly_coverage
+    coverage_segments = assembly_coverage.get("segments")
+    if not isinstance(coverage_segments, list) or not coverage_segments:
+        return assembly_coverage
+
+    segment_order = {"L": 0, "M": 1, "S": 2}
+    af_table = serotype_result.get("af_segment_typing") if isinstance(serotype_result.get("af_segment_typing"), dict) else {}
+    cj_table = serotype_result.get("cj_segment_typing") if isinstance(serotype_result.get("cj_segment_typing"), dict) else {}
+    af_columns = af_table.get("columns") if isinstance(af_table.get("columns"), list) else []
+    af_rows = af_table.get("rows") if isinstance(af_table.get("rows"), list) else []
+    cj_columns = cj_table.get("columns") if isinstance(cj_table.get("columns"), list) else []
+    cj_rows = cj_table.get("rows") if isinstance(cj_table.get("rows"), list) else []
+
+    def _table_row_map(columns: list, rows: list, key_name: str) -> dict[str, dict[str, str]]:
+        if key_name not in columns:
+            return {}
+        key_index = columns.index(key_name)
+        mapping: dict[str, dict[str, str]] = {}
+        for row in rows:
+            if not isinstance(row, list):
+                continue
+            key = str(row[key_index] if key_index < len(row) else "").strip()
+            if not key:
+                continue
+            row_map = {
+                str(columns[index]): str(row[index] if index < len(row) else "").strip()
+                for index in range(len(columns))
+            }
+            mapping[key] = row_map
+        return mapping
+
+    af_by_segment = _table_row_map(af_columns, af_rows, "segment")
+    cj_by_segment = _table_row_map(cj_columns, cj_rows, "segment")
+
+    normalized_segments: list[dict] = []
+    for raw_item in coverage_segments:
+        if not isinstance(raw_item, dict):
+            continue
+        item = dict(raw_item)
+        raw_name = str(item.get("name") or item.get("label") or "").strip()
+        segment_symbol = ""
+        accession = ""
+        if raw_name:
+            parts = raw_name.split("_")
+            tail = str(parts[-1]).strip().upper() if parts else ""
+            if tail in segment_order:
+                segment_symbol = tail
+                accession = "_".join(parts[:-1]).strip()
+        if not segment_symbol:
+            continue
+        af_info = af_by_segment.get(segment_symbol, {})
+        cj_info = cj_by_segment.get(segment_symbol, {})
+        item["segment"] = segment_symbol
+        item["name"] = segment_symbol
+        item["label"] = f"{segment_symbol} 片段"
+        item["accession"] = str(af_info.get("accession") or accession or "").strip()
+        item["af_group"] = str(af_info.get("af_group") or "").strip()
+        item["cj_group"] = str(cj_info.get("cj_group") or "").strip()
+        item["sort_order"] = segment_order.get(segment_symbol, 99)
+        normalized_segments.append(item)
+
+    if len(normalized_segments) < 2:
+        return assembly_coverage
+
+    normalized_segments.sort(key=lambda item: (int(item.get("sort_order", 99)), str(item.get("segment") or "")))
+    assembly_coverage = dict(assembly_coverage)
+    assembly_coverage["segments"] = normalized_segments
+    assembly_coverage["label"] = "Bandavirus L/M/S 覆盖度"
+    assembly_coverage["segmented_view"] = "bandavirus_lms"
+    return assembly_coverage
+
+
+def _format_fraction_percent(value: object) -> str:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return "--"
+    return f"{numeric * 100:.2f}%"
+
+
+def _format_percent_value(value: object) -> str:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return "--"
+    return f"{numeric:.2f}%"
+
+
+def _read_norovirus_gene_coverage(report_dir: Path, sample_name: str) -> dict[str, str]:
+    if not sample_name:
+        return {}
+    dual_typing = _read_tsv_rows(
+        report_dir / f"{sample_name}_norovirus_reference_selection" / "typing" / "dual_typing.tsv"
+    )
+    columns = dual_typing.get("columns") or []
+    rows = dual_typing.get("rows") or []
+    if not columns or not rows:
+        return {}
+    gene_index = columns.index("gene") if "gene" in columns else -1
+    coverage_index = columns.index("coverage") if "coverage" in columns else -1
+    if gene_index < 0 or coverage_index < 0:
+        return {}
+    gene_coverage: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        gene_name = str(row[gene_index] if gene_index < len(row) else "").strip().lower()
+        coverage_value = row[coverage_index] if coverage_index < len(row) else ""
+        if gene_name in {"rdrp", "vp1"}:
+            gene_coverage[gene_name] = _format_percent_value(coverage_value)
+    return gene_coverage
+
+
+def _merge_assembly_coverage_summary(summary_table: dict, coverage_section: dict) -> dict:
+    columns = list(summary_table.get("columns") or [])
+    rows = [list(row) if isinstance(row, list) else row for row in (summary_table.get("rows") or [])]
+    if not rows:
+        return summary_table
+    coverage_columns = [
+        ("覆盖度", _format_fraction_percent(coverage_section.get("coverage_fraction"))),
+        ("10x 百分比", _format_fraction_percent(coverage_section.get("coverage_10x_fraction"))),
+        ("100x 百分比", _format_fraction_percent(coverage_section.get("coverage_100x_fraction"))),
+    ]
+    missing_columns = [label for label, _ in coverage_columns if label not in columns]
+    if missing_columns:
+        columns.extend(missing_columns)
+        rows = [
+            list(row) + [""] * len(missing_columns)
+            for row in rows
+        ]
+    for row in rows:
+        for label, value in coverage_columns:
+            try:
+                index = columns.index(label)
+            except ValueError:
+                continue
+            if index >= len(row):
+                row.extend([""] * (index + 1 - len(row)))
+            row[index] = value
+    return {"columns": columns, "rows": rows}
+
+
+def _build_virus_fallback_assembly_summary(report_dir: Path, sample_name: str, coverage_section: dict) -> dict:
+    fasta_path = _resolve_report_artifact_path(
+        report_dir,
+        [f"{sample_name}.final.fasta"] if sample_name else [],
+        ["*.final.fasta", "*.consensus.fasta"],
+    )
+    fasta_summary = _read_fasta_assembly_summary(fasta_path) if fasta_path else {"columns": [], "rows": []}
+    if not fasta_summary.get("rows"):
+        return {"columns": [], "rows": []}
+    first_row = fasta_summary["rows"][0]
+    base_columns = fasta_summary.get("columns") or []
+    value_by_column = {
+        str(base_columns[index]): first_row[index] if index < len(first_row) else ""
+        for index in range(len(base_columns))
+    }
+    norovirus_gene_coverage = _read_norovirus_gene_coverage(report_dir, sample_name)
+    if norovirus_gene_coverage:
+        return {
+            "columns": ["样本名称", "Contig数量", "总长度(bp)", "最大片段长度(bp)", "N50长度(bp)", "RdRp覆盖度", "VP1覆盖度"],
+            "rows": [[
+                sample_name or str(value_by_column.get("结果文件") or fasta_path.name),
+                str(value_by_column.get("Contig数量") or "--"),
+                str(value_by_column.get("总长度(bp)") or "--"),
+                str(value_by_column.get("最大Contig(bp)") or "--"),
+                str(value_by_column.get("N50(bp)") or "--"),
+                norovirus_gene_coverage.get("rdrp", "--"),
+                norovirus_gene_coverage.get("vp1", "--"),
+            ]],
+        }
+    return {
+        "columns": ["样本名称", "Contig数量", "总长度(bp)", "最大片段长度(bp)", "N50长度(bp)"],
+        "rows": [[
+            sample_name or str(value_by_column.get("结果文件") or fasta_path.name),
+            str(value_by_column.get("Contig数量") or "--"),
+            str(value_by_column.get("总长度(bp)") or "--"),
+            str(value_by_column.get("最大Contig(bp)") or "--"),
+            str(value_by_column.get("N50(bp)") or "--"),
+        ]],
     }
 
 
@@ -1308,12 +17381,12 @@ def _parse_mlst_line(line: str) -> list[str]:
     return parts
 
 
-def _read_mlst_result(path: Path) -> dict:
+def _read_mlst_result(path: Path, project_root_text: str = "") -> dict:
     if not path.is_file():
-        return {"columns": [], "rows": [], "gene_show_map": {}, "default_gene": ""}
+        return {"columns": [], "rows": [], "gene_show_map": {}, "default_gene": "", "knowledge_summary": {"headline": "", "items": []}}
     raw = _read_tsv_rows(path)
     if not raw["columns"] or not raw["rows"]:
-        return {"columns": [], "rows": [], "gene_show_map": {}, "default_gene": ""}
+        return {"columns": [], "rows": [], "gene_show_map": {}, "default_gene": "", "knowledge_summary": {"headline": "", "items": []}}
 
     rows: list[list[str]] = []
     gene_show_map: dict[str, str] = {}
@@ -1353,15 +17426,637 @@ def _read_mlst_result(path: Path) -> dict:
             host_gene_key,
         ])
 
+    knowledge_summary = _build_mlst_knowledge_summary(project_root_text, rows) if project_root_text else {"headline": "", "items": []}
     return {
         "columns": ["Host Gene", "等位基因", "序列名称", "起始位置", "终止位置", "比对起始位置", "比对终止位置", "比对长度", "一致性%", "序列分型(ST)", "物种信息", "Host Gene 展示", "Host Gene ID"],
         "rows": rows,
         "gene_show_map": gene_show_map,
         "default_gene": default_gene or (rows[0][12] if rows else ""),
+        "knowledge_summary": knowledge_summary,
     }
 
 
-def _read_taxonomy_list(path: Path, terminal_column: str) -> dict:
+def _looks_like_neisseria_meningitidis_text(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    return (
+        "neisseria meningitidis" in text
+        or "meningitidis" in text
+        or "脑膜炎奈瑟" in text
+        or "流脑" in text
+    )
+
+
+def _looks_like_tuberculosis_text(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    return (
+        "mycobacterium tuberculosis" in text
+        or "mycobacterium_tuberculosis" in text
+        or "mycobacterium tuberculosis complex" in text
+        or "m. tuberculosis" in text
+        or "结核分枝杆菌" in text
+        or "结核杆菌" in text
+    )
+
+
+def _is_mlst_neisseria_meningitidis(mlst_result: dict, checkm_info: dict) -> bool:
+    for value in (
+        checkm_info.get("species_name"),
+        checkm_info.get("mlst_species_name"),
+    ):
+        if _looks_like_neisseria_meningitidis_text(value):
+            return True
+
+    columns = mlst_result.get("columns", []) if isinstance(mlst_result, dict) else []
+    rows = mlst_result.get("rows", []) if isinstance(mlst_result, dict) else []
+    species_index = columns.index("物种信息") if "物种信息" in columns else -1
+    st_index = columns.index("序列分型(ST)") if "序列分型(ST)" in columns else -1
+    for row in rows if isinstance(rows, list) else []:
+        if species_index >= 0 and species_index < len(row) and _looks_like_neisseria_meningitidis_text(row[species_index]):
+            return True
+        if st_index >= 0 and st_index < len(row):
+            st_text = _normalize_mlst_lookup_text(row[st_index])
+            if st_text == "ST4821":
+                return True
+    return False
+
+
+def _build_neisseria_amr_summary(call_rows: list[dict[str, str]]) -> dict:
+    positive = [row for row in call_rows if str(row.get("present") or "").strip().lower() == "yes"]
+    review = [
+        row for row in call_rows
+        if str(row.get("status") or "").strip().lower() in {"manual_review_recommended", "position_not_covered", "gene_not_found_in_faa"}
+    ]
+    highlights: list[str] = []
+    if positive:
+        grouped: dict[str, list[str]] = {}
+        for row in positive:
+            gene = str(row.get("gene") or "-").strip()
+            grouped.setdefault(gene, []).append(str(row.get("protein_change") or row.get("nucleotide_change") or "-").strip())
+        for gene, changes in grouped.items():
+            uniq = []
+            for change in changes:
+                if change and change not in uniq:
+                    uniq.append(change)
+            highlights.append(f"{gene}: {', '.join(uniq)}")
+    headline = "未检出明确命中的脑膜炎奈瑟菌已知耐药位点。"
+    if positive:
+        headline = f"检出 {len(positive)} 个脑膜炎奈瑟菌已知耐药相关位点。"
+    elif review:
+        headline = "未检出明确阳性位点，但部分目标基因需要人工复核或序列补充确认。"
+    positive_keys = {
+        (
+            str(row.get("gene") or "").strip().lower(),
+            str(row.get("protein_change") or row.get("nucleotide_change") or "").strip(),
+        )
+        for row in positive
+    }
+    review_keys = {
+        (
+            str(row.get("gene") or "").strip().lower(),
+            str(row.get("protein_change") or row.get("nucleotide_change") or "").strip(),
+        )
+        for row in review
+    }
+    interpretation_items: list[str] = []
+    classic_peni = {
+        ("pena", "F504L"),
+        ("pena", "A510V"),
+        ("pena", "I515V"),
+        ("pena", "H541N"),
+        ("pena", "I566V"),
+    }
+    if classic_peni.issubset(positive_keys):
+        interpretation_items.append("命中经典 penA 五位点组合，提示青霉素敏感性下降。")
+    if ("pena", "A549T") in positive_keys:
+        interpretation_items.append("额外命中 penA A549T，进一步支持青霉素非敏感背景。")
+    if ("pena", "N512Y") in positive_keys:
+        interpretation_items.append("命中 penA N512Y，提示第三代头孢敏感性下降风险，建议结合完整 penA 单倍型或药敏结果进一步判读。")
+    if ("gyra", "T91I") in positive_keys or ("gyra", "T91F") in positive_keys:
+        interpretation_items.append("命中 gyrA T91 位点耐药突变，支持环丙沙星耐药。")
+    elif any(key in positive_keys for key in {("gyra", "D95A"), ("gyra", "D95G"), ("gyra", "D95N"), ("gyra", "D95Y")}):
+        interpretation_items.append("命中 gyrA D95 位点变异，提示喹诺酮敏感性下降或耐药风险。")
+    if any(key in positive_keys for key in {("rpob", "H552Y"), ("rpob", "H552N"), ("rpob", "H552R"), ("rpob", "S548F"), ("rpob", "S557F"), ("rpob", "D542N")}):
+        interpretation_items.append("命中 rpoB 利福平耐药热点位点，提示利福平耐药风险。")
+    if any(key in positive_keys for key in {("folp", "F31L"), ("folp", "G194C"), ("folp", "R228S"), ("folp", "195_196insGS")}):
+        interpretation_items.append("命中 folP 磺胺类相关位点，提示磺胺类耐药风险。")
+    if ("folp", "195_196insGS") in review_keys:
+        interpretation_items.append("folP 195_196insGS 当前为待确认状态，需要结合 CDS 核酸或蛋白比对复核；若确认阳性，提示磺胺类耐药。")
+    if not interpretation_items and review:
+        interpretation_items.append("当前主要为待确认位点，建议结合更完整序列或药敏试验进行复核。")
+    return {
+        "headline": headline,
+        "highlights": highlights,
+        "positive_count": len(positive),
+        "review_count": len(review),
+        "interpretation_items": interpretation_items,
+    }
+
+
+def _translate_neisseria_amr_drug_class(value: str) -> str:
+    mapping = {
+        "beta_lactam": "β-内酰胺类",
+        "fluoroquinolone": "氟喹诺酮类",
+        "rifamycin": "利福平类",
+        "sulfonamide": "磺胺类",
+        "folate_pathway": "叶酸通路相关",
+        "macrolide": "大环内酯类",
+    }
+    return mapping.get(str(value or "").strip().lower(), str(value or "").strip() or "-")
+
+
+def _translate_neisseria_amr_drug(value: str) -> str:
+    mapping = {
+        "penicillin": "青霉素",
+        "ampicillin": "氨苄西林",
+        "ceftriaxone_or_cefotaxime": "头孢曲松/头孢噻肟",
+        "cefotaxime": "头孢噻肟",
+        "ceftriaxone": "头孢曲松",
+        "ciprofloxacin": "环丙沙星",
+        "levofloxacin": "左氧氟沙星",
+        "rifampin": "利福平",
+        "sulfamethoxazole": "磺胺甲噁唑",
+        "sulfonamide": "磺胺类",
+        "azithromycin": "阿奇霉素",
+    }
+    key = str(value or "").strip().lower()
+    return mapping.get(key, str(value or "").strip() or "-")
+
+
+def _translate_neisseria_amr_association(value: str) -> str:
+    mapping = {
+        "reduced_susceptibility": "敏感性下降",
+        "reduced_susceptibility_or_resistance": "敏感性下降或耐药",
+        "resistance": "耐药",
+    }
+    return mapping.get(str(value or "").strip().lower(), str(value or "").strip() or "-")
+
+
+def _translate_neisseria_amr_note(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "-"
+    replacements = [
+        ("Part of the classic PenI-associated PBP2 pattern; usually interpreted together with additional penA substitutions.", "属于经典 PenI 相关 PBP2 组合位点，通常需要结合其他 penA 位点共同判读。"),
+        ("Highlighted in Chen Mingliang team papers as an additional penA substitution associated with penicillin nonsusceptibility, including nonclassic penA184-like patterns.", "陈明亮团队文献强调该位点可作为青霉素非敏感的补充 penA 位点，也见于非经典 penA184 样模式。"),
+        ("Reported among penA changes linked to reduced third-generation cephalosporin susceptibility; interpret in penA haplotype context rather than as a standalone marker.", "文献将其列为与第三代头孢敏感性下降相关的 penA 位点，更适合放在 penA 单倍型背景下整体判读。"),
+        ("Observed in penA795/FC428-like cefotaxime-resistant backgrounds described in recent Chinese meningococcal reports.", "该位点见于近期中国文献报道的 penA795/FC428-like 头孢噻肟耐药背景。"),
+        ("Added from Chen Mingliang team's cefotaxime-resistant reports; part of FC428-like or NEIS1753_5058-associated cephalosporin-resistance combinations.", "该位点来自陈明亮团队头孢噻肟耐药文献，属于 FC428-like 或 NEIS1753_5058 相关头孢耐药组合的一部分。"),
+        ("Core ciprofloxacin resistance-associated QRDR substitution in Neisseria meningitidis.", "脑膜炎奈瑟菌喹诺酮耐药最核心的 QRDR 位点之一。"),
+        ("Often reported with elevated ciprofloxacin MIC; may occur with other QRDR substitutions.", "常与环丙沙星 MIC 升高相关，也可能与其他 QRDR 位点共同出现。"),
+        ("Typically considered an accessory QRDR substitution; interpret together with gyrA.", "通常属于辅助性 QRDR 位点，建议与 gyrA 位点联合判读。"),
+        ("Rifampin resistance hotspot in meningococci.", "脑膜炎奈瑟菌利福平耐药热点位点。"),
+        ("Classic sulfonamide-associated folP substitution.", "经典磺胺类相关 folP 位点。"),
+        ("Candidate macrolide-associated regulator change; evidence in meningococci is limited.", "候选性大环内酯相关调控位点，但在脑膜炎奈瑟菌中的证据仍有限。"),
+        ("A Gly-Ser insertion between codons 195 and 196 is linked to elevated sulfonamide MIC.", "195-196 位密码子之间的 Gly-Ser 插入与磺胺类 MIC 升高相关。"),
+        ("This target is recorded as a nucleotide-level change (195_196insGS); direct confirmation needs CDS nucleotide extraction/alignment.", "该位点按核酸变化记录，需结合 CDS 核酸提取或序列比对进一步确认。"),
+        ("Insertion-style changes should be confirmed on the CDS nucleotide alignment.", "插入类变化建议结合 CDS 核酸比对进一步确认。"),
+        ("Nucleotide-level targets require CDS-level nucleotide alignment.", "核酸层面的位点需要结合 CDS 核酸比对判定。"),
+        ("Selected protein is too short to cover amino-acid position ", "当前选中的蛋白序列长度不足，无法覆盖氨基酸位点 "),
+        ("Multiple candidate proteins found for ", "检测到多个候选蛋白："),
+    ]
+    for source, target in replacements:
+        text = text.replace(source, target)
+    return text
+
+
+def _build_neisseria_amr_section(report_dir: Path, sample_name: str, mlst_result: dict, checkm_info: dict, project_root: Path) -> dict:
+    if not _is_mlst_neisseria_meningitidis(mlst_result, checkm_info):
+        return {"status": "empty", "headline": "", "columns": [], "rows": [], "source_label": ""}
+    result_path = report_dir / f"{sample_name}.neisseria_amr_calls.csv"
+    if not result_path.is_file():
+        return {
+            "status": "empty",
+            "headline": "MLST/物种结果提示为脑膜炎奈瑟菌，但主分析流程尚未产出耐药位点识别结果文件。",
+            "columns": [],
+            "rows": [],
+            "source_label": "脑膜炎奈瑟菌耐药位点库（文献整理版）",
+        }
+    raw_calls: list[dict[str, str]] = []
+    try:
+        with result_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            raw_calls = [{str(key): str(value or "") for key, value in row.items()} for row in reader]
+    except OSError:
+        raw_calls = []
+    if not raw_calls:
+        return {
+            "status": "empty",
+            "headline": "脑膜炎奈瑟菌耐药位点结果文件存在，但暂未读取到有效记录。",
+            "columns": [],
+            "rows": [],
+            "source_label": "脑膜炎奈瑟菌耐药位点库（文献整理版）",
+        }
+
+    columns = ["基因", "位点", "药物/药物类别", "关联解释", "判定", "观测氨基酸", "状态", "置信度", "说明"]
+    rows: list[list[str]] = []
+    status_label_map = {
+        "called": "已判定",
+        "manual_review_recommended": "建议复核",
+        "position_not_covered": "位点未覆盖",
+        "gene_not_found_in_faa": "目标基因未找到",
+        "unsupported_target_format": "规则格式待补充",
+    }
+    for call in raw_calls:
+        gene = str(call.get("gene") or "").strip()
+        site = str(call.get("protein_change") or call.get("nucleotide_change") or "-").strip()
+        drug = " / ".join([
+            item for item in [
+                _translate_neisseria_amr_drug(str(call.get("drug") or "").strip()),
+                _translate_neisseria_amr_drug_class(str(call.get("drug_class") or "").strip()),
+            ] if item and item != "-"
+        ])
+        present = str(call.get("present") or "").strip().lower()
+        status = str(call.get("status") or "").strip()
+        if present == "no":
+            continue
+        if present == "yes":
+            verdict = "命中"
+        elif present == "no":
+            verdict = "未命中"
+        else:
+            verdict = "待确认"
+        rows.append([
+            gene or "-",
+            site or "-",
+            drug or "-",
+            _translate_neisseria_amr_association(str(call.get("association") or "-").strip()),
+            verdict,
+            str(call.get("observed_aa") or "-").strip(),
+            status_label_map.get(status, status or "-"),
+            str(call.get("confidence") or "-").strip(),
+            _translate_neisseria_amr_note(str(call.get("notes") or "-").strip()),
+        ])
+
+    summary = _build_neisseria_amr_summary(raw_calls)
+    return {
+        "status": "ready",
+        "headline": summary.get("headline", ""),
+        "highlights": summary.get("highlights", []),
+        "interpretation_items": summary.get("interpretation_items", []),
+        "positive_count": summary.get("positive_count", 0),
+        "review_count": summary.get("review_count", 0),
+        "columns": columns,
+        "rows": rows,
+        "source_label": "脑膜炎奈瑟菌耐药位点库（文献整理版）",
+    }
+
+
+def _read_tb_summary(report_dir: Path) -> dict:
+    path = report_dir / "tb_analysis" / "tb_summary.json"
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+TB_DRUG_NAME_ZH = {
+    "Isoniazid": "异烟肼",
+    "Rifampicin": "利福平",
+    "Ethambutol": "乙胺丁醇",
+    "Pyrazinamide": "吡嗪酰胺",
+    "Levofloxacin": "左氧氟沙星",
+    "Moxifloxacin": "莫西沙星",
+    "Amikacin": "阿米卡星",
+    "Kanamycin": "卡那霉素",
+    "Capreomycin": "卷曲霉素",
+    "Linezolid": "利奈唑胺",
+    "Bedaquiline": "贝达喹啉",
+    "Clofazimine": "氯法齐明",
+    "Delamanid": "德拉马尼",
+    "Ethionamide": "乙硫异烟胺",
+    "Streptomycin": "链霉素",
+    "Pretomanid": "普托马尼",
+}
+
+
+def _translate_tb_drug_name(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "-"
+    return TB_DRUG_NAME_ZH.get(text, text)
+
+
+def _classify_tb_resistance_grade(focus_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    resistant_drugs = {
+        str(item.get("drug") or "").strip()
+        for item in focus_calls
+        if isinstance(item, dict) and str(item.get("drug") or "").strip()
+    }
+    first_line_hits = {
+        drug for drug in resistant_drugs
+        if drug in {"Isoniazid", "Rifampicin", "Ethambutol", "Pyrazinamide", "Streptomycin"}
+    }
+    fluoroquinolone_hits = {
+        drug for drug in resistant_drugs
+        if drug in {"Levofloxacin", "Moxifloxacin"}
+    }
+    group_a_hits = {
+        drug for drug in resistant_drugs
+        if drug in {"Bedaquiline", "Linezolid"}
+    }
+    has_rif = "Rifampicin" in resistant_drugs
+    has_inh = "Isoniazid" in resistant_drugs
+
+    if has_rif and fluoroquinolone_hits and group_a_hits:
+        label = "XDR-TB"
+        tone = "high"
+        reason = "已命中利福平耐药，并同时命中氟喹诺酮类和贝达喹啉/利奈唑胺相关重点耐药证据。"
+    elif has_rif and fluoroquinolone_hits:
+        label = "Pre-XDR-TB"
+        tone = "high"
+        reason = "已命中利福平耐药，并同时命中左氧氟沙星/莫西沙星等氟喹诺酮类重点耐药证据。"
+    elif has_rif and has_inh:
+        label = "MDR-TB"
+        tone = "high"
+        reason = "已同时命中利福平和异烟肼重点耐药证据。"
+    elif has_rif:
+        label = "RR-TB"
+        tone = "watch"
+        reason = "已命中利福平重点耐药证据，可按利福平耐药相关结核重点关注。"
+    elif resistant_drugs:
+        label = "DR-TB"
+        tone = "watch"
+        if first_line_hits:
+            reason = f"已命中非利福平重点耐药证据，主要涉及{ '、'.join(_translate_tb_drug_name(item) for item in sorted(first_line_hits)) }。"
+        else:
+            reason = "已命中重点耐药证据，但未形成 RR/MDR/Pre-XDR/XDR 的更高分级。"
+    else:
+        label = "敏感"
+        tone = "safe"
+        reason = "当前未检出 WHO 1/2 级重点耐药证据，暂不支持耐药分级升级。"
+
+    return {
+        "label": label,
+        "tone": tone,
+        "reason": reason,
+        "resistant_drugs": sorted(resistant_drugs),
+        "fluoroquinolone_hits": sorted(fluoroquinolone_hits),
+        "group_a_hits": sorted(group_a_hits),
+    }
+
+
+def _build_tb_amr_section(report_dir: Path, sample_name: str, checkm_info: dict) -> dict:
+    if not any(
+        _looks_like_tuberculosis_text(checkm_info.get(key))
+        for key in ("species_name", "mlst_species_name")
+    ):
+        return {"status": "empty", "headline": "", "columns": [], "rows": [], "source_label": ""}
+    payload = _read_tb_summary(report_dir)
+    if not payload:
+        return {
+            "status": "empty",
+            "headline": "物种结果提示为结核分枝杆菌，但当前尚未产出 H37Rv 有参 SNP 与 mutation catalogue 判读文件。",
+            "columns": [],
+            "rows": [],
+            "source_label": "WHO mutation catalogue 2023 + H37Rv 参考",
+        }
+    catalogue = payload.get("catalogue") if isinstance(payload.get("catalogue"), dict) else {}
+    summary = catalogue.get("summary") if isinstance(catalogue.get("summary"), dict) else {}
+    raw_rows = catalogue.get("matched_rows") if isinstance(catalogue.get("matched_rows"), list) else []
+    columns = ["药物", "药物分层", "基因", "Catalogue 突变", "样本匹配层级", "样本核酸变化", "样本氨基酸变化", "判读结论", "最终分级", "说明"]
+    rows = [
+        [
+            _translate_tb_drug_name(item.get("药物")),
+            str(item.get("药物分层") or "-"),
+            str(item.get("基因") or "-"),
+            str(item.get("catalogue突变") or "-"),
+            str(item.get("样本匹配层级") or "-"),
+            str(item.get("样本碱基变化") or "-"),
+            str(item.get("样本氨基酸变化") or "-"),
+            str(item.get("判读结论") or "-"),
+            str(item.get("最终分级") or "-"),
+            str(item.get("注释") or "-"),
+        ]
+        for item in raw_rows if isinstance(item, dict)
+    ]
+    drug_calls = summary.get("drug_calls") if isinstance(summary.get("drug_calls"), list) else []
+    highlights = [
+        f"{_translate_tb_drug_name(item.get('drug'))}：{str(item.get('verdict') or '-')}（{', '.join([str(x) for x in (item.get('mutations') or []) if str(x).strip()][:3])}）"
+        for item in drug_calls if isinstance(item, dict)
+    ]
+    focus_calls = [
+        {
+            **item,
+            "drug": _translate_tb_drug_name(item.get("drug")),
+            "drug_en": str(item.get("drug") or "").strip(),
+            "evidence_grade": str(item.get("grade") or "").strip() or "-",
+        }
+        for item in (summary.get("focus_drug_calls") if isinstance(summary.get("focus_drug_calls"), list) else [])
+        if isinstance(item, dict)
+    ]
+    other_calls = [
+        {
+            **item,
+            "drug": _translate_tb_drug_name(item.get("drug")),
+            "drug_en": str(item.get("drug") or "").strip(),
+            "evidence_grade": str(item.get("grade") or "").strip() or "-",
+        }
+        for item in (summary.get("other_drug_calls") if isinstance(summary.get("other_drug_calls"), list) else [])
+        if isinstance(item, dict)
+    ]
+    tb_resistance_grade = _classify_tb_resistance_grade(
+        [item for item in (summary.get("focus_drug_calls") if isinstance(summary.get("focus_drug_calls"), list) else []) if isinstance(item, dict)]
+    )
+    interpretation_items = [
+        str(item).strip()
+        for item in (summary.get("interpretation_items") or [])
+        if str(item).strip()
+    ]
+    for en_name, zh_name in TB_DRUG_NAME_ZH.items():
+        interpretation_items = [item.replace(en_name, zh_name) for item in interpretation_items]
+    interpretation_items.insert(0, f"基于 WHO 1/2 级重点耐药证据，当前样本可归为 {tb_resistance_grade['label']}：{tb_resistance_grade['reason']}")
+    focus_count = int(summary.get("focus_drug_count") or 0)
+    total_drug_count = int(summary.get("total_drug_count") or 0)
+    matched_variant_count = int(summary.get("matched_variant_count") or 0)
+    grade_label = str(tb_resistance_grade.get("label") or "").strip()
+    grade_reason = str(tb_resistance_grade.get("reason") or "").strip()
+    headline = f"基于 H37Rv 有参 SNP 与 WHO mutation catalogue，当前样本结核耐药分级为 {grade_label}"
+    if grade_reason:
+        headline += f"；{grade_reason}"
+    if focus_count:
+        headline += f" 共识别到 {focus_count} 个药物存在 WHO 1/2 级重点耐药证据。"
+    else:
+        headline += "，当前未识别到 WHO 1/2 级重点耐药证据。"
+    return {
+        "status": "ready",
+        "headline": headline,
+        "highlights": highlights,
+        "interpretation_items": interpretation_items,
+        "positive_count": focus_count,
+        "review_count": total_drug_count,
+        "focus_calls": focus_calls,
+        "other_calls": other_calls,
+        "matched_variant_count": matched_variant_count,
+        "resistance_grade": tb_resistance_grade,
+        "columns": columns,
+        "rows": rows,
+        "source_label": "WHO mutation catalogue 2023（version 2）+ H37Rv 有参 SNP 判读",
+        "organism_label": "结核分枝杆菌",
+        "title": "结核分枝杆菌耐药位点判读",
+        "tag_label": "WHO catalogue",
+    }
+
+
+def _build_tb_typing_mlst_section(report_dir: Path, sample_name: str, checkm_info: dict) -> dict | None:
+    if not any(
+        _looks_like_tuberculosis_text(checkm_info.get(key))
+        for key in ("species_name", "mlst_species_name")
+    ):
+        return None
+    payload = _read_tb_summary(report_dir)
+    if not payload:
+        return {
+            "columns": ["项目", "结果", "说明"],
+            "rows": [],
+            "gene_show_map": {},
+            "default_gene": "",
+            "knowledge_summary": {
+                "headline": "已识别为结核分枝杆菌，但当前尚未读取到 tb-profiler 分型摘要文件。",
+                "items": [],
+            },
+            "title": "结核分枝杆菌分型摘要",
+            "tag_label": "tb-profiler",
+            "empty_message": "尚未生成可展示的结核分型摘要。",
+            "detail_empty_message": "当前没有附加的位点级详情可供展开。",
+            "generic_detail_note": "当前展示的是基于 tb-profiler 汇总的结核分型摘要。",
+        }
+    tbprofiler = payload.get("tbprofiler") if isinstance(payload.get("tbprofiler"), dict) else {}
+    lineage = str(tbprofiler.get("predicted_lineage") or "-").strip() or "-"
+    family = str(tbprofiler.get("family") or "-").strip() or "-"
+    spoligotype = str(tbprofiler.get("spoligotype") or "-").strip() or "-"
+    drug_type = str(tbprofiler.get("drug_type") or "-").strip() or "-"
+    rows = [
+        ["Lineage", lineage, "tb-profiler 主家系判定"],
+        ["Family / Spoligotype", family, "对应 spoligotype 家族归属"],
+        ["Spoligotype", spoligotype, "若数据库未返回则显示 -"],
+        ["DR type", drug_type, "tb-profiler 内置耐药类别标签，仅作补充展示"],
+    ]
+    summary_items = [
+        {
+            "lineage_text": lineage if lineage != "-" else "",
+            "virulence": [],
+            "resistance": [f"tb-profiler DR type：{drug_type}"] if drug_type != "-" else [],
+            "regional": [family] if family != "-" else [],
+            "interpretation": "结核样本不使用常规 MLST 管家基因分型，这里改为展示 tb-profiler 的 lineage / family 摘要。",
+        }
+    ]
+    return {
+        "columns": ["项目", "结果", "说明"],
+        "rows": rows,
+        "gene_show_map": {},
+        "default_gene": "",
+        "knowledge_summary": {
+            "headline": "已切换为结核专用分型摘要，直接展示 tb-profiler 的家系与家族结果。",
+            "items": summary_items,
+        },
+        "title": "结核分枝杆菌分型摘要",
+        "tag_label": "tb-profiler",
+        "empty_message": "未读取到可展示的结核分型结果。",
+        "detail_empty_message": "当前没有附加的位点级详情可供展开。",
+        "generic_detail_note": "当前展示的是基于 tb-profiler 汇总的结核分型摘要。",
+    }
+
+
+def _build_tb_serotype_section(report_dir: Path, sample_name: str, checkm_info: dict) -> dict | None:
+    if not any(
+        _looks_like_tuberculosis_text(checkm_info.get(key))
+        for key in ("species_name", "mlst_species_name")
+    ):
+        return None
+    payload = _read_tb_summary(report_dir)
+    if not payload:
+        return {
+            "status": "empty",
+            "mode": "tb_profiler",
+            "columns": [],
+            "rows": [],
+            "summary_cards": [],
+            "notes": "已识别为结核分枝杆菌，但尚未读取到 tb-profiler 家系分析结果。",
+        }
+    tbprofiler = payload.get("tbprofiler") if isinstance(payload.get("tbprofiler"), dict) else {}
+    lineage = str(tbprofiler.get("predicted_lineage") or "-").strip() or "-"
+    family = str(tbprofiler.get("family") or "-").strip() or "-"
+    spoligotype = str(tbprofiler.get("spoligotype") or "-").strip() or "-"
+    raw_lineage_items = tbprofiler.get("raw_lineage_items") if isinstance(tbprofiler.get("raw_lineage_items"), list) else []
+    main_lineage = "-"
+    sub_lineage = lineage
+    main_family = "-"
+    rd_value = "-"
+    if raw_lineage_items:
+        lineage_values = [
+            str(item.get("lineage") or "").strip()
+            for item in raw_lineage_items
+            if isinstance(item, dict) and str(item.get("lineage") or "").strip()
+        ]
+        family_values = [
+            str(item.get("family") or "").strip()
+            for item in raw_lineage_items
+            if isinstance(item, dict) and str(item.get("family") or "").strip()
+        ]
+        rd_values = [
+            str(item.get("rd") or "").strip()
+            for item in raw_lineage_items
+            if isinstance(item, dict) and str(item.get("rd") or "").strip()
+        ]
+        if lineage_values:
+            main_lineage = lineage_values[0]
+            sub_lineage = lineage_values[-1]
+        if family_values:
+            main_family = family_values[0]
+        if rd_values:
+            rd_value = rd_values[-1]
+    if main_lineage == "-" and lineage != "-":
+        main_lineage = lineage.split(".", 1)[0] if "." in lineage else lineage
+    if main_family == "-" and family != "-":
+        main_family = family
+    if spoligotype == "-" and main_family != "-":
+        spoligotype = main_family
+    knowledge_summary = _build_tb_knowledge_summary(
+        str(Path(__file__).resolve().parent.parent),
+        checkm_info.get("species_name") or checkm_info.get("mlst_species_name") or "Mycobacterium tuberculosis",
+        [
+            "MTBC",
+            main_lineage,
+            sub_lineage,
+            lineage,
+            family,
+            spoligotype,
+            rd_value,
+        ],
+    )
+    summary_cards = [
+        {"label": "主家系", "value": main_lineage},
+        {"label": "子家系", "value": sub_lineage},
+        {"label": "Spoligotype", "value": spoligotype},
+        {"label": "RD", "value": rd_value},
+    ]
+    return {
+        "status": "ready",
+        "mode": "tb_profiler",
+        "predicted_lineage": lineage,
+        "predicted_serotype": family,
+        "predicted_group": "MTB",
+        "summary_cards": summary_cards,
+        "notes": "基于 TB 环境中的 tb-profiler 完成结核分枝杆菌家系分析；耐药结论单独基于 H37Rv 有参 SNP 与 WHO mutation catalogue 组织展示。",
+        "knowledge_summary": knowledge_summary,
+        "columns": ["项目", "结果"],
+        "rows": [
+            ["主家系", main_lineage],
+            ["子家系", sub_lineage],
+            ["Spoligotype", spoligotype],
+            ["RD", rd_value],
+        ],
+    }
+
+
+def _read_taxonomy_list(path: Path, terminal_column: str, taxonomy_index: dict[str, list[dict]] | None = None) -> dict:
     raw = _read_tsv_rows(path)
     if not raw["columns"] or not raw["rows"]:
         return {"rows": [], "rank_options": []}
@@ -1371,8 +18066,219 @@ def _read_taxonomy_list(path: Path, terminal_column: str) -> dict:
         record = {raw["columns"][index]: row[index] if index < len(row) else "" for index in range(len(raw["columns"]))}
         record["比例数值"] = _safe_float(record.get("比例")) or 0.0
         record["序列数量数值"] = _safe_int(record.get("序列数量")) or 0
+        matched_taxonomy = _lookup_kb_taxonomy(
+            taxonomy_index,
+            species_name=str(record.get("种") or record.get(terminal_column) or "").strip(),
+            genus_name=str(record.get("属") or "").strip(),
+        )
+        if matched_taxonomy:
+            record["NCBI TaxID"] = matched_taxonomy.get("taxid") or "-"
+            record["NCBI学名"] = matched_taxonomy.get("scientific_name") or "-"
+            record["NCBI分类等级"] = matched_taxonomy.get("rank") or "-"
+            record["NCBI目"] = matched_taxonomy.get("order") or "-"
+            record["NCBI科"] = matched_taxonomy.get("family") or "-"
+            record["NCBI属"] = matched_taxonomy.get("genus") or "-"
+            record["NCBI种"] = matched_taxonomy.get("species_rank") or "-"
+        else:
+            record["NCBI TaxID"] = "-"
+            record["NCBI学名"] = "-"
+            record["NCBI分类等级"] = "-"
+            record["NCBI目"] = "-"
+            record["NCBI科"] = "-"
+            record["NCBI属"] = "-"
+            record["NCBI种"] = "-"
         rows.append(record)
     return {"rows": rows, "rank_options": rank_options, "terminal_column": terminal_column}
+
+
+def _parse_community_merge_items(raw_value: object) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    if not isinstance(raw_value, list):
+        return items
+    for item in raw_value:
+        if not isinstance(item, dict):
+            continue
+        task_id = str(item.get("task_id") or "").strip()
+        group = str(item.get("group") or "").strip() or "未分组"
+        if task_id:
+            items.append({"task_id": task_id, "group": group})
+    return items
+
+
+def _is_metagenome_task_record(task: dict[str, Any]) -> bool:
+    params = task.get("params") if isinstance(task, dict) else {}
+    workstation_key = str((params or {}).get("workstation_key") or "").strip().lower()
+    method = str((params or {}).get("method") or "").strip().lower()
+    return workstation_key == "metagenome" or method == "meta"
+
+
+def _community_merge_sample_id(base_text: str, seen: set[str], index: int) -> str:
+    normalized = re.sub(r"[^\w.\-]+", "_", str(base_text or "").strip(), flags=re.UNICODE).strip("._")
+    if not normalized:
+        normalized = f"sample_{index}"
+    candidate = normalized
+    suffix = 2
+    while candidate in seen:
+        candidate = f"{normalized}_{suffix}"
+        suffix += 1
+    seen.add(candidate)
+    return candidate
+
+
+def _community_taxonomy_value(row: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = str(row.get(key) or "").strip()
+        if value and value != "-":
+            return value
+    return ""
+
+
+def _build_community_merge_bundle(
+    *,
+    project_root: Path,
+    task_name: str,
+    group_column: str,
+    merge_entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if len(merge_entries) < 2:
+        raise ValidationError("群落分析的宏基因组任务汇总模式至少需要选择 2 个任务")
+    bundle_root = project_root / "tmp" / "community_merge_inputs"
+    bundle_root.mkdir(parents=True, exist_ok=True)
+    bundle_name = _community_merge_sample_id(task_name or "community_merge", set(), 1)
+    bundle_dir = bundle_root / f"{bundle_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    metadata_path = bundle_dir / "community_metadata.tsv"
+    taxonomy_path = bundle_dir / "community_taxonomy.tsv"
+    abundance_path = bundle_dir / "community_abundance.tsv"
+    manifest_path = bundle_dir / "community_merge_manifest.json"
+
+    seen_sample_ids: set[str] = set()
+    abundance_by_sample: dict[str, dict[str, float]] = {}
+    taxonomy_lookup: dict[str, dict[str, str]] = {}
+    species_totals: defaultdict[str, float] = defaultdict(float)
+    metadata_rows: list[list[str]] = []
+    manifest_items: list[dict[str, Any]] = []
+
+    for index, entry in enumerate(merge_entries, start=1):
+        task = entry["task"]
+        task_id = str(task.get("id") or "").strip()
+        task_display_name = str(task.get("name") or task_id or f"meta_{index}").strip()
+        report_source = _resolve_report_source(task)
+        if not report_source.get("available"):
+            raise ValidationError(str(report_source.get("reason") or f"宏基因组任务 {task_display_name} 尚未定位到服务器结果目录"))
+        report_dir = Path(report_source["report_dir"]).resolve()
+        sample_name = str(report_source.get("selected_sample") or _resolve_report_sample_name(task, report_dir) or task_display_name).strip()
+        species_payload = _read_taxonomy_list(report_dir / f"{sample_name}_2.list.txt", terminal_column="种")
+        taxonomy_rows = species_payload.get("rows") if isinstance(species_payload, dict) else []
+        if not taxonomy_rows:
+            raise ValidationError(f"宏基因组任务 {task_display_name} 尚未生成可用于群落汇总的物种列表")
+
+        sample_id = _community_merge_sample_id(sample_name or task_display_name, seen_sample_ids, index)
+        sample_weights: defaultdict[str, float] = defaultdict(float)
+        for row in taxonomy_rows:
+            if not isinstance(row, dict):
+                continue
+            species_name = _community_taxonomy_value(row, "种", "Species", "species")
+            if not species_name:
+                continue
+            reads = int(row.get("序列数量数值") or 0)
+            ratio = float(row.get("比例数值") or 0.0)
+            weight = float(reads) if reads > 0 else max(ratio, 0.0)
+            if weight <= 0:
+                continue
+            sample_weights[species_name] += weight
+            if species_name not in taxonomy_lookup:
+                taxonomy_lookup[species_name] = {
+                    "Taxon": species_name,
+                    "Kingdom": _community_taxonomy_value(row, "界", "Kingdom", "kingdom"),
+                    "Phylum": _community_taxonomy_value(row, "门", "Phylum", "phylum"),
+                    "Class": _community_taxonomy_value(row, "纲", "Class", "class"),
+                    "Order": _community_taxonomy_value(row, "目", "Order", "order"),
+                    "Family": _community_taxonomy_value(row, "科", "Family", "family"),
+                    "Genus": _community_taxonomy_value(row, "属", "Genus", "genus"),
+                    "Species": species_name,
+                    "TaxID": _community_taxonomy_value(row, "NCBI TaxID", "TaxID", "taxid"),
+                }
+        if not sample_weights:
+            raise ValidationError(f"宏基因组任务 {task_display_name} 的物种列表为空，无法用于群落汇总")
+
+        total_weight = sum(sample_weights.values())
+        normalized_weights = {
+            species_name: round(weight / total_weight, 6)
+            for species_name, weight in sample_weights.items()
+        }
+        abundance_by_sample[sample_id] = normalized_weights
+        for species_name, weight in normalized_weights.items():
+            species_totals[species_name] += weight
+
+        group_value = str(entry.get("group") or "").strip() or "未分组"
+        metadata_rows.append([sample_id, group_value, task_display_name, task_id])
+        manifest_items.append(
+            {
+                "task_id": task_id,
+                "task_name": task_display_name,
+                "sample_id": sample_id,
+                "group": group_value,
+                "report_dir": str(report_dir),
+                "source_species_count": len(sample_weights),
+            }
+        )
+
+    ordered_species = sorted(species_totals.keys(), key=lambda key: (-species_totals[key], key.lower()))
+    ordered_sample_ids = [row[0] for row in metadata_rows]
+    write_tsv(
+        abundance_path,
+        ["Taxon", *ordered_sample_ids],
+        [
+            [species_name, *[f"{abundance_by_sample.get(sample_id, {}).get(species_name, 0.0):.6f}" for sample_id in ordered_sample_ids]]
+            for species_name in ordered_species
+        ],
+    )
+    write_tsv(
+        taxonomy_path,
+        ["Taxon", "Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "TaxID"],
+        [
+            [
+                taxonomy_lookup[species_name].get("Taxon", ""),
+                taxonomy_lookup[species_name].get("Kingdom", ""),
+                taxonomy_lookup[species_name].get("Phylum", ""),
+                taxonomy_lookup[species_name].get("Class", ""),
+                taxonomy_lookup[species_name].get("Order", ""),
+                taxonomy_lookup[species_name].get("Family", ""),
+                taxonomy_lookup[species_name].get("Genus", ""),
+                taxonomy_lookup[species_name].get("Species", ""),
+                taxonomy_lookup[species_name].get("TaxID", ""),
+            ]
+            for species_name in ordered_species
+        ],
+    )
+    write_tsv(
+        metadata_path,
+        ["sample-id", group_column, "SourceTask", "SourceTaskId"],
+        metadata_rows,
+    )
+    write_json(
+        manifest_path,
+        {
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "task_name": task_name,
+            "group_column": group_column,
+            "generated_input_path": str(bundle_dir),
+            "generated_abundance_path": str(abundance_path),
+            "generated_taxonomy_path": str(taxonomy_path),
+            "generated_metadata_path": str(metadata_path),
+            "items": manifest_items,
+        },
+    )
+    return {
+        "input_path": str(bundle_dir),
+        "community_metadata": str(metadata_path),
+        "community_taxonomy": str(taxonomy_path),
+        "community_merge_tasks": [{"task_id": item["task_id"], "group": item["group"]} for item in manifest_items],
+        "community_generated_abundance": str(abundance_path),
+        "community_generated_manifest": str(manifest_path),
+    }
 
 
 def _build_taxonomy_abundance(species_taxonomy: dict, subspecies_taxonomy: dict) -> dict:
@@ -1418,6 +18324,198 @@ def _build_taxonomy_abundance(species_taxonomy: dict, subspecies_taxonomy: dict)
             "total_ratio": round(sum(segment["ratio"] for segment in segments), 2),
         })
     return {"status": "ready" if ranks else "empty", "ranks": ranks}
+
+
+def _build_taxonomy_rarefaction(species_taxonomy: dict, subspecies_taxonomy: dict) -> dict:
+    def _build_points(dataset: dict, terminal_column: str) -> dict[str, object]:
+        rows = dataset.get("rows") or []
+        counts: list[int] = []
+        for row in rows:
+            reads = int(row.get("序列数量数值") or 0)
+            label = str(row.get(terminal_column, "")).strip()
+            if reads <= 0 or not label or label == "-":
+                continue
+            counts.append(reads)
+        if not counts:
+            return {"points": [], "final_expected": None, "plateau_state": "empty", "tail_gain": None}
+        total_reads = sum(counts)
+        max_points = 32
+        if total_reads <= max_points:
+            sample_sizes = list(range(1, total_reads + 1))
+        else:
+            sample_sizes = sorted({max(1, round(total_reads * (index / (max_points - 1)))) for index in range(1, max_points + 1)})
+            if sample_sizes[0] != 1:
+                sample_sizes.insert(0, 1)
+            if sample_sizes[-1] != total_reads:
+                sample_sizes.append(total_reads)
+
+        lgamma_total = math.lgamma(total_reads + 1)
+
+        def _prob_not_seen(sample_size: int, taxon_reads: int) -> float:
+            if sample_size <= 0:
+                return 1.0
+            if sample_size > total_reads - taxon_reads:
+                return 0.0
+            log_prob = (
+                math.lgamma(total_reads - taxon_reads + 1)
+                - math.lgamma(sample_size + 1)
+                - math.lgamma(total_reads - taxon_reads - sample_size + 1)
+                - (lgamma_total - math.lgamma(sample_size + 1) - math.lgamma(total_reads - sample_size + 1))
+            )
+            return math.exp(log_prob)
+
+        points: list[dict[str, object]] = []
+        for sample_size in sample_sizes:
+            expected_richness = 0.0
+            for taxon_reads in counts:
+                expected_richness += 1.0 - _prob_not_seen(sample_size, taxon_reads)
+            points.append({
+                "x": int(sample_size),
+                "y": round(expected_richness, 2),
+            })
+        final_expected = float(points[-1]["y"]) if points else None
+        if len(points) >= 2 and final_expected:
+            start_index = max(0, int(len(points) * 0.8) - 1)
+            tail_gain = float(points[-1]["y"]) - float(points[start_index]["y"])
+            tail_ratio = tail_gain / max(final_expected, 1.0)
+            if tail_ratio <= 0.03:
+                plateau_state = "stable"
+            elif tail_ratio <= 0.1:
+                plateau_state = "approaching"
+            else:
+                plateau_state = "rising"
+        else:
+            tail_gain = None
+            plateau_state = "unknown"
+        return {
+            "points": points,
+            "final_expected": round(final_expected, 2) if final_expected is not None else None,
+            "plateau_state": plateau_state,
+            "tail_gain": round(tail_gain, 2) if tail_gain is not None else None,
+        }
+
+    species_curve = _build_points(species_taxonomy or {}, "种")
+    subspecies_curve = _build_points(subspecies_taxonomy or {}, "亚种")
+    species_points = species_curve["points"]
+    subspecies_points = subspecies_curve["points"]
+    notes: list[str] = []
+    if species_curve["final_expected"] is not None:
+        species_note = f"种水平终点期望分类数约 {species_curve['final_expected']}"
+        if species_curve["plateau_state"] == "stable":
+            species_note += "，曲线已接近平稳"
+        elif species_curve["plateau_state"] == "approaching":
+            species_note += "，曲线趋于平缓"
+        elif species_curve["plateau_state"] == "rising":
+            species_note += "，曲线仍有上升空间"
+        notes.append(species_note)
+    if subspecies_curve["final_expected"] is not None:
+        subspecies_note = f"亚种水平终点期望分类数约 {subspecies_curve['final_expected']}"
+        if subspecies_curve["plateau_state"] == "stable":
+            subspecies_note += "，曲线已接近平稳"
+        elif subspecies_curve["plateau_state"] == "approaching":
+            subspecies_note += "，曲线趋于平缓"
+        elif subspecies_curve["plateau_state"] == "rising":
+            subspecies_note += "，曲线仍有上升空间"
+        notes.append(subspecies_note)
+    return {
+        "status": "ready" if species_points or subspecies_points else "empty",
+        "label": "分类稀释曲线",
+        "x_label": "累计序列数量",
+        "y_label": "累计检出分类数",
+        "species_points": species_points,
+        "subspecies_points": subspecies_points,
+        "species_final_expected": species_curve["final_expected"],
+        "subspecies_final_expected": subspecies_curve["final_expected"],
+        "species_plateau_state": species_curve["plateau_state"],
+        "subspecies_plateau_state": subspecies_curve["plateau_state"],
+        "note": "；".join(notes) + "。" if notes else "当前分类稀释曲线尚不足以给出稳定性判读。",
+    }
+
+
+def _is_virus_taxonomy_row(row: dict | None) -> bool:
+    if not isinstance(row, dict):
+        return False
+    for value in (
+        row.get("界"),
+        row.get("种"),
+        row.get("亚种"),
+        row.get("NCBI学名"),
+        row.get("NCBI科"),
+        row.get("NCBI属"),
+    ):
+        text = str(value or "").strip().lower()
+        if text and any(token in text for token in ("病毒", "virus", "viridae", "virales")):
+            return True
+    return False
+
+
+def _is_fungus_taxonomy_row(row: dict | None) -> bool:
+    if not isinstance(row, dict):
+        return False
+    for value in (
+        row.get("界"),
+        row.get("种"),
+        row.get("亚种"),
+        row.get("NCBI学名"),
+        row.get("NCBI科"),
+        row.get("NCBI属"),
+    ):
+        text = str(value or "").strip().lower()
+        if text and any(token in text for token in ("真菌", "fungi", "fungus", "mycota", "mycetaceae", "mycetales", "mycetes")):
+            return True
+    return False
+
+
+def _build_taxonomy_identity_payload(row: dict | None) -> dict | None:
+    if not isinstance(row, dict):
+        return None
+    species_name = str(row.get("种") or row.get("亚种") or row.get("NCBI种") or "").strip()
+    if not species_name or species_name == "-":
+        return None
+    return {
+        "species": species_name,
+        "ratio": round(float(row.get("比例数值") or 0.0), 2),
+        "reads": int(row.get("序列数量数值") or 0),
+        "taxid": str(row.get("NCBI TaxID") or "").strip() or "-",
+        "scientific_name": str(row.get("NCBI学名") or "").strip() or "-",
+        "rank": str(row.get("NCBI分类等级") or "").strip() or "-",
+        "order": str(row.get("NCBI目") or "").strip() or "-",
+        "family": str(row.get("NCBI科") or "").strip() or "-",
+        "genus": str(row.get("NCBI属") or "").strip() or "-",
+        "species_rank": str(row.get("NCBI种") or "").strip() or "-",
+    }
+
+
+def _extract_dominant_virus_taxonomy(species_taxonomy: dict, subspecies_taxonomy: dict | None = None) -> dict | None:
+    ranked_rows: list[dict] = []
+    for dataset in (species_taxonomy or {}, subspecies_taxonomy or {}):
+        for row in dataset.get("rows") or []:
+            if _is_virus_taxonomy_row(row):
+                ranked_rows.append(row)
+    ranked_rows.sort(
+        key=lambda item: (
+            int(item.get("序列数量数值") or 0),
+            float(item.get("比例数值") or 0.0),
+        ),
+        reverse=True,
+    )
+    return _build_taxonomy_identity_payload(ranked_rows[0]) if ranked_rows else None
+
+
+def _extract_dominant_fungus_taxonomy(species_taxonomy: dict, subspecies_taxonomy: dict | None = None) -> dict | None:
+    ranked_rows: list[dict] = []
+    for dataset in (species_taxonomy or {}, subspecies_taxonomy or {}):
+        for row in dataset.get("rows") or []:
+            if _is_fungus_taxonomy_row(row):
+                ranked_rows.append(row)
+    ranked_rows.sort(
+        key=lambda item: (
+            int(item.get("序列数量数值") or 0),
+            float(item.get("比例数值") or 0.0),
+        ),
+        reverse=True,
+    )
+    return _build_taxonomy_identity_payload(ranked_rows[0]) if ranked_rows else None
 
 
 def _build_taxonomy_risk_summary(species_taxonomy: dict, subspecies_taxonomy: dict) -> dict:
@@ -1500,6 +18598,8 @@ def _build_taxonomy_risk_summary(species_taxonomy: dict, subspecies_taxonomy: di
 
     return {
         "status": "ready" if pathogenicity_rows or hazard_rows else "empty",
+        "dominant_virus": _extract_dominant_virus_taxonomy(species_taxonomy, subspecies_taxonomy),
+        "dominant_fungus": _extract_dominant_fungus_taxonomy(species_taxonomy, subspecies_taxonomy),
         "kingdom_summary": [
             {
                 "label": label,
@@ -1517,7 +18617,171 @@ def _build_taxonomy_risk_summary(species_taxonomy: dict, subspecies_taxonomy: di
     }
 
 
-def _read_assembly_taxonomy(assem_info_path: Path, kraken_report_path: Path) -> dict:
+def _build_taxonomy_interpretation(species_taxonomy: dict, checkm_info: dict | None = None) -> dict:
+    rows = list(species_taxonomy.get("rows") or [])
+    valid_rows = []
+    for row in rows:
+        species_name = str(row.get("种", "")).strip()
+        if not species_name or species_name == "-":
+            continue
+        ratio = float(row.get("比例数值") or 0.0)
+        reads = int(row.get("序列数量数值") or 0)
+        genus_name = str(row.get("属", "")).strip() or (species_name.split()[0] if species_name else "")
+        valid_rows.append({
+            "species": species_name,
+            "genus": genus_name,
+            "ratio": ratio,
+            "reads": reads,
+        })
+    valid_rows.sort(key=lambda item: (item["reads"], item["ratio"]), reverse=True)
+
+    if not valid_rows:
+        empty_card = {
+            "status": "empty",
+            "tone": "neutral",
+            "badge": "暂无判读",
+            "headline": "未检出足够的物种分类结果",
+            "summary": "当前分类结果不足，暂无法对相近物种混淆或单菌/混菌状态给出可靠提示。",
+            "metrics": [],
+            "evidence": [],
+        }
+        return {"status": "empty", "confusion_hint": dict(empty_card), "mixture_hint": dict(empty_card)}
+
+    top = valid_rows[0]
+    second = valid_rows[1] if len(valid_rows) > 1 else None
+    same_genus_rows = [row for row in valid_rows[1:] if row["genus"] and row["genus"] == top["genus"]]
+    same_genus_ratio = round(sum(row["ratio"] for row in same_genus_rows), 2)
+    same_genus_count = len(same_genus_rows)
+    species_over_five = [row for row in valid_rows if row["ratio"] >= 5]
+    top_two_ratio = round(top["ratio"] + (second["ratio"] if second else 0.0), 2)
+    competing_ratio = round(second["ratio"], 2) if second else 0.0
+    competing_reads = int(second["reads"]) if second else 0
+    competing_species = second["species"] if second else "--"
+    checkm_species = str((checkm_info or {}).get("species_name") or "").strip()
+    mlst_species = str((checkm_info or {}).get("mlst_species_name") or "").strip()
+
+    confusion_tone = "success"
+    confusion_badge = "较稳定"
+    confusion_headline = "未见明显相近物种混淆"
+    confusion_summary = f"当前分类结果以 {top['species']} 为主导，相近物种干扰信号不强。"
+    confusion_evidence = [
+        f"主导物种为 {top['species']}，序列占比约 {top['ratio']:.2f}%。",
+    ]
+    if second:
+        confusion_evidence.append(f"第二位物种为 {second['species']}，占比约 {second['ratio']:.2f}%。")
+    if same_genus_count and second and second["genus"] == top["genus"]:
+        if second["ratio"] >= 10 or (top["reads"] and second["reads"] / max(top["reads"], 1) >= 0.35) or same_genus_count >= 3:
+            confusion_tone = "warning"
+            confusion_badge = "需要关注"
+            confusion_headline = "存在相近物种混淆风险"
+            confusion_summary = (
+                f"{top['genus']} 属内同时出现多个高占比物种，"
+                f"其中 {competing_species} 与主导物种接近，需结合其他证据进一步确认。"
+            )
+        elif second["ratio"] >= 5 or same_genus_ratio >= 12:
+            confusion_tone = "attention"
+            confusion_badge = "提示"
+            confusion_headline = "需关注近缘物种干扰"
+            confusion_summary = (
+                f"{top['genus']} 属内还存在一定比例的近缘物种信号，"
+                f"当前更适合保守解读为主导物种附近的近缘分类结果。"
+            )
+        confusion_evidence.append(
+            f"同属候选物种共 {same_genus_count} 个，累计占比约 {same_genus_ratio:.2f}%。"
+        )
+    elif checkm_species and mlst_species and checkm_species != mlst_species:
+        confusion_tone = "attention"
+        confusion_badge = "提示"
+        confusion_headline = "主流程物种结果存在差异"
+        confusion_summary = (
+            f"分类主导物种为 {top['species']}，但 CheckM 与 MLST 返回的物种名称不完全一致，建议结合装配和 MLST 结果复核。"
+        )
+        confusion_evidence.append(f"CheckM 物种：{checkm_species or '--'}；MLST 物种：{mlst_species or '--'}。")
+
+    confusion_metrics = [
+        {"label": "主导物种", "value": top["species"]},
+        {"label": "次高物种", "value": competing_species},
+        {"label": "同属累计占比", "value": f"{same_genus_ratio:.2f}%"},
+    ]
+
+    mixture_tone = "success"
+    mixture_badge = "倾向单菌"
+    mixture_headline = "单菌信号较明确"
+    mixture_summary = f"{top['species']} 占比明显，当前结果整体更接近单菌样本。"
+    mixture_evidence = [
+        f"主导物种 {top['species']} 占比约 {top['ratio']:.2f}%。",
+        f"占比 ≥5% 的物种数为 {len(species_over_five)} 个。",
+    ]
+
+    if top["ratio"] < 45 or len(species_over_five) >= 3 or (second and second["ratio"] >= 20 and top_two_ratio <= 85):
+        mixture_tone = "warning"
+        mixture_badge = "疑似混菌"
+        mixture_headline = "存在混菌信号"
+        mixture_summary = "多个物种占比同时较高，当前结果更像混菌样本或显著背景混入。"
+    elif top["ratio"] < 65 or (second and second["ratio"] >= 12) or len(species_over_five) == 2:
+        mixture_tone = "attention"
+        mixture_badge = "需关注"
+        mixture_headline = "单菌/混菌边界不够清晰"
+        mixture_summary = "样本存在次高物种背景，当前更适合解释为主导物种明显，但仍需关注可能的混杂信号。"
+
+    if second:
+        mixture_evidence.append(
+            f"第二位物种 {second['species']} 占比约 {second['ratio']:.2f}%（{competing_reads} 条序列）。"
+        )
+    mixture_evidence.append(f"前两位物种合计占比约 {top_two_ratio:.2f}%。")
+
+    mixture_metrics = [
+        {"label": "主导物种占比", "value": f"{top['ratio']:.2f}%"},
+        {"label": "次高物种占比", "value": f"{competing_ratio:.2f}%"},
+        {"label": "≥5% 物种数", "value": str(len(species_over_five))},
+    ]
+
+    return {
+        "status": "ready",
+        "confusion_hint": {
+            "status": "ready",
+            "tone": confusion_tone,
+            "badge": confusion_badge,
+            "headline": confusion_headline,
+            "summary": confusion_summary,
+            "metrics": confusion_metrics,
+            "evidence": confusion_evidence,
+        },
+        "mixture_hint": {
+            "status": "ready",
+            "tone": mixture_tone,
+            "badge": mixture_badge,
+            "headline": mixture_headline,
+            "summary": mixture_summary,
+            "metrics": mixture_metrics,
+            "evidence": mixture_evidence,
+        },
+    }
+
+
+def _human_count(value: object) -> str:
+    number = _safe_int(value)
+    if number is None:
+        return "--"
+    return f"{number:,}"
+
+
+def _extract_dominant_species(species_taxonomy: dict) -> dict:
+    ranked = []
+    for row in species_taxonomy.get("rows") or []:
+        species_name = str(row.get("种", "")).strip()
+        if not species_name or species_name == "-":
+            continue
+        ranked.append({
+            "species": species_name,
+            "ratio": float(row.get("比例数值") or 0.0),
+            "reads": int(row.get("序列数量数值") or 0),
+        })
+    ranked.sort(key=lambda item: (item["reads"], item["ratio"]), reverse=True)
+    return ranked[0] if ranked else {"species": "--", "ratio": 0.0, "reads": 0}
+
+
+def _read_assembly_taxonomy(assem_info_path: Path, kraken_report_path: Path, taxonomy_index: dict[str, list[dict]] | None = None) -> dict:
     assem_info = _read_tsv_rows(assem_info_path)
     if not assem_info["columns"] or not assem_info["rows"]:
         return {"columns": [], "rows": []}
@@ -1577,17 +18841,30 @@ def _read_assembly_taxonomy(assem_info_path: Path, kraken_report_path: Path) -> 
         "质粒分型",
         "taxid",
         "物种名称",
+        "NCBI TaxID",
+        "NCBI学名",
+        "NCBI分类等级",
         "界",
         "门",
         "纲",
         "目",
         "科",
         "属",
+        "NCBI目",
+        "NCBI科",
+        "NCBI属",
+        "NCBI种",
     ]
     rows: list[list[str]] = []
     for record in assem_records:
         taxid = str(record.get("taxid", "")).strip()
         lineage = lineage_by_taxid.get(taxid, {})
+        species_name = str(record.get("物种名称", "")).strip()
+        matched_taxonomy = _lookup_kb_taxonomy(
+            taxonomy_index,
+            species_name=species_name,
+            genus_name=str(lineage.get("属", "")).strip(),
+        ) or {}
         rows.append([
             str(record.get("序列名称", "")).strip(),
             str(record.get("序列长度", "")).strip(),
@@ -1596,13 +18873,20 @@ def _read_assembly_taxonomy(assem_info_path: Path, kraken_report_path: Path) -> 
             str(record.get("基因组/质粒", "")).strip(),
             str(record.get("质粒分型", "")).strip(),
             taxid,
-            str(record.get("物种名称", "")).strip(),
+            species_name,
+            str(matched_taxonomy.get("taxid") or "-"),
+            str(matched_taxonomy.get("scientific_name") or "-"),
+            str(matched_taxonomy.get("rank") or "-"),
             str(lineage.get("界", "")).strip(),
             str(lineage.get("门", "")).strip(),
             str(lineage.get("纲", "")).strip(),
             str(lineage.get("目", "")).strip(),
             str(lineage.get("科", "")).strip(),
             str(lineage.get("属", "")).strip(),
+            str(matched_taxonomy.get("order") or "-"),
+            str(matched_taxonomy.get("family") or "-"),
+            str(matched_taxonomy.get("genus") or "-"),
+            str(matched_taxonomy.get("species_rank") or "-"),
         ])
     return {"columns": columns, "rows": rows}
 
@@ -1699,6 +18983,494 @@ def _build_resistance_virulence_summary(rv_summary: dict, virulence_elements: di
             "top_categories": virulence_top,
             "summary_count": _rv_metric("毒力基因数量"),
         },
+    }
+
+
+def _meta_sequence_label(value: str) -> str:
+    primary = str(value or "").strip().split(".", 1)[0].strip().lower()
+    mapping = {
+        "plasmid": "质粒",
+        "chromosome": "染色体",
+        "unclassified": "未分类",
+    }
+    return mapping.get(primary, primary or "未分类")
+
+
+def _meta_taxonomy_label(value: str) -> str:
+    parts = str(value or "").strip().split(".", 1)
+    if len(parts) < 2:
+        return "未分类"
+    tax = parts[1].strip()
+    return tax if tax and tax != "-" else "未分类"
+
+
+def _normalize_meta_gene(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+def _extract_vf_category_from_product(product: str) -> str:
+    text = str(product or "").strip()
+    if not text:
+        return "未分类"
+    if "[" in text and "]" in text:
+        inner = text[text.find("[") + 1:text.rfind("]")]
+        if " - " in inner:
+            tail = inner.split(" - ", 1)[1]
+            if " (" in tail:
+                tail = tail.split(" (", 1)[0]
+            tail = tail.strip()
+            if tail:
+                return tail
+    return "未分类"
+
+
+def _load_meta_vf_categories(base_dir: Path) -> dict[tuple[str, str], str]:
+    raw = _read_tsv_rows(base_dir / "bin_vfdb.tsv")
+    columns = raw.get("columns") or []
+    rows = raw.get("rows") or []
+    if not columns or not rows:
+        return {}
+    index = {name: idx for idx, name in enumerate(columns)}
+    result: dict[tuple[str, str], str] = {}
+    for row in rows:
+        try:
+            file_name = str(row[index["#FILE"]]).strip().split("/")[-1].split(".")[0]
+            sequence = str(row[index["SEQUENCE"]]).strip()
+            gene = _normalize_meta_gene(row[index["GENE"]])
+            product = str(row[index["PRODUCT"]]).strip()
+        except Exception:
+            continue
+        if not file_name or not sequence or not gene:
+            continue
+        result[(f"{file_name}_{sequence}", gene)] = _extract_vf_category_from_product(product)
+    return result
+
+
+def _load_meta_card_categories(base_dir: Path) -> dict[tuple[str, str], str]:
+    raw = _read_tsv_rows(base_dir / "bin_card.tsv")
+    columns = raw.get("columns") or []
+    rows = raw.get("rows") or []
+    if not columns or not rows:
+        return {}
+    index = {name: idx for idx, name in enumerate(columns)}
+    result: dict[tuple[str, str], str] = {}
+    for row in rows:
+        try:
+            file_name = str(row[index["#FILE"]]).strip().split("/")[-1].split(".")[0]
+            sequence = str(row[index["SEQUENCE"]]).strip()
+            gene = _normalize_meta_gene(row[index["GENE"]])
+            resistance = str(row[index["RESISTANCE"]]).strip() or str(row[index.get("PRODUCT", -1)]).strip()
+        except Exception:
+            continue
+        if not file_name or not sequence or not gene:
+            continue
+        result[(f"{file_name}_{sequence}", gene)] = resistance or "未分类"
+    return result
+
+
+def _load_meta_rgi_categories(base_dir: Path) -> dict[tuple[str, str], str]:
+    raw = _read_tsv_rows(base_dir / "binning_rgi_new.txt")
+    columns = raw.get("columns") or []
+    rows = raw.get("rows") or []
+    if not columns or not rows:
+        return {}
+    index = {name: idx for idx, name in enumerate(columns)}
+    result: dict[tuple[str, str], str] = {}
+    for row in rows:
+        try:
+            cutoff = str(row[index["Cut_Off"]]).strip()
+            contig = str(row[index["Contig"]]).strip()
+            gene = _normalize_meta_gene(row[index["Best_Hit_ARO"]])
+            drug_class = str(row[index.get("Drug Class", -1)]).strip()
+            antibiotic = str(row[index.get("Antibiotic", -1)]).strip()
+        except Exception:
+            continue
+        if cutoff not in {"Strict", "Perfect"} or not contig or not gene:
+            continue
+        result[(contig, gene)] = drug_class or antibiotic or "未分类"
+    return result
+
+
+def _load_meta_resfinder_categories(base_dir: Path) -> dict[tuple[str, str], str]:
+    raw = _read_tsv_rows(base_dir / "staramr_result" / "resfinder.tsv")
+    columns = raw.get("columns") or []
+    rows = raw.get("rows") or []
+    if not columns or not rows:
+        return {}
+    index = {name: idx for idx, name in enumerate(columns)}
+    result: dict[tuple[str, str], str] = {}
+    for row in rows:
+        try:
+            isolate_id = str(row[index["Isolate ID"]]).strip()
+            contig = str(row[index["Contig"]]).strip()
+            gene = _normalize_meta_gene(row[index["Gene"]])
+            phenotype = str(row[index.get("CGE Predicted Phenotype", -1)]).strip() or str(row[index.get("Predicted Phenotype", -1)]).strip()
+        except Exception:
+            continue
+        if not isolate_id or not contig or not gene:
+            continue
+        result[(f"{isolate_id}_{contig}", gene)] = phenotype or "未分类"
+    return result
+
+
+def _read_meta_resistance_virulence(path: Path) -> dict:
+    raw = _read_tsv_rows(path)
+    columns = raw.get("columns") or []
+    rows = raw.get("rows") or []
+    if not rows or not columns:
+        return {
+            "summary": {"columns": [], "rows": []},
+            "virulence_elements": {"columns": [], "rows": []},
+            "resistance_elements": {"columns": [], "rows": []},
+        }
+
+    base_dir = path.parent
+    vf_categories = _load_meta_vf_categories(base_dir)
+    card_categories = _load_meta_card_categories(base_dir)
+    rgi_categories = _load_meta_rgi_categories(base_dir)
+    resfinder_categories = _load_meta_resfinder_categories(base_dir)
+
+    sample_depth_column = next((column for column in columns if column not in {
+        "contig_name", "label", "Plasmid", "VF Gene", "ARG", "Name",
+        "AR Gene(abricate)", "AR Gene(rgi)", "AR Gene(resfinder)",
+        "D", "P", "C", "O", "F", "G", "S",
+    }), "")
+    records = [{columns[index]: row[index] if index < len(row) else "" for index in range(len(columns))} for row in rows]
+
+    summary_columns = ["Bin名称", "物种名称", "毒力基因数量", "耐药基因数量", "质粒相关Contig数", "染色体相关Contig数", "平均深度"]
+    summary_groups: dict[tuple[str, str], dict[str, object]] = {}
+    virulence_columns = ["Contig名称", "Bin名称", "物种名称", "VF分类", "基因名称", "基因组/质粒", "门", "属", "种", "平均深度"]
+    resistance_columns = ["Contig名称", "Bin名称", "物种名称", "耐药药物", "基因名称", "基因组/质粒", "软件支持", "门", "属", "种", "平均深度"]
+    virulence_rows: list[list[str]] = []
+    resistance_rows: list[list[str]] = []
+
+    for record in records:
+        contig_name = str(record.get("contig_name", "")).strip()
+        bin_name = str(record.get("Name", "")).strip() or contig_name.split("_", 1)[0]
+        species_name = str(record.get("S", "")).strip() or "-"
+        seq_label = _meta_sequence_label(record.get("label", ""))
+        depth_value = str(record.get(sample_depth_column, "")).strip() if sample_depth_column else ""
+        genus_name = str(record.get("G", "")).strip() or "-"
+        phylum_name = str(record.get("P", "")).strip() or "-"
+        support_flags = [
+            label for label, column_name in (
+                ("abricate", "AR Gene(abricate)"),
+                ("rgi", "AR Gene(rgi)"),
+                ("resfinder", "AR Gene(resfinder)"),
+            ) if str(record.get(column_name, "")).strip() == "+"
+        ]
+        group_key = (bin_name, species_name)
+        group = summary_groups.setdefault(group_key, {
+            "vf_genes": set(),
+            "arg_genes": set(),
+            "plasmid_contigs": set(),
+            "chromosome_contigs": set(),
+            "depth_values": [],
+        })
+        if depth_value not in {"", "-", "NA"}:
+            try:
+                group["depth_values"].append(float(depth_value))
+            except ValueError:
+                pass
+        if seq_label == "质粒" and contig_name:
+            group["plasmid_contigs"].add(contig_name)
+        if seq_label == "染色体" and contig_name:
+            group["chromosome_contigs"].add(contig_name)
+
+        vf_gene = str(record.get("VF Gene", "")).strip()
+        if vf_gene and vf_gene != "-":
+            group["vf_genes"].add(vf_gene)
+            vf_category = vf_categories.get((contig_name, _normalize_meta_gene(vf_gene)), "未分类")
+            virulence_rows.append([
+                contig_name,
+                bin_name,
+                species_name,
+                vf_category,
+                vf_gene,
+                seq_label,
+                phylum_name,
+                genus_name,
+                species_name,
+                depth_value or "-",
+            ])
+
+        arg_gene = str(record.get("ARG", "")).strip()
+        if arg_gene and arg_gene != "-":
+            group["arg_genes"].add(arg_gene)
+            normalized_arg = _normalize_meta_gene(arg_gene)
+            resistance_labels: list[str] = []
+            if str(record.get("AR Gene(abricate)", "")).strip() == "+":
+                resistance_labels.append(card_categories.get((contig_name, normalized_arg), "未分类"))
+            if str(record.get("AR Gene(rgi)", "")).strip() == "+":
+                resistance_labels.append(rgi_categories.get((contig_name, normalized_arg), "未分类"))
+            if str(record.get("AR Gene(resfinder)", "")).strip() == "+":
+                resistance_labels.append(resfinder_categories.get((contig_name, normalized_arg), "未分类"))
+            resistance_labels = [label for label in resistance_labels if label and label != "-"]
+            resistance_rows.append([
+                contig_name,
+                bin_name,
+                species_name,
+                "; ".join(dict.fromkeys(resistance_labels)) if resistance_labels else "未分类",
+                arg_gene,
+                seq_label,
+                " / ".join(support_flags) if support_flags else "-",
+                phylum_name,
+                genus_name,
+                species_name,
+                depth_value or "-",
+            ])
+
+    summary_rows: list[list[str]] = []
+    for (bin_name, species_name), stats in sorted(summary_groups.items(), key=lambda item: item[0][0]):
+        depth_values = stats["depth_values"]
+        avg_depth = f"{(sum(depth_values) / len(depth_values)):.2f}" if depth_values else "-"
+        summary_rows.append([
+            bin_name,
+            species_name,
+            str(len(stats["vf_genes"])),
+            str(len(stats["arg_genes"])),
+            str(len(stats["plasmid_contigs"])),
+            str(len(stats["chromosome_contigs"])),
+            avg_depth,
+        ])
+
+    return {
+        "summary": {"columns": summary_columns, "rows": summary_rows},
+        "virulence_elements": {"columns": virulence_columns, "rows": virulence_rows},
+        "resistance_elements": {"columns": resistance_columns, "rows": resistance_rows},
+    }
+
+
+def _risk_level_label(level: str) -> str:
+    mapping = {
+        "A": "Level A 高迁移风险",
+        "B": "Level B 中迁移风险",
+        "C": "Level C 低到中等风险",
+        "D": "Level D 弱证据",
+    }
+    return mapping.get(str(level).strip().upper(), str(level).strip() or "未分级")
+
+
+def _risk_statement_label(level: str) -> str:
+    mapping = {
+        "A": "高度提示可移动或潜在可转移",
+        "B": "可能可被动员或与移动元件相关",
+        "C": "属于移动元件相关邻域，不建议直接推断可转移",
+        "D": "证据较弱，通常不应据此推断可移动",
+    }
+    return mapping.get(str(level).strip().upper(), "")
+
+
+def _mge_type_label(value: str) -> str:
+    text = str(value or "").strip()
+    primary = text.split("|")[0].strip() if "|" in text else text
+    normalized = primary.lower()
+    mapping = {
+        "plasmid": "质粒",
+        "provirus": "前噬菌体",
+        "virus": "病毒/噬菌体",
+        "phage": "噬菌体",
+        "ie": "整合/切除模块",
+        "transfer": "转移模块",
+        "boundary": "预测边界特征",
+        "rrr_std": "RRR/STD（复制/重组/修复；稳定/转移/防御）",
+        "stability/transfer/defense": "STD（稳定/转移/防御）",
+        "replication/recombination/repair": "RRR（复制/重组/修复）",
+        "mge": "移动元件相关",
+    }
+    if normalized in mapping:
+        return mapping[normalized]
+    if not normalized:
+        return "未识别"
+    return primary
+
+
+def _read_mge_monitoring(report_dir: Path, sample_name: str) -> dict:
+    if not sample_name:
+        return {"status": "empty"}
+    risk_raw = _read_tsv_rows(report_dir / f"{sample_name}.mge_risk_summary.tsv")
+    integrated_raw = _read_tsv_rows(report_dir / f"{sample_name}.integrated_mge_summary.tsv")
+    if not risk_raw.get("rows") and not integrated_raw.get("rows"):
+        return {"status": "empty"}
+
+    integrated_columns = integrated_raw.get("columns") or []
+    integrated_records = [
+        {integrated_columns[index]: row[index] if index < len(row) else "" for index in range(len(integrated_columns))}
+        for row in integrated_raw.get("rows") or []
+    ]
+    integrated_table_columns = ["样本名称", "元件类型", "所在序列", "起始", "终止", "长度(bp)", "得分", "识别方法", "注释"]
+    integrated_rows: list[list[str]] = []
+    mge_type_by_sequence: dict[str, set[str]] = {}
+    overall_mge_counts: dict[str, int] = {}
+    for record in integrated_records:
+        sequence_id = str(record.get("sequence_id", "")).strip()
+        mge_type = _mge_type_label(str(record.get("mge_type", "")).strip())
+        if sequence_id:
+            integrated_rows.append([
+                sample_name,
+                mge_type,
+                sequence_id,
+                str(record.get("start", "")).strip(),
+                str(record.get("end", "")).strip(),
+                str(record.get("length", "")).strip(),
+                str(record.get("score", "")).strip(),
+                str(record.get("method", "")).strip(),
+                str(record.get("annotation", "")).strip(),
+            ])
+        if not sequence_id:
+            continue
+        mge_type_by_sequence.setdefault(sequence_id, set()).add(mge_type)
+        overall_mge_counts[mge_type] = overall_mge_counts.get(mge_type, 0) + 1
+
+    risk_columns = risk_raw.get("columns") or []
+    risk_records = [
+        {risk_columns[index]: row[index] if index < len(row) else "" for index in range(len(risk_columns))}
+        for row in risk_raw.get("rows") or []
+    ]
+    table_columns = [
+        "样本名称",
+        "基因类型",
+        "基因名称",
+        "产物/功能",
+        "所在序列",
+        "基因起始",
+        "基因终止",
+        "关联元件类型",
+        "转移风险等级",
+        "风险说明",
+        "位于预测 MGE 边界",
+        "最近核心模块",
+        "最近核心模块类型",
+        "最近距离(bp)",
+        "最近距离(ORF)",
+        "同序列核心类别",
+        "存在第二核心模块或边界",
+    ]
+    resistance_rows: list[list[str]] = []
+    virulence_rows: list[list[str]] = []
+    resistance_identified_hits = 0
+    virulence_identified_hits = 0
+    risk_counts_all: dict[str, int] = {}
+    risk_counts_by_type: dict[str, dict[str, int]] = {"ARG": {}, "VF": {}}
+    mge_counts_by_type: dict[str, dict[str, int]] = {"ARG": {}, "VF": {}}
+
+    for record in risk_records:
+        gene_type = str(record.get("gene_type", "")).strip().upper()
+        if gene_type not in {"ARG", "VF"}:
+            continue
+        level = str(record.get("risk_level", "")).strip().upper()
+        risk_counts_all[level] = risk_counts_all.get(level, 0) + 1
+        risk_counts_by_type[gene_type][level] = risk_counts_by_type[gene_type].get(level, 0) + 1
+        sequence_id = str(record.get("sequence_id", "")).strip()
+        related_mge_types = sorted(mge_type_by_sequence.get(sequence_id) or set())
+        if not related_mge_types:
+            related_mge_types = [
+                _mge_type_label(str(record.get("nearest_core_type", "")).strip())
+            ] if str(record.get("nearest_core_type", "")).strip() else ["未识别"]
+        related_mge_types = [label for label in related_mge_types if label and label != "未识别"]
+        if not related_mge_types:
+            related_mge_types = ["未识别"]
+        for label in related_mge_types:
+            mge_counts_by_type[gene_type][label] = mge_counts_by_type[gene_type].get(label, 0) + 1
+        row = [
+            sample_name,
+            "耐药基因" if gene_type == "ARG" else "毒力基因",
+            str(record.get("gene_name", "")).strip(),
+            str(record.get("product", "")).strip(),
+            sequence_id,
+            str(record.get("gene_start", "")).strip(),
+            str(record.get("gene_end", "")).strip(),
+            "、".join(related_mge_types),
+            _risk_level_label(level),
+            _risk_statement_label(level),
+            "是" if str(record.get("within_mge_boundary", "")).strip().lower() == "yes" else "否",
+            str(record.get("nearest_core_gene", "")).strip() or "-",
+            _mge_type_label(str(record.get("nearest_core_type", "")).strip()),
+            str(record.get("nearest_core_distance_bp", "")).strip() or "-",
+            str(record.get("nearest_core_distance_orf", "")).strip() or "-",
+            str(record.get("same_contig_core_categories", "")).strip() or "-",
+            "是" if str(record.get("has_second_core_or_boundary", "")).strip().lower() == "yes" else "否",
+        ]
+        if gene_type == "ARG":
+            resistance_rows.append(row)
+            if any(label != "未识别" for label in related_mge_types):
+                resistance_identified_hits += 1
+        else:
+            virulence_rows.append(row)
+            if any(label != "未识别" for label in related_mge_types):
+                virulence_identified_hits += 1
+
+    def _sorted_counts(mapping: dict[str, int], order: list[str] | None = None) -> list[dict]:
+        if order:
+            items = [(key, mapping.get(key, 0)) for key in order if mapping.get(key, 0)]
+        else:
+            items = sorted(mapping.items(), key=lambda item: (-item[1], item[0]))
+        return [{"label": key, "count": value} for key, value in items]
+
+    def _build_block(title: str, rows: list[list[str]], key: str) -> dict:
+        risk_counts = _sorted_counts(
+            {_risk_level_label(level): count for level, count in risk_counts_by_type[key].items()},
+            ["Level A 高迁移风险", "Level B 中迁移风险", "Level C 低到中等风险", "Level D 弱证据"],
+        )
+        mge_counts = _sorted_counts(mge_counts_by_type[key])
+        high_risk = sum(risk_counts_by_type[key].get(level, 0) for level in ("A", "B"))
+        relation_rows = []
+        for row in rows:
+            mge_types = str(row[7] if len(row) > 7 else "").strip()
+            gene_name = str(row[2] if len(row) > 2 else "").strip()
+            if not mge_types or not gene_name:
+                continue
+            filtered_types = "、".join([item for item in mge_types.split("、") if item.strip() and item.strip() != "未识别"])
+            if not filtered_types:
+                continue
+            relation_rows.append([filtered_types, gene_name])
+        note = (
+            f"{title}共检出 {len(rows)} 条与移动元件相关记录，其中 {high_risk} 条处于 Level A/B，"
+            f"提示存在较高或中等的潜在转移风险。"
+            if rows else f"{title}未检出可展示的移动元件监测结果。"
+        )
+        return {
+            "note": note,
+            "hit_count": len(rows),
+            "high_risk_count": high_risk,
+            "risk_levels": risk_counts,
+            "mge_types": mge_counts,
+            "gene_mge_relationship": _build_category_gene_relationship(
+                {"columns": ["移动元件类型", "基因名称"], "rows": relation_rows},
+                left_key="移动元件类型",
+                right_key="基因名称",
+                label=f"{title}基因与移动元件类型关系图",
+                split_delimiters=["、"],
+            ),
+            "columns": table_columns,
+            "rows": rows,
+        }
+
+    overview_risk = _sorted_counts(
+        {_risk_level_label(level): count for level, count in risk_counts_all.items()},
+        ["Level A 高迁移风险", "Level B 中迁移风险", "Level C 低到中等风险", "Level D 弱证据"],
+    )
+    overview_mge = _sorted_counts(overall_mge_counts)
+    return {
+        "status": "ready" if integrated_rows or resistance_rows or virulence_rows else "empty",
+        "overview": {
+            "note": (
+                f"当前共检出 {len(integrated_records)} 条移动元件记录，"
+                f"其中与耐药/毒力基因相关的记录共 {len(risk_records)} 条，"
+                f"Level A/B 共 {sum(risk_counts_all.get(level, 0) for level in ('A', 'B'))} 条。"
+            ) if integrated_records or risk_records else "当前未检出可展示的移动元件监测记录。",
+            "total_hits": len(integrated_records),
+            "resistance_hits": resistance_identified_hits,
+            "virulence_hits": virulence_identified_hits,
+            "risk_levels": overview_risk,
+            "mge_types": overview_mge,
+        },
+        "elements": {
+            "columns": integrated_table_columns,
+            "rows": integrated_rows,
+        },
+        "resistance": _build_block("耐药相关位点", resistance_rows, "ARG"),
+        "virulence": _build_block("毒力相关位点", virulence_rows, "VF"),
     }
 
 
@@ -1830,6 +19602,1855 @@ def _read_tsv_rows(path: Path) -> dict:
     return {"columns": header, "rows": data_rows}
 
 
+def _read_hadv_phf_coverage_section(report_dir: Path, sample_name: str) -> dict:
+    phf_dir = report_dir / f"{sample_name}_hadv_reference_selection" / "phf_typing"
+    phf_table = _read_tsv_rows(phf_dir / "phf_typing.tsv")
+    phf_columns = phf_table.get("columns", [])
+    phf_rows = phf_table.get("rows", [])
+    subject_index = phf_columns.index("subject") if "subject" in phf_columns else -1
+    type_index = phf_columns.index("matched_type") if "matched_type" in phf_columns else -1
+    subject_map: dict[str, str] = {}
+    type_map: dict[str, str] = {}
+    for row in phf_rows:
+        if not isinstance(row, list) or not row:
+            continue
+        gene_name = str(row[1] if len(row) > 1 else "").strip().lower()
+        if not gene_name:
+            continue
+        if subject_index >= 0 and subject_index < len(row):
+            subject_map[gene_name] = str(row[subject_index] or "").strip()
+        if type_index >= 0 and type_index < len(row):
+            type_map[gene_name] = str(row[type_index] or "").strip()
+
+    rows: list[list[object]] = []
+    coverage_points: list[float] = []
+    depth_points: list[float] = []
+    x_values: list[str] = []
+    for gene_name, display_name in [("penton", "Penton"), ("hexon", "Hexon"), ("fiber", "Fiber")]:
+        coverage_path = phf_dir / f"{gene_name}.coverage.tsv"
+        if not coverage_path.is_file():
+            continue
+        matched_row: dict[str, str] | None = None
+        best_row: dict[str, str] | None = None
+        try:
+            with coverage_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+                reader = csv.DictReader(handle, delimiter="\t")
+                for row in reader:
+                    current = dict(row)
+                    current_name = str(current.get("#rname") or current.get("rname") or "").strip()
+                    current_coverage = float(current.get("coverage") or 0.0)
+                    current_depth = float(current.get("meandepth") or 0.0)
+                    if best_row is None:
+                        best_row = current
+                    else:
+                        best_score = (
+                            float(best_row.get("coverage") or 0.0),
+                            float(best_row.get("meandepth") or 0.0),
+                        )
+                        current_score = (current_coverage, current_depth)
+                        if current_score > best_score:
+                            best_row = current
+                    if subject_map.get(gene_name) and current_name == subject_map.get(gene_name):
+                        matched_row = current
+        except OSError:
+            continue
+        selected = matched_row or best_row
+        if not selected:
+            continue
+        coverage_value = float(selected.get("coverage") or 0.0)
+        mean_depth_value = float(selected.get("meandepth") or 0.0)
+        reference_name = str(selected.get("#rname") or selected.get("rname") or subject_map.get(gene_name) or "").strip()
+        type_label = type_map.get(gene_name) or "-"
+        rows.append([
+            display_name,
+            type_label,
+            reference_name or "-",
+            f"{coverage_value:.2f}%",
+            f"{mean_depth_value:.2f}",
+            str(selected.get("covbases") or "-"),
+            str(selected.get("endpos") or "-"),
+        ])
+        coverage_points.append(round(coverage_value, 2))
+        depth_points.append(round(mean_depth_value, 2))
+        x_values.append(display_name)
+    if not rows:
+        return {"status": "empty", "columns": [], "rows": []}
+    return {
+        "status": "ready",
+        "columns": ["基因", "命中分型", "命中参考", "覆盖度", "平均深度", "覆盖碱基数", "参考长度"],
+        "rows": rows,
+        "coverage_points": coverage_points,
+        "depth_points": depth_points,
+        "x_values": x_values,
+    }
+
+
+def _read_first_fasta_sequence(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    sequence_chunks: list[str] = []
+    seen_header = False
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                text = line.strip()
+                if not text:
+                    continue
+                if text.startswith(">"):
+                    if seen_header:
+                        break
+                    seen_header = True
+                    continue
+                if seen_header:
+                    sequence_chunks.append(text)
+    except OSError:
+        return ""
+    return "".join(sequence_chunks).upper()
+
+
+def _read_named_fasta_sequence(path: Path, record_name: str) -> str:
+    target = str(record_name or "").strip()
+    if not path.is_file() or not target:
+        return ""
+    collecting = False
+    sequence_chunks: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                text = line.strip()
+                if not text:
+                    continue
+                if text.startswith(">"):
+                    current_header = text[1:].strip()
+                    current_id = current_header.split()[0]
+                    if collecting:
+                        break
+                    collecting = target in {current_header, current_id}
+                    continue
+                if collecting:
+                    sequence_chunks.append(text)
+    except OSError:
+        return ""
+    return "".join(sequence_chunks).upper()
+
+
+def _estimate_sequence_offset(reference_sequence: str, sample_sequence: str, kmer_size: int = 15) -> int | None:
+    ref_seq = str(reference_sequence or "").upper()
+    sample_seq = str(sample_sequence or "").upper()
+    if len(ref_seq) < kmer_size or len(sample_seq) < kmer_size:
+        return None
+    sample_index: dict[str, list[int]] = defaultdict(list)
+    for sample_pos in range(0, len(sample_seq) - kmer_size + 1):
+        kmer = sample_seq[sample_pos:sample_pos + kmer_size]
+        if "N" in kmer:
+            continue
+        if len(sample_index[kmer]) < 32:
+            sample_index[kmer].append(sample_pos)
+    offset_counter: Counter[int] = Counter()
+    step = max(1, kmer_size // 2)
+    for ref_pos in range(0, len(ref_seq) - kmer_size + 1, step):
+        kmer = ref_seq[ref_pos:ref_pos + kmer_size]
+        if "N" in kmer:
+            continue
+        for sample_pos in sample_index.get(kmer, []):
+            offset_counter[sample_pos - ref_pos] += 1
+    if not offset_counter:
+        return None
+    return offset_counter.most_common(1)[0][0]
+
+
+def _count_substitutions_between_sequences(reference_sequence: str, sample_sequence: str) -> int:
+    ref_seq = str(reference_sequence or "").upper()
+    query_seq = str(sample_sequence or "").upper()
+    if not ref_seq or not query_seq:
+        return 0
+    matcher = SequenceMatcher(None, ref_seq, query_seq, autojunk=False)
+    snp_count = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "replace":
+            continue
+        ref_slice = ref_seq[i1:i2]
+        query_slice = query_seq[j1:j2]
+        snp_count += sum(1 for left, right in zip(ref_slice, query_slice) if left != right)
+    return snp_count
+
+
+def _list_substitutions_between_sequences(reference_sequence: str, sample_sequence: str, sample_offset: int = 0) -> list[dict[str, object]]:
+    ref_seq = str(reference_sequence or "").upper()
+    query_seq = str(sample_sequence or "").upper()
+    if not ref_seq or not query_seq:
+        return []
+    matcher = SequenceMatcher(None, ref_seq, query_seq, autojunk=False)
+    results: list[dict[str, object]] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "replace":
+            continue
+        ref_slice = ref_seq[i1:i2]
+        query_slice = query_seq[j1:j2]
+        for index, (left, right) in enumerate(zip(ref_slice, query_slice)):
+            if left == right:
+                continue
+            ref_pos = i1 + index + 1
+            sample_pos = sample_offset + j1 + index + 1
+            results.append({
+                "ref_pos": ref_pos,
+                "sample_pos": sample_pos,
+                "ref": left,
+                "alt": right,
+            })
+    return results
+
+
+def _build_hadv_mutation_lookup(mutation_table: dict) -> dict[int, list[dict[str, object]]]:
+    columns = mutation_table.get("columns") if isinstance(mutation_table, dict) else []
+    rows = mutation_table.get("rows") if isinstance(mutation_table, dict) else []
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        return {}
+    pos_idx = columns.index("位置") if "位置" in columns else -1
+    ref_idx = columns.index("参考碱基") if "参考碱基" in columns else -1
+    alt_idx = columns.index("突变碱基") if "突变碱基" in columns else -1
+    depth_idx = columns.index("测序深度 / 突变频率") if "测序深度 / 突变频率" in columns else -1
+    hgvs_c_idx = columns.index("HGVS.c") if "HGVS.c" in columns else -1
+    hgvs_p_idx = columns.index("HGVS.p") if "HGVS.p" in columns else -1
+    quality_idx = columns.index("质量分层") if "质量分层" in columns else -1
+    lookup: dict[int, list[dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        if not isinstance(row, list) or pos_idx < 0 or pos_idx >= len(row):
+            continue
+        try:
+            pos_value = int(row[pos_idx])
+        except (TypeError, ValueError):
+            continue
+        lookup[pos_value].append({
+            "ref": str(row[ref_idx] if ref_idx >= 0 and ref_idx < len(row) else "").strip(),
+            "alt": str(row[alt_idx] if alt_idx >= 0 and alt_idx < len(row) else "").strip(),
+            "depth": str(row[depth_idx] if depth_idx >= 0 and depth_idx < len(row) else "").strip(),
+            "hgvs_c": str(row[hgvs_c_idx] if hgvs_c_idx >= 0 and hgvs_c_idx < len(row) else "").strip(),
+            "hgvs_p": str(row[hgvs_p_idx] if hgvs_p_idx >= 0 and hgvs_p_idx < len(row) else "").strip(),
+            "quality": str(row[quality_idx] if quality_idx >= 0 and quality_idx < len(row) else "").strip(),
+        })
+    return lookup
+
+
+def _read_hadv_phf_snp_section(report_dir: Path, sample_name: str, mutation_table: dict | None = None) -> dict:
+    phf_dir = report_dir / f"{sample_name}_hadv_reference_selection" / "phf_typing"
+    phf_table = _read_tsv_rows(phf_dir / "phf_typing.tsv")
+    phf_columns = phf_table.get("columns", [])
+    phf_rows = phf_table.get("rows", [])
+    subject_index = phf_columns.index("subject") if "subject" in phf_columns else -1
+    type_index = phf_columns.index("matched_type") if "matched_type" in phf_columns else -1
+    sample_consensus = _read_first_fasta_sequence(report_dir / f"{sample_name}.consensus.fasta") or _read_first_fasta_sequence(report_dir / f"{sample_name}.final.fasta")
+    if not sample_consensus:
+        return {"status": "empty", "columns": [], "rows": []}
+    db_root = Path(__file__).resolve().parent.parent / "database" / "virus" / "hadv"
+    db_paths = {
+        "penton": db_root / "blastn_db_penton" / "hadv_types_ref_penton.fa",
+        "hexon": db_root / "blastn_db_hexon" / "hadv_types_ref_hexon.fa",
+        "fiber": db_root / "blastn_db_fiber" / "hadv_types_ref_fiber.fa",
+    }
+    mutation_lookup = _build_hadv_mutation_lookup(mutation_table or {})
+    rows: list[list[object]] = []
+    values: list[int] = []
+    x_values: list[str] = []
+    detail_rows: list[list[object]] = []
+    for row in phf_rows:
+        if not isinstance(row, list) or len(row) < 2:
+            continue
+        gene_name = str(row[1] or "").strip().lower()
+        if gene_name not in db_paths:
+            continue
+        subject = str(row[subject_index] if subject_index >= 0 and subject_index < len(row) else "").strip()
+        matched_type = str(row[type_index] if type_index >= 0 and type_index < len(row) else "").strip()
+        reference_sequence = _read_named_fasta_sequence(db_paths[gene_name], subject)
+        if not reference_sequence:
+            continue
+        estimated_offset = _estimate_sequence_offset(reference_sequence, sample_consensus)
+        if estimated_offset is None:
+            continue
+        start = max(0, estimated_offset - 80)
+        end = min(len(sample_consensus), estimated_offset + len(reference_sequence) + 80)
+        sample_window = sample_consensus[start:end]
+        snp_count = _count_substitutions_between_sequences(reference_sequence, sample_window)
+        substitutions = _list_substitutions_between_sequences(reference_sequence, sample_window, sample_offset=start)
+        display_name = gene_name.capitalize()
+        rows.append([display_name, matched_type or "-", subject or "-", int(snp_count)])
+        values.append(int(snp_count))
+        x_values.append(display_name)
+        for item in substitutions:
+            sample_pos = int(item.get("sample_pos") or 0)
+            ref_base = str(item.get("ref") or "")
+            alt_base = str(item.get("alt") or "")
+            matching_mutations = mutation_lookup.get(sample_pos, [])
+            matched_meta = next(
+                (
+                    meta for meta in matching_mutations
+                    if str(meta.get("ref") or "").upper() == ref_base.upper()
+                    and str(meta.get("alt") or "").upper() == alt_base.upper()
+                ),
+                matching_mutations[0] if matching_mutations else {},
+            )
+            detail_rows.append([
+                display_name,
+                matched_type or "-",
+                subject or "-",
+                int(item.get("ref_pos") or 0),
+                sample_pos,
+                ref_base,
+                alt_base,
+                str(matched_meta.get("depth") or "-"),
+                str(matched_meta.get("quality") or "-"),
+                str(matched_meta.get("hgvs_c") or "-"),
+                str(matched_meta.get("hgvs_p") or "-"),
+            ])
+    if not rows:
+        return {"status": "empty", "columns": [], "rows": []}
+    return {
+        "status": "ready",
+        "columns": ["基因", "命中分型", "命中参考", "差异SNP数"],
+        "rows": rows,
+        "values": values,
+        "x_values": x_values,
+        "detail_columns": ["基因", "命中分型", "命中参考", "参考基因位点", "样本坐标", "Ref", "Alt", "Depth/MAF", "质量分层", "HGVS.c", "HGVS.p"],
+        "detail_rows": detail_rows,
+    }
+
+
+def _read_variant_annotation_table(json_path: Path, tsv_path: Path, source_vcf_name: str) -> dict:
+    if json_path.is_file():
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+        if rows and isinstance(rows[0], dict):
+            preferred = [
+                "核苷酸突变",
+                "变异类型",
+                "质量分层",
+                "位置",
+                "参考碱基",
+                "突变碱基",
+                "质量值QUAL",
+                "测序深度DP",
+                "突变频率MAF",
+                "注释效应",
+                "影响等级",
+                "基因",
+                "HGVS.c",
+                "HGVS.p",
+                "氨基酸位点",
+                "警告信息",
+            ]
+            columns = [column for column in preferred if any(column in row for row in rows)]
+            seen = set(columns)
+            for row in rows:
+                for key in row.keys():
+                    if key not in seen:
+                        columns.append(key)
+                        seen.add(key)
+            list_rows = [[row.get(column, "") for column in columns] for row in rows]
+            return {
+                "status": str(payload.get("status") or "ready"),
+                "columns": columns,
+                "rows": list_rows,
+                "total_variants": int(payload.get("total_variants") or len(rows)),
+                "high_quality_variants": int(payload.get("high_quality_variants") or 0),
+                "low_quality_variants": int(payload.get("low_quality_variants") or 0),
+                "source_vcf": str(payload.get("source_vcf") or ""),
+            }
+    raw = _read_tsv_rows(tsv_path)
+    columns = raw.get("columns", [])
+    rows = raw.get("rows", [])
+    quality_index = columns.index("质量分层") if "质量分层" in columns else -1
+    high_quality = 0
+    low_quality = 0
+    if quality_index >= 0:
+        for row in rows:
+            value = str(row[quality_index] if quality_index < len(row) else "").strip()
+            if value == "高质量突变":
+                high_quality += 1
+            elif value == "低质量突变":
+                low_quality += 1
+    return {
+        "status": "ready" if rows else "empty",
+        "columns": columns,
+        "rows": rows,
+        "total_variants": len(rows),
+        "high_quality_variants": high_quality,
+        "low_quality_variants": low_quality,
+        "source_vcf": source_vcf_name,
+    }
+
+
+def _read_simple_annotated_variant_table(report_dir: Path, *, prefer_filtered: bool = False) -> dict:
+    annotated_vcf_path = report_dir / "snps.anno.vcf"
+    preferred_vcf_path = report_dir / ("snps.filt1.vcf" if prefer_filtered else "snps.raw.vcf")
+    fallback_vcf_path = report_dir / ("snps.raw.vcf" if prefer_filtered else "snps.filt1.vcf")
+    raw_vcf_path = preferred_vcf_path if preferred_vcf_path.is_file() else fallback_vcf_path
+    if not raw_vcf_path.is_file():
+        return {"status": "empty", "columns": [], "rows": [], "total_variants": 0, "source_vcf": ""}
+
+    def _parse_kv_pairs(text: str) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for item in str(text or "").split(";"):
+            if not item:
+                continue
+            if "=" not in item:
+                result[item] = ""
+                continue
+            key, value = item.split("=", 1)
+            result[str(key).strip()] = str(value).strip()
+        return result
+
+    def _choose_ann_entry(entries: list[list[str]]) -> list[str]:
+        if not entries:
+            return []
+
+        def _ann_score(parts: list[str]) -> tuple[int, int, int]:
+            effect = str(parts[1] if len(parts) > 1 else "").strip().lower()
+            impact = str(parts[2] if len(parts) > 2 else "").strip().upper()
+            has_gene = 1 if str(parts[3] if len(parts) > 3 else "").strip() else 0
+            impact_rank = {"HIGH": 4, "MODERATE": 3, "LOW": 2, "MODIFIER": 1}.get(impact, 0)
+            non_modifier = 1 if effect and effect != "intergenic_region" and "upstream" not in effect and "downstream" not in effect else 0
+            return (non_modifier, impact_rank, has_gene)
+
+        return max(entries, key=_ann_score)
+
+    annotated_lookup: dict[tuple[str, str, str, str], dict[str, str]] = {}
+    if annotated_vcf_path.is_file():
+        try:
+            with annotated_vcf_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) < 8:
+                        continue
+                    chrom, pos, _vid, ref, alt, _qual, _flt, info = parts[:8]
+                    alt_value = str(alt or "").split(",")[0].strip()
+                    info_map = _parse_kv_pairs(info)
+                    ann_entries = []
+                    ann_raw = str(info_map.get("ANN") or "").strip()
+                    if ann_raw:
+                        ann_entries = [entry.split("|") for entry in ann_raw.split(",") if entry]
+                    best_ann = _choose_ann_entry(ann_entries)
+                    annotated_lookup[(chrom, pos, ref, alt_value)] = {
+                        "gene_name": str(best_ann[3] if len(best_ann) > 3 else "").strip() or chrom,
+                        "effect": str(best_ann[1] if len(best_ann) > 1 else "").strip(),
+                        "impact": str(best_ann[2] if len(best_ann) > 2 else "").strip(),
+                        "hgvs_c": str(best_ann[9] if len(best_ann) > 9 else "").strip(),
+                        "hgvs_p": str(best_ann[10] if len(best_ann) > 10 else "").strip(),
+                    }
+        except OSError:
+            annotated_lookup = {}
+
+    rows: list[list[object]] = []
+    high_quality = 0
+    low_quality = 0
+    try:
+        with raw_vcf_path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 10:
+                    continue
+                chrom, pos, _vid, ref, alt, qual_raw, _filt, info, fmt, sample = parts[:10]
+                alt_value = str(alt or "").split(",")[0].strip()
+                info_map = _parse_kv_pairs(info)
+                ann_info = annotated_lookup.get((chrom, pos, ref, alt_value), {})
+                sample_fields = str(fmt or "").split(":")
+                sample_values = str(sample or "").split(":")
+                sample_map = {sample_fields[i]: sample_values[i] if i < len(sample_values) else "" for i in range(len(sample_fields))}
+
+                qual_value = _safe_float(qual_raw) or 0.0
+                depth_value = _safe_int(info_map.get("DP"))
+                if depth_value is None:
+                    depth_value = _safe_int(sample_map.get("DP")) or 0
+                ao_value = _safe_float(str(info_map.get("AO") or "").split(",")[0].strip())
+                if ao_value is None:
+                    ao_value = _safe_float(str(sample_map.get("AO") or "").split(",")[0].strip()) or 0.0
+                ro_value = _safe_float(str(info_map.get("RO") or "").split(",")[0].strip())
+                if ro_value is None:
+                    ro_value = _safe_float(str(sample_map.get("RO") or "").split(",")[0].strip()) or 0.0
+                allele_depth = float(ao_value) + float(ro_value)
+                if allele_depth <= 0 and depth_value > 0:
+                    allele_depth = float(depth_value)
+                maf_value = round((float(ao_value) / allele_depth), 6) if allele_depth > 0 else 0.0
+
+                quality_label = "高质量突变" if qual_value > 10 and depth_value > 10 and maf_value > 0.1 else "低质量突变"
+                if prefer_filtered and raw_vcf_path.name == "snps.filt1.vcf" and quality_label != "高质量突变":
+                    quality_label = "高质量突变"
+                if quality_label == "高质量突变":
+                    high_quality += 1
+                else:
+                    low_quality += 1
+
+                rows.append([
+                    str(ann_info.get("gene_name") or chrom).strip() or chrom,
+                    pos,
+                    ref,
+                    alt_value,
+                    str(depth_value),
+                    f"{maf_value:.4f}",
+                    str(ann_info.get("hgvs_c") or "").strip(),
+                    str(ann_info.get("hgvs_p") or "").strip(),
+                    chrom,
+                    quality_label,
+                    str(ann_info.get("impact") or "").strip(),
+                    str(ann_info.get("effect") or "").strip(),
+                    "插入" if len(alt_value) > len(ref) else ("缺失" if len(ref) > len(alt_value) else "替换"),
+                ])
+    except OSError:
+        return {"status": "empty", "columns": [], "rows": [], "total_variants": 0, "source_vcf": ""}
+
+    columns = [
+        "基因名",
+        "位置",
+        "参考碱基",
+        "突变碱基",
+        "测序深度DP",
+        "突变频率MAF",
+        "HGVS.c",
+        "HGVS.p",
+        "染色体",
+        "质量分层",
+        "影响等级",
+        "注释效应",
+        "变异类型",
+    ]
+    return {
+        "status": "ready" if rows else "empty",
+        "columns": columns,
+        "rows": rows,
+        "total_variants": len(rows),
+        "high_quality_variants": high_quality,
+        "low_quality_variants": low_quality,
+        "source_vcf": str(report_dir / "snps.anno.vcf"),
+    }
+
+
+def _read_ncov_variant_annotation_table(report_dir: Path) -> dict:
+    return _read_variant_annotation_table(
+        report_dir / "snps.raw.mutation_table.json",
+        report_dir / "snps.raw.mutation_table.tsv",
+        str(report_dir / "snps.raw.ann.vcf"),
+    )
+
+
+def _read_influenza_variant_annotation_table(report_dir: Path) -> dict:
+    return _read_variant_annotation_table(
+        report_dir / "snps.filt1.mutation_table.json",
+        report_dir / "snps.filt1.mutation_table.tsv",
+        str(report_dir / "snps.anno.vcf"),
+    )
+
+
+def _build_influenza_mutation_display_table(report_dir: Path, fallback_table: dict) -> dict:
+    json_path = report_dir / "snps.filt1.mutation_table.json"
+    if json_path.is_file():
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        raw_rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+        if raw_rows and isinstance(raw_rows[0], dict):
+            columns = [
+                "基因名",
+                "位置",
+                "参考碱基",
+                "突变碱基",
+                "测序深度 / 突变频率",
+                "HGVS.c",
+                "HGVS.p",
+                "染色体",
+                "质量分层",
+                "影响等级",
+                "注释效应",
+                "变异类型",
+            ]
+            rows: list[list[object]] = []
+            for row in raw_rows:
+                gene_name = str(row.get("染色体") or "-").strip() or "-"
+                depth_value = str(row.get("测序深度DP") or "").strip()
+                maf_raw = row.get("突变频率MAF")
+                maf_value = ""
+                try:
+                    if maf_raw not in (None, ""):
+                        maf_value = f"{float(maf_raw):.4f}"
+                except (TypeError, ValueError):
+                    maf_value = str(maf_raw or "").strip()
+                rows.append([
+                    gene_name,
+                    row.get("位置", ""),
+                    str(row.get("参考碱基") or "").strip(),
+                    str(row.get("突变碱基") or "").strip(),
+                    " / ".join([part for part in [depth_value, maf_value] if part]) or "-",
+                    str(row.get("HGVS.c") or "").strip(),
+                    str(row.get("HGVS.p") or "").strip(),
+                    str(row.get("染色体") or "").strip(),
+                    str(row.get("质量分层") or "").strip(),
+                    str(row.get("影响等级") or "").strip(),
+                    str(row.get("注释效应") or "").strip(),
+                    str(row.get("变异类型") or "").strip(),
+                ])
+            return {"columns": columns, "rows": rows}
+    fallback_columns = fallback_table.get("columns") or []
+    fallback_rows = fallback_table.get("rows") or []
+    if not fallback_columns or not fallback_rows:
+        return fallback_table
+    display_columns = [("基因名" if str(column) == "染色体" else str(column)) for column in fallback_columns]
+    return {"columns": display_columns, "rows": fallback_rows}
+
+
+def _build_ncov_mutation_display_table(report_dir: Path, fallback_table: dict) -> dict:
+    json_path = report_dir / "snps.raw.mutation_table.json"
+    if json_path.is_file():
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        raw_rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+        if raw_rows and isinstance(raw_rows[0], dict):
+            columns = [
+                "基因名",
+                "位置",
+                "参考碱基",
+                "突变碱基",
+                "测序深度 / 突变频率",
+                "HGVS.c",
+                "HGVS.p",
+                "染色体",
+                "质量分层",
+                "影响等级",
+                "注释效应",
+                "变异类型",
+            ]
+            rows: list[list[object]] = []
+            for row in raw_rows:
+                gene_name = str(row.get("染色体") or "-").strip() or "-"
+                depth_value = str(row.get("测序深度DP") or "").strip()
+                maf_raw = row.get("突变频率MAF")
+                maf_value = ""
+                try:
+                    if maf_raw not in (None, ""):
+                        maf_value = f"{float(maf_raw):.4f}"
+                except (TypeError, ValueError):
+                    maf_value = str(maf_raw or "").strip()
+                rows.append([
+                    gene_name,
+                    row.get("位置", ""),
+                    str(row.get("参考碱基") or "").strip(),
+                    str(row.get("突变碱基") or "").strip(),
+                    " / ".join([part for part in [depth_value, maf_value] if part]) or "-",
+                    str(row.get("HGVS.c") or "").strip(),
+                    str(row.get("HGVS.p") or "").strip(),
+                    str(row.get("染色体") or "").strip(),
+                    str(row.get("质量分层") or "").strip(),
+                    str(row.get("影响等级") or "").strip(),
+                    str(row.get("注释效应") or "").strip(),
+                    str(row.get("变异类型") or "").strip(),
+                ])
+            return {
+                "status": str(payload.get("status") or "ready"),
+                "columns": columns,
+                "rows": rows,
+                "total_variants": int(payload.get("total_variants") or len(rows)),
+                "high_quality_variants": int(payload.get("high_quality_variants") or 0),
+                "low_quality_variants": int(payload.get("low_quality_variants") or 0),
+                "source_vcf": str(payload.get("source_vcf") or ""),
+            }
+    fallback_columns = fallback_table.get("columns") or []
+    fallback_rows = fallback_table.get("rows") or []
+    if not fallback_columns or not fallback_rows:
+        return fallback_table
+    display_columns = [("基因名" if str(column) == "染色体" else str(column)) for column in fallback_columns]
+    return {
+        "status": str(fallback_table.get("status") or ("ready" if fallback_rows else "empty")),
+        "columns": display_columns,
+        "rows": fallback_rows,
+        "total_variants": int(fallback_table.get("total_variants") or len(fallback_rows)),
+        "high_quality_variants": int(fallback_table.get("high_quality_variants") or 0),
+        "low_quality_variants": int(fallback_table.get("low_quality_variants") or 0),
+        "source_vcf": str(fallback_table.get("source_vcf") or ""),
+    }
+
+
+def _read_monkeypox_variant_annotation_table(report_dir: Path) -> dict:
+    annotated_vcf_path = report_dir / "snps.anno.vcf"
+    raw_vcf_path = report_dir / "snps.raw.vcf"
+    if not raw_vcf_path.is_file():
+        return {"status": "empty", "columns": [], "rows": [], "total_variants": 0, "source_vcf": ""}
+    rows: list[dict[str, object]] = []
+
+    def _parse_kv_pairs(text: str) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for item in str(text or "").split(";"):
+            if not item:
+                continue
+            if "=" not in item:
+                result[item] = ""
+                continue
+            key, value = item.split("=", 1)
+            result[str(key).strip()] = str(value).strip()
+        return result
+
+    def _choose_ann_entry(entries: list[list[str]]) -> list[str]:
+        if not entries:
+            return []
+        def _ann_score(parts: list[str]) -> tuple[int, int, int]:
+            effect = str(parts[1] if len(parts) > 1 else "").strip().lower()
+            impact = str(parts[2] if len(parts) > 2 else "").strip().upper()
+            has_gene = 1 if str(parts[3] if len(parts) > 3 else "").strip() else 0
+            impact_rank = {"HIGH": 4, "MODERATE": 3, "LOW": 2, "MODIFIER": 1}.get(impact, 0)
+            non_modifier = 1 if effect and effect != "intergenic_region" and "upstream" not in effect and "downstream" not in effect else 0
+            return (non_modifier, impact_rank, has_gene)
+        return max(entries, key=_ann_score)
+
+    def _max_homopolymer_run(sequence: str | None) -> int:
+        text = str(sequence or "").strip().upper()
+        if not text:
+            return 0
+        best = 1
+        current = 1
+        for index in range(1, len(text)):
+            if text[index] == text[index - 1]:
+                current += 1
+                best = max(best, current)
+            else:
+                current = 1
+        return best
+
+    def _is_long_poly_indel(ref: str | None, alt: str | None) -> bool:
+        ref_text = str(ref or "").strip().upper()
+        alt_text = str(alt or "").strip().upper()
+        if not ref_text or not alt_text or len(ref_text) == len(alt_text):
+            return False
+        return max(_max_homopolymer_run(ref_text), _max_homopolymer_run(alt_text)) > 6
+
+    annotated_lookup: dict[tuple[str, str, str, str], dict[str, str]] = {}
+    if annotated_vcf_path.is_file():
+        try:
+            with annotated_vcf_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) < 8:
+                        continue
+                    chrom, pos, _vid, ref, alt, _qual, _flt, info = parts[:8]
+                    alt_value = str(alt or "").split(",")[0].strip()
+                    info_map = _parse_kv_pairs(info)
+                    ann_entries = []
+                    ann_raw = str(info_map.get("ANN") or "").strip()
+                    if ann_raw:
+                        ann_entries = [entry.split("|") for entry in ann_raw.split(",") if entry]
+                    best_ann = _choose_ann_entry(ann_entries)
+                    annotated_lookup[(chrom, pos, ref, alt_value)] = {
+                        "gene_name": str(best_ann[3] if len(best_ann) > 3 else "").strip() or chrom,
+                        "effect": str(best_ann[1] if len(best_ann) > 1 else "").strip(),
+                        "impact": str(best_ann[2] if len(best_ann) > 2 else "").strip(),
+                        "hgvs_c": str(best_ann[9] if len(best_ann) > 9 else "").strip(),
+                        "hgvs_p": str(best_ann[10] if len(best_ann) > 10 else "").strip(),
+                    }
+        except OSError:
+            annotated_lookup = {}
+
+    try:
+        with raw_vcf_path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 10:
+                    continue
+                chrom, pos, _vid, ref, alt, qual_raw, filt, info, fmt, sample = parts[:10]
+                info_map = _parse_kv_pairs(info)
+                alt_value = str(alt or "").split(",")[0].strip()
+                ann_info = annotated_lookup.get((chrom, pos, ref, alt_value), {})
+                gene_name = str(ann_info.get("gene_name") or chrom).strip() or chrom
+                effect = str(ann_info.get("effect") or "").strip()
+                impact = str(ann_info.get("impact") or "").strip()
+                hgvs_c = str(ann_info.get("hgvs_c") or "").strip()
+                hgvs_p = str(ann_info.get("hgvs_p") or "").strip()
+                qual = _safe_float(qual_raw) or 0.0
+                depth_value = _safe_int(info_map.get("DP")) or 0
+                ao_value = _safe_float(str(info_map.get("AO") or "").split(",")[0].strip()) or 0.0
+                ro_value = _safe_float(str(info_map.get("RO") or "").split(",")[0].strip()) or 0.0
+                sample_fields = str(fmt or "").split(":")
+                sample_values = str(sample or "").split(":")
+                sample_map = {sample_fields[i]: sample_values[i] if i < len(sample_values) else "" for i in range(len(sample_fields))}
+                if depth_value <= 0:
+                    depth_value = _safe_int(sample_map.get("DP")) or 0
+                if ao_value <= 0:
+                    ao_value = _safe_float(str(sample_map.get("AO") or "").split(",")[0].strip()) or 0.0
+                if ro_value <= 0:
+                    ro_value = _safe_float(str(sample_map.get("RO") or "").split(",")[0].strip()) or 0.0
+                maf_numeric = 0.0
+                try:
+                    allele_depth = float(ao_value) + float(ro_value)
+                    if allele_depth <= 0 and depth_value > 0:
+                        allele_depth = float(depth_value)
+                    maf_numeric = round((float(ao_value) / allele_depth), 6) if allele_depth > 0 else 0.0
+                except (TypeError, ValueError, ZeroDivisionError):
+                    maf_numeric = 0.0
+                is_poly_indel = _is_long_poly_indel(ref, alt_value)
+                if is_poly_indel:
+                    quality_label = "低质量突变"
+                else:
+                    quality_label = "高质量突变" if qual > 10 and depth_value > 10 and maf_numeric > 0.1 else "低质量突变"
+                rows.append(
+                    {
+                        "基因名": gene_name or chrom,
+                        "位置": int(pos) if str(pos).isdigit() else pos,
+                        "参考碱基": ref,
+                        "突变碱基": alt_value,
+                        "测序深度 / 突变频率": " / ".join([part for part in [str(depth_value or ""), f"{maf_numeric:.4f}" if depth_value > 0 else ""] if part]) or "-",
+                        "HGVS.c": hgvs_c,
+                        "HGVS.p": hgvs_p,
+                        "染色体": chrom,
+                        "质量分层": quality_label,
+                        "质量值QUAL": round(qual, 2),
+                        "测序深度DP": depth_value,
+                        "突变频率MAF": round(maf_numeric, 6),
+                        "Poly位点": "是" if is_poly_indel else "否",
+                        "影响等级": impact,
+                        "注释效应": effect,
+                        "变异类型": str(info_map.get("TYPE") or "").split(",")[0].strip(),
+                        "FILTER": filt,
+                    }
+                )
+    except OSError:
+        return {"status": "empty", "columns": [], "rows": [], "total_variants": 0, "source_vcf": ""}
+    columns = [
+        "基因名",
+        "位置",
+        "参考碱基",
+        "突变碱基",
+        "测序深度 / 突变频率",
+        "HGVS.c",
+        "HGVS.p",
+        "染色体",
+        "质量分层",
+        "Poly位点",
+        "影响等级",
+        "注释效应",
+        "变异类型",
+    ]
+    list_rows = [[row.get(column, "") for column in columns] for row in rows]
+    high_quality = sum(1 for row in rows if str(row.get("质量分层") or "").strip() == "高质量突变")
+    return {
+        "status": "ready" if rows else "empty",
+        "columns": columns,
+        "rows": list_rows,
+        "total_variants": len(rows),
+        "high_quality_variants": high_quality,
+        "low_quality_variants": len(rows) - high_quality,
+        "source_vcf": str(raw_vcf_path),
+    }
+
+
+def _read_rsv_variant_annotation_table(report_dir: Path) -> dict:
+    table = _read_variant_annotation_table(
+        report_dir / "snps.filt1.mutation_table.json",
+        report_dir / "snps.filt1.mutation_table.tsv",
+        str(report_dir / "snps.anno.vcf"),
+    )
+    table_rows = table.get("rows")
+    if isinstance(table_rows, list) and table_rows:
+        return table
+
+    raw_vcf_path = report_dir / "snps.raw.vcf"
+    filt_vcf_path = report_dir / "snps.filt1.vcf"
+    annotated_vcf_path = report_dir / "snps.anno.vcf"
+    if not raw_vcf_path.is_file():
+        fallback = _read_simple_annotated_variant_table(report_dir, prefer_filtered=True)
+        return fallback if fallback.get("status") == "ready" else table
+    rows: list[dict[str, object]] = []
+
+    def _parse_kv_pairs(text: str) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for item in str(text or "").split(";"):
+            if not item:
+                continue
+            if "=" not in item:
+                result[item] = ""
+                continue
+            key, value = item.split("=", 1)
+            result[str(key).strip()] = str(value).strip()
+        return result
+
+    def _choose_ann_entry(entries: list[list[str]]) -> list[str]:
+        if not entries:
+            return []
+
+        def _ann_score(parts: list[str]) -> tuple[int, int, int]:
+            effect = str(parts[1] if len(parts) > 1 else "").strip().lower()
+            impact = str(parts[2] if len(parts) > 2 else "").strip().upper()
+            has_gene = 1 if str(parts[3] if len(parts) > 3 else "").strip() else 0
+            impact_rank = {"HIGH": 4, "MODERATE": 3, "LOW": 2, "MODIFIER": 1}.get(impact, 0)
+            non_modifier = 1 if effect and effect != "intergenic_region" and "upstream" not in effect and "downstream" not in effect else 0
+            return (non_modifier, impact_rank, has_gene)
+
+        return max(entries, key=_ann_score)
+
+    high_quality_keys: set[tuple[str, str, str, str]] = set()
+    if filt_vcf_path.is_file():
+        try:
+            with filt_vcf_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) < 5:
+                        continue
+                    chrom, pos, _vid, ref, alt = parts[:5]
+                    high_quality_keys.add((chrom, pos, ref, str(alt or "").split(",")[0].strip()))
+        except OSError:
+            high_quality_keys = set()
+
+    annotated_lookup: dict[tuple[str, str, str, str], dict[str, str]] = {}
+    if annotated_vcf_path.is_file():
+        try:
+            with annotated_vcf_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) < 8:
+                        continue
+                    chrom, pos, _vid, ref, alt, _qual, _flt, info = parts[:8]
+                    alt_value = str(alt or "").split(",")[0].strip()
+                    info_map = _parse_kv_pairs(info)
+                    ann_entries = []
+                    ann_raw = str(info_map.get("ANN") or "").strip()
+                    if ann_raw:
+                        ann_entries = [entry.split("|") for entry in ann_raw.split(",") if entry]
+                    best_ann = _choose_ann_entry(ann_entries)
+                    annotated_lookup[(chrom, pos, ref, alt_value)] = {
+                        "gene_name": str(best_ann[3] if len(best_ann) > 3 else "").strip() or chrom,
+                        "effect": str(best_ann[1] if len(best_ann) > 1 else "").strip(),
+                        "impact": str(best_ann[2] if len(best_ann) > 2 else "").strip(),
+                        "hgvs_c": str(best_ann[9] if len(best_ann) > 9 else "").strip(),
+                        "hgvs_p": str(best_ann[10] if len(best_ann) > 10 else "").strip(),
+                    }
+        except OSError:
+            annotated_lookup = {}
+
+    try:
+        with raw_vcf_path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 10:
+                    continue
+                chrom, pos, _vid, ref, alt, qual_raw, filt, info, fmt, sample = parts[:10]
+                alt_value = str(alt or "").split(",")[0].strip()
+                info_map = _parse_kv_pairs(info)
+                ann_info = annotated_lookup.get((chrom, pos, ref, alt_value), {})
+                gene_name = str(ann_info.get("gene_name") or chrom).strip() or chrom
+                effect = str(ann_info.get("effect") or "").strip()
+                impact = str(ann_info.get("impact") or "").strip()
+                hgvs_c = str(ann_info.get("hgvs_c") or "").strip()
+                hgvs_p = str(ann_info.get("hgvs_p") or "").strip()
+                qual = _safe_float(qual_raw) or 0.0
+                depth_value = _safe_int(info_map.get("DP")) or 0
+                ao_value = _safe_float(str(info_map.get("AO") or "").split(",")[0].strip()) or 0.0
+                ro_value = _safe_float(str(info_map.get("RO") or "").split(",")[0].strip()) or 0.0
+                sample_fields = str(fmt or "").split(":")
+                sample_values = str(sample or "").split(":")
+                sample_map = {sample_fields[i]: sample_values[i] if i < len(sample_values) else "" for i in range(len(sample_fields))}
+                if depth_value <= 0:
+                    depth_value = _safe_int(sample_map.get("DP")) or 0
+                if ao_value <= 0:
+                    ao_value = _safe_float(str(sample_map.get("AO") or "").split(",")[0].strip()) or 0.0
+                if ro_value <= 0:
+                    ro_value = _safe_float(str(sample_map.get("RO") or "").split(",")[0].strip()) or 0.0
+                maf_numeric = 0.0
+                try:
+                    allele_depth = float(ao_value) + float(ro_value)
+                    if allele_depth <= 0 and depth_value > 0:
+                        allele_depth = float(depth_value)
+                    maf_numeric = round((float(ao_value) / allele_depth), 6) if allele_depth > 0 else 0.0
+                except (TypeError, ValueError, ZeroDivisionError):
+                    maf_numeric = 0.0
+                quality_label = "高质量突变" if (chrom, pos, ref, alt_value) in high_quality_keys else "低质量突变"
+                variant_type = str(info_map.get("TYPE") or "").split(",")[0].strip()
+                if not variant_type:
+                    variant_type = "snp" if len(ref) == len(alt_value) else ("ins" if len(alt_value) > len(ref) else "del")
+                rows.append(
+                    {
+                        "基因名": gene_name,
+                        "位置": int(pos) if str(pos).isdigit() else pos,
+                        "参考碱基": ref,
+                        "突变碱基": alt_value,
+                        "测序深度 / 突变频率": " / ".join([part for part in [str(depth_value or ""), f"{maf_numeric:.4f}" if depth_value > 0 else ""] if part]) or "-",
+                        "HGVS.c": hgvs_c,
+                        "HGVS.p": hgvs_p,
+                        "染色体": chrom,
+                        "质量分层": quality_label,
+                        "质量值QUAL": round(qual, 2),
+                        "测序深度DP": depth_value,
+                        "突变频率MAF": round(maf_numeric, 6),
+                        "影响等级": impact,
+                        "注释效应": effect,
+                        "变异类型": variant_type,
+                        "FILTER": filt,
+                    }
+                )
+    except OSError:
+        return {"status": "empty", "columns": [], "rows": [], "total_variants": 0, "source_vcf": ""}
+    columns = [
+        "基因名",
+        "位置",
+        "参考碱基",
+        "突变碱基",
+        "测序深度 / 突变频率",
+        "HGVS.c",
+        "HGVS.p",
+        "染色体",
+        "质量分层",
+        "影响等级",
+        "注释效应",
+        "变异类型",
+    ]
+    list_rows = [[row.get(column, "") for column in columns] for row in rows]
+    high_quality = sum(1 for row in rows if str(row.get("质量分层") or "").strip() == "高质量突变")
+    return {
+        "status": "ready" if rows else "empty",
+        "columns": columns,
+        "rows": list_rows,
+        "total_variants": len(rows),
+        "high_quality_variants": high_quality,
+        "low_quality_variants": len(rows) - high_quality,
+        "source_vcf": str(annotated_vcf_path if annotated_vcf_path.is_file() else raw_vcf_path),
+    }
+
+
+def _normalize_rsv_subtype_label(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if not text or text == "-":
+        return ""
+    if text in {"A", "B"}:
+        return text
+    if "RSV" in text:
+        if "A" in text and "B" not in text:
+            return "A"
+        if "B" in text and "A" not in text:
+            return "B"
+    return text[-1] if text.endswith(("A", "B")) else ""
+
+
+def _extract_aa_position_from_hgvs_p(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    matched = re.search(r"p\.[A-Za-z*]+(\d+)", text)
+    if matched:
+        return matched.group(1)
+    matched = re.search(r"p\.(\d+)", text)
+    if matched:
+        return matched.group(1)
+    return ""
+
+
+def _normalize_hpiv_subtype_label(value: object) -> str:
+    text = str(value or "").strip().upper().replace("HPIV-", "").replace("HPIV", "")
+    if not text or text == "-":
+        return ""
+    if text in {"1", "2", "3", "4A", "4B"}:
+        return text
+    matched = re.search(r"\b([1-3]|4[A-B])\b", text)
+    return matched.group(1) if matched else ""
+
+
+def _read_hpiv_functional_annotation_table(report_dir: Path, mutation_table: dict, hpiv_subtype: str) -> dict:
+    subtype = _normalize_hpiv_subtype_label(hpiv_subtype)
+    if not subtype:
+        return {"status": "empty", "columns": [], "rows": [], "total_hits": 0}
+    db_path = Path(__file__).resolve().parent.parent / "database" / "virus" / "hpiv" / "HPIV_functional_sites_literature_curated.tsv"
+    if not db_path.is_file():
+        return {"status": "empty", "columns": [], "rows": [], "total_hits": 0}
+
+    mutation_columns = mutation_table.get("columns") if isinstance(mutation_table, dict) else []
+    mutation_rows = mutation_table.get("rows") if isinstance(mutation_table, dict) else []
+    if not isinstance(mutation_columns, list) or not isinstance(mutation_rows, list) or not mutation_rows:
+        return {"status": "empty", "columns": [], "rows": [], "total_hits": 0}
+
+    gene_idx = mutation_columns.index("基因名") if "基因名" in mutation_columns else -1
+    pos_idx = mutation_columns.index("位置") if "位置" in mutation_columns else -1
+    hgvs_p_idx = mutation_columns.index("HGVS.p") if "HGVS.p" in mutation_columns else -1
+    quality_idx = mutation_columns.index("质量分层") if "质量分层" in mutation_columns else -1
+    if gene_idx < 0 or hgvs_p_idx < 0:
+        return {"status": "empty", "columns": [], "rows": [], "total_hits": 0}
+
+    mutation_lookup: dict[tuple[str, str], list[dict[str, str]]] = {}
+    for row in mutation_rows:
+        if not isinstance(row, list):
+            continue
+        gene_name = str(row[gene_idx] if gene_idx < len(row) else "").strip().upper()
+        aa_position = _extract_aa_position_from_hgvs_p(row[hgvs_p_idx] if hgvs_p_idx < len(row) else "")
+        if not gene_name or not aa_position:
+            continue
+        mutation_lookup.setdefault((gene_name, aa_position), []).append(
+            {
+                "gene": gene_name,
+                "genome_position": str(row[pos_idx] if pos_idx >= 0 and pos_idx < len(row) else "").strip(),
+                "hgvs_p": str(row[hgvs_p_idx] if hgvs_p_idx < len(row) else "").strip(),
+                "quality": str(row[quality_idx] if quality_idx >= 0 and quality_idx < len(row) else "").strip() or "-",
+            }
+        )
+    if not mutation_lookup:
+        return {"status": "empty", "columns": [], "rows": [], "total_hits": 0}
+
+    try:
+        with db_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            db_rows = list(reader)
+    except OSError:
+        return {"status": "empty", "columns": [], "rows": [], "total_hits": 0}
+
+    matched_rows: list[list[str]] = []
+    target_virus_type = f"HPIV-{subtype}"
+    for record in db_rows:
+        virus_type = str(record.get("virus_type") or "").strip().upper()
+        if virus_type != target_virus_type:
+            continue
+        gene_value = str(record.get("gene") or "").strip().upper()
+        aa_position = str(record.get("aa_position_hint") or "").strip()
+        if not gene_value or not aa_position:
+            continue
+        current_hits = mutation_lookup.get((gene_value, aa_position))
+        if not current_hits:
+            continue
+        for hit in current_hits:
+            matched_rows.append(
+                [
+                    subtype,
+                    hit.get("gene", gene_value),
+                    aa_position,
+                    hit.get("genome_position", ""),
+                    hit.get("hgvs_p", ""),
+                    hit.get("quality", "-"),
+                    str(record.get("site_or_mutation") or "").strip(),
+                    str(record.get("functional_relevance_zh") or record.get("functional_relevance") or "").strip(),
+                    str(record.get("observed_phenotype_zh") or record.get("observed_phenotype") or "").strip(),
+                    str(record.get("evidence_type_zh") or record.get("evidence_type") or "").strip(),
+                    str(record.get("supporting_reference") or "").strip(),
+                    str(record.get("doi_or_pmid") or "").strip(),
+                    str(record.get("confidence_note_zh") or record.get("confidence_note") or "").strip(),
+                ]
+            )
+
+    matched_rows.sort(key=lambda row: (0 if row[5] == "高质量突变" else 1, row[1], _safe_int(row[2]) or 0, row[4]))
+    columns = [
+        "亚型",
+        "基因",
+        "氨基酸位点",
+        "基因组位置",
+        "我们的突变结果",
+        "质量分层",
+        "文献功能位点",
+        "功能影响",
+        "已知表型",
+        "证据类型",
+        "参考文献",
+        "PMID/DOI",
+        "证据说明",
+    ]
+    return {
+        "status": "ready" if matched_rows else "empty",
+        "columns": columns,
+        "rows": matched_rows,
+        "total_hits": len(matched_rows),
+    }
+
+
+def _read_rsv_nmdc_annotation_table(report_dir: Path, mutation_table: dict, rsv_subtype: str) -> dict:
+    subtype = _normalize_rsv_subtype_label(rsv_subtype)
+    if not subtype:
+        return {"status": "empty", "columns": [], "rows": [], "total_hits": 0}
+    database_root = _resolve_runtime_database_root()
+    db_candidates = [
+        database_root / "virus" / "rsv" / "nmdc_hrsv_variation_list_zh.tsv",
+        database_root / "virus" / "rsv" / "nmdc_hrsv_variation_list.tsv",
+    ]
+    db_path = next((path for path in db_candidates if path.is_file()), None)
+    if db_path is None:
+        return {"status": "empty", "columns": [], "rows": [], "total_hits": 0}
+
+    mutation_columns = mutation_table.get("columns") if isinstance(mutation_table, dict) else []
+    mutation_rows = mutation_table.get("rows") if isinstance(mutation_table, dict) else []
+    if not isinstance(mutation_columns, list) or not isinstance(mutation_rows, list) or not mutation_rows:
+        return {"status": "empty", "columns": [], "rows": [], "total_hits": 0}
+
+    gene_idx = mutation_columns.index("基因名") if "基因名" in mutation_columns else -1
+    pos_idx = mutation_columns.index("位置") if "位置" in mutation_columns else -1
+    hgvs_p_idx = mutation_columns.index("HGVS.p") if "HGVS.p" in mutation_columns else -1
+    quality_idx = mutation_columns.index("质量分层") if "质量分层" in mutation_columns else -1
+    if gene_idx < 0:
+        return {"status": "empty", "columns": [], "rows": [], "total_hits": 0}
+
+    mutation_lookup: dict[tuple[str, str], list[dict[str, str]]] = {}
+    for row in mutation_rows:
+        if not isinstance(row, list):
+            continue
+        gene_name = str(row[gene_idx] if gene_idx < len(row) else "").strip()
+        aa_position = _extract_aa_position_from_hgvs_p(row[hgvs_p_idx] if hgvs_p_idx < len(row) else "")
+        if not gene_name or not aa_position:
+            continue
+        mutation_lookup.setdefault((gene_name.upper(), aa_position), []).append(
+            {
+                "gene": gene_name,
+                "genome_position": str(row[pos_idx] if pos_idx >= 0 and pos_idx < len(row) else "").strip(),
+                "hgvs_p": str(row[hgvs_p_idx] if hgvs_p_idx < len(row) else "").strip(),
+                "quality": str(row[quality_idx] if quality_idx >= 0 and quality_idx < len(row) else "").strip() or "-",
+            }
+        )
+    if not mutation_lookup:
+        return {"status": "empty", "columns": [], "rows": [], "total_hits": 0}
+
+    try:
+        with db_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            db_rows = list(reader)
+    except OSError:
+        return {"status": "empty", "columns": [], "rows": [], "total_hits": 0}
+
+    def _clean_nmdc_value(value: object) -> str:
+        text = str(value or "").strip()
+        if not text or text in {"0", "0.0", "None", "none"}:
+            return "-"
+        if text.startswith("（") or text.startswith("("):
+            return "-"
+        return text
+
+    matched_rows: list[list[str]] = []
+    for record in db_rows:
+        reference_value = str(record.get("参考株") or record.get("reference") or "").strip()
+        reference_subtype = _normalize_rsv_subtype_label(reference_value)
+        if reference_subtype and reference_subtype != subtype:
+            continue
+        gene_value = str(record.get("基因") or record.get("gene") or "").strip()
+        aa_site_value = str(record.get("参考氨基酸位点") or record.get("ref_aminoacid_site") or "").strip()
+        if not gene_value or not aa_site_value:
+            continue
+        current_hits = mutation_lookup.get((gene_value.upper(), aa_site_value))
+        if not current_hits:
+            continue
+        for hit in current_hits:
+            matched_rows.append(
+                [
+                    subtype,
+                    hit.get("gene", gene_value),
+                    aa_site_value,
+                    hit.get("genome_position", ""),
+                    hit.get("hgvs_p", ""),
+                    hit.get("quality", "-"),
+                    str(record.get("氨基酸变异") or record.get("amino_acid_variants") or "").strip(),
+                    str(record.get("核酸变异") or record.get("basepair_variants") or "").strip(),
+                    _clean_nmdc_value(record.get("抗体亲和") or record.get("anti_risk")),
+                    _clean_nmdc_value(record.get("氨基酸突变") or record.get("matrix_risk")),
+                    _clean_nmdc_value(record.get("氨基酸变异注释") or record.get("variant_amino_type")),
+                    _clean_nmdc_value(record.get("结构相关关键词") or record.get("structure")),
+                    _clean_nmdc_value(record.get("功能相关关键词") or record.get("function")),
+                ]
+            )
+
+    matched_rows.sort(key=lambda row: (0 if row[5] == "高质量突变" else 1, row[1], _safe_int(row[2]) or 0, row[4]))
+    columns = [
+        "亚型",
+        "基因",
+        "突变位点",
+        "基因组位置",
+        "我们的突变结果",
+        "质量分层",
+        "数据库氨基酸变异",
+        "数据库核酸变异",
+        "抗体亲和",
+        "氨基酸突变",
+        "变异注释",
+        "结构相关关键词",
+        "功能相关关键词",
+    ]
+    return {
+        "status": "ready" if matched_rows else "empty",
+        "columns": columns,
+        "rows": matched_rows,
+        "total_hits": len(matched_rows),
+        "source": str(db_path),
+    }
+
+
+def _read_influenza_resistance_annotation_table(report_dir: Path) -> dict:
+    json_path = report_dir / "snps.filt1.resistance_annotation.json"
+    tsv_path = report_dir / "snps.filt1.resistance_annotation.tsv"
+    if json_path.is_file():
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+        if rows and isinstance(rows[0], dict):
+            columns = [
+                "基因",
+                "规则突变",
+                "命中突变",
+                "药物类别",
+                "药物",
+                "风险等级",
+                "权威结论",
+                "注释说明",
+                "证据来源",
+                "证据强度",
+                "适用范围",
+                "备注",
+            ]
+            return {
+                "status": str(payload.get("status") or "ready"),
+                "columns": columns,
+                "rows": [[row.get(column, "") for column in columns] for row in rows],
+                "total_hits": int(payload.get("total_hits") or len(rows)),
+            }
+    raw = _read_tsv_rows(tsv_path)
+    return {
+        "status": "ready" if raw.get("rows") is not None and raw.get("columns") else "empty",
+        "columns": raw.get("columns", []),
+        "rows": raw.get("rows", []),
+        "total_hits": len(raw.get("rows", [])),
+    }
+
+
+def _discover_influenza_igv_assets(report_dir: Path, sample_name: str) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file()):
+        return {"status": "empty"}
+    gff_path = report_dir / f"{sample_name}_virus_typing" / "vadr" / f"{sample_name}.vadr.gff3" if sample_name else Path("")
+    gff_asset = ""
+    if gff_path.is_file():
+        try:
+            if gff_path.stat().st_size > 0:
+                gff_asset = str(gff_path.relative_to(report_dir))
+        except OSError:
+            gff_asset = ""
+    return {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "gff_asset": gff_asset,
+        "viewer_label": "参考比对视图",
+        "note": "点击上方变异位点后，IGV 会自动跳转到对应位置。",
+    }
+
+
+def _discover_hiv_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file()):
+        return {"status": "empty"}
+    payload = {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "viewer_label": "HIV 参考比对视图",
+        "note": "展示当前 HIV 样本与自动选择代表株参考的比对结果，可结合耐药突变和分型证据一起查看。",
+    }
+    gff_candidates = [
+        report_dir / "ref" / "genes.gff",
+        report_dir / "vadr" / f"{report_dir.name}.vadr.gff3",
+    ]
+    gff_path = next((path for path in gff_candidates if path.is_file() and path.stat().st_size > 0), None)
+    if gff_path is not None:
+        payload["gff_asset"] = str(gff_path.relative_to(report_dir))
+    return payload
+
+
+def _discover_ncov_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = Path(__file__).resolve().parent.parent / "database" / "virus" / "ncov" / "ref.fna"
+    reference_fai = Path(__file__).resolve().parent.parent / "database" / "virus" / "ncov" / "ref.fna.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    ncov_gff = Path(__file__).resolve().parent.parent / "database" / "virus" / "ncov" / "genomic.gff"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file() and ncov_gff.is_file()):
+        return {"status": "empty"}
+    return {
+        "status": "ready",
+        "reference_asset": "__ncov_ref.fna",
+        "reference_index_asset": "__ncov_ref.fna.fai",
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "gff_asset": "__ncov_genomic.gff",
+        "viewer_label": "新冠参考比对视图",
+        "note": "点击上方变异位点后，IGV 会自动跳转到对应位置。",
+    }
+
+
+def _discover_monkeypox_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    local_gff = report_dir / "vadr" / f"{report_dir.name}.vadr.gff3"
+    hmpxv_db_root = Path(__file__).resolve().parent.parent / "database" / "virus" / "nextclade" / "hMPXV"
+    if not hmpxv_db_root.is_dir():
+        hmpxv_db_root = Path(__file__).resolve().parent.parent / "database" / "nextclade_db" / "hMPXV"
+    hmpxv_gff = hmpxv_db_root / "genome_annotation.gff3"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file()):
+        return {"status": "empty"}
+    if local_gff.is_file() and local_gff.stat().st_size > 0:
+        gff_asset = str(local_gff.relative_to(report_dir))
+        note = "下方比对视图优先使用本次猴痘 VADR 生成的 GFF3 注释，可联动查看当前样本的参考比对结果。"
+    elif hmpxv_gff.is_file():
+        gff_asset = "__hmpxv_genome_annotation.gff3"
+        note = "下方比对视图使用猴痘参考基因组与注释文件，可联动查看当前样本的参考比对结果。"
+    else:
+        return {"status": "empty"}
+    return {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "gff_asset": gff_asset,
+        "viewer_label": "猴痘参考比对视图",
+        "note": note,
+    }
+
+
+def _discover_rsv_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_path = report_dir / "ref" / "genes.gff"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file() and gff_path.is_file()):
+        return {"status": "empty"}
+    return {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "gff_asset": str(gff_path.relative_to(report_dir)),
+        "viewer_label": "RSV 参考比对视图",
+        "note": "展示自动选择的 RSV A/B 参考序列比对结果，可与上方突变位点表联动查看。",
+    }
+
+
+def _discover_hmpv_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_path = report_dir / "ref" / "genes.gff"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file() and gff_path.is_file()):
+        return {"status": "empty"}
+    return {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "gff_asset": str(gff_path.relative_to(report_dir)),
+        "viewer_label": "HMPV 参考比对视图",
+        "note": "展示 HMPV 固定参考序列比对结果，可与上方突变位点表联动查看。",
+    }
+
+
+def _discover_denv_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_path = report_dir / "ref" / "genes.gff"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file() and gff_path.is_file()):
+        return {"status": "empty"}
+    return {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "gff_asset": str(gff_path.relative_to(report_dir)),
+        "viewer_label": "DENV 参考比对视图",
+        "note": "展示自动选择的 DENV1-4 参考序列比对结果，可与上方突变位点表联动查看。",
+    }
+
+
+def _discover_zikav_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_path = report_dir / "ref" / "genes.gff"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file() and gff_path.is_file()):
+        return {"status": "empty"}
+    return {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "gff_asset": str(gff_path.relative_to(report_dir)),
+        "viewer_label": "ZIKV 参考比对视图",
+        "alignment_visibility_window": 3000,
+        "alignment_sampling_window_size": 25,
+        "alignment_sampling_depth": 25,
+        "alignment_height": 180,
+        "note": "展示 Zika virus 参考序列比对结果，可与上方突变位点表联动查看。高深度区域已启用 IGV 下采样以避免卡顿。",
+    }
+
+
+def _discover_chikv_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_path = report_dir / "ref" / "genes.gff"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file() and gff_path.is_file()):
+        return {"status": "empty"}
+    return {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "gff_asset": str(gff_path.relative_to(report_dir)),
+        "viewer_label": "CHIKV 参考比对视图",
+        "alignment_visibility_window": 3000,
+        "alignment_sampling_window_size": 25,
+        "alignment_sampling_depth": 25,
+        "alignment_height": 180,
+        "note": "展示 Chikungunya virus 参考序列比对结果，可与上方突变位点表联动查看。高深度区域已启用 IGV 下采样以避免卡顿。",
+    }
+
+
+def _discover_ebola_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_path = report_dir / "ref" / "genes.gff"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file() and gff_path.is_file()):
+        return {"status": "empty"}
+    return {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "gff_asset": str(gff_path.relative_to(report_dir)),
+        "viewer_label": "Ebola virus 参考比对视图",
+        "alignment_visibility_window": 3000,
+        "alignment_sampling_window_size": 25,
+        "alignment_sampling_depth": 25,
+        "alignment_height": 180,
+        "note": "展示自动选择的 Orthoebolavirus 参考序列比对结果，可结合 Nextclade clade / lineage 判读一起查看。",
+    }
+
+
+def _discover_hpiv_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_path = report_dir / "ref" / "genes.gff"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file() and gff_path.is_file()):
+        return {"status": "empty"}
+    return {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "gff_asset": str(gff_path.relative_to(report_dir)),
+        "viewer_label": "HPIV 参考比对视图",
+        "note": "展示自动选择的 HPIV 最优参考序列比对结果，可与上方突变位点表联动查看。",
+    }
+
+
+def _discover_norovirus_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_path = report_dir / "ref" / "genes.gff"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file() and gff_path.is_file()):
+        return {"status": "empty"}
+    return {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "gff_asset": str(gff_path.relative_to(report_dir)),
+        "viewer_label": "Norovirus 参考比对视图",
+        "note": "展示自动选择的 Norovirus 最优参考序列比对结果，可与上方突变位点表联动查看。",
+    }
+
+
+def _discover_enterovirus_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_candidates = [
+        report_dir / "ref" / "genes.gff",
+        report_dir / "vadr" / f"{report_dir.name}.vadr.gff3",
+    ]
+    gff_path = next((path for path in gff_candidates if path.is_file()), None)
+    if gff_path is None:
+        vadr_root = report_dir / "vadr"
+        if vadr_root.is_dir():
+            gff_path = next(iter(sorted(vadr_root.glob("*.vadr.gff3"))), None)
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file()):
+        return {"status": "empty"}
+    payload = {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "viewer_label": "Enterovirus 参考比对视图",
+        "note": "展示自动选择的 Enterovirus 最优参考序列比对结果；若存在注释文件会一并加载基因轨道。",
+    }
+    if gff_path and gff_path.is_file() and gff_path.stat().st_size > 0:
+        payload["gff_asset"] = str(gff_path.relative_to(report_dir))
+    return payload
+
+
+def _discover_hepatovirus_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_candidates = [
+        report_dir / "ref" / "genes.gff",
+        report_dir / "vadr" / f"{report_dir.name}.vadr.gff3",
+    ]
+    gff_path = next((path for path in gff_candidates if path.is_file()), None)
+    if gff_path is None:
+        vadr_root = report_dir / "vadr"
+        if vadr_root.is_dir():
+            gff_path = next(iter(sorted(vadr_root.glob("*.vadr.gff3"))), None)
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file()):
+        return {"status": "empty"}
+    payload = {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "viewer_label": "Hepatovirus 参考比对视图",
+        "note": "展示自动选择的肝炎病毒最优参考序列比对结果，可结合大亚型、子亚型/基因型筛选与突变位点一起查看。",
+    }
+    if gff_path and gff_path.is_file() and gff_path.stat().st_size > 0:
+        payload["gff_asset"] = str(gff_path.relative_to(report_dir))
+    return payload
+
+
+def _discover_bandavirus_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_candidates = [
+        report_dir / "ref" / "genes.gff",
+        report_dir / "vadr" / f"{report_dir.name}.vadr.gff3",
+    ]
+    gff_path = next((path for path in gff_candidates if path.is_file()), None)
+    if gff_path is None:
+        vadr_root = report_dir / "vadr"
+        if vadr_root.is_dir():
+            gff_path = next(iter(sorted(vadr_root.glob("*.vadr.gff3"))), None)
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file()):
+        return {"status": "empty"}
+    payload = {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "viewer_label": "Bandavirus 参考比对视图",
+        "note": "展示自动选择的 Bandavirus 最优参考序列比对结果，可结合 A_F/CJ 三片段分型结果一起查看。",
+    }
+    if gff_path and gff_path.is_file() and gff_path.stat().st_size > 0:
+        payload["gff_asset"] = str(gff_path.relative_to(report_dir))
+    return payload
+
+
+def _discover_orthohantavirus_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_candidates = [
+        report_dir / "ref" / "genes.gff",
+        report_dir / "vadr" / f"{report_dir.name}.vadr.gff3",
+    ]
+    gff_path = next((path for path in gff_candidates if path.is_file()), None)
+    if gff_path is None:
+        vadr_root = report_dir / "vadr"
+        if vadr_root.is_dir():
+            gff_path = next(iter(sorted(vadr_root.glob("*.vadr.gff3"))), None)
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file()):
+        return {"status": "empty"}
+    payload = {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "viewer_label": "Orthohantavirus 参考比对视图",
+        "note": "展示自动选择的 Orthohantavirus 最优参考序列比对结果，可结合 broad 筛选和 L/M/S 三片段证据一起查看。",
+    }
+    if gff_path and gff_path.is_file() and gff_path.stat().st_size > 0:
+        payload["gff_asset"] = str(gff_path.relative_to(report_dir))
+    return payload
+
+
+def _discover_astroviridae_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_candidates = [
+        report_dir / "ref" / "genes.gff",
+        report_dir / "vadr" / f"{report_dir.name}.vadr.gff3",
+    ]
+    gff_path = next((path for path in gff_candidates if path.is_file()), None)
+    if gff_path is None:
+        vadr_root = report_dir / "vadr"
+        if vadr_root.is_dir():
+            gff_path = next(iter(sorted(vadr_root.glob("*.vadr.gff3"))), None)
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file()):
+        return {"status": "empty"}
+    payload = {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "viewer_label": "Astrovirus 参考比对视图",
+        "note": "展示自动选择的 Astrovirus 最优参考序列比对结果；若存在注释文件会一并加载基因轨道。",
+    }
+    if gff_path and gff_path.is_file() and gff_path.stat().st_size > 0:
+        payload["gff_asset"] = str(gff_path.relative_to(report_dir))
+    return payload
+
+
+def _discover_rhinovirus_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_path = report_dir / "ref" / "genes.gff"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file() and gff_path.is_file()):
+        return {"status": "empty"}
+    return {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "gff_asset": str(gff_path.relative_to(report_dir)),
+        "viewer_label": "Rhinovirus 参考比对视图",
+        "note": "展示自动选择的 Rhinovirus 最优参考序列比对结果，可与上方突变位点表联动查看。",
+    }
+
+
+def _discover_seasonal_hcov_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_path = report_dir / "ref" / "genes.gff"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file() and gff_path.is_file()):
+        return {"status": "empty"}
+    return {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "gff_asset": str(gff_path.relative_to(report_dir)),
+        "viewer_label": "季节性冠状病毒参考比对视图",
+        "note": "展示自动选择的季节性冠状病毒最优参考序列比对结果，可与上方突变位点和 S 基因系统树联动查看。",
+    }
+
+
+def _discover_hadv_igv_assets(report_dir: Path) -> dict:
+    if not report_dir.is_dir():
+        return {"status": "empty"}
+    reference_fasta = report_dir / "genomes" / "ref.fa"
+    reference_fai = report_dir / "genomes" / "ref.fa.fai"
+    bam_path = report_dir / "ref.mapping.bam"
+    bai_path = report_dir / "ref.mapping.bam.bai"
+    gff_path = report_dir / "ref" / "genes.gff"
+    if not (reference_fasta.is_file() and reference_fai.is_file() and bam_path.is_file() and bai_path.is_file()):
+        return {"status": "empty"}
+    payload = {
+        "status": "ready",
+        "reference_asset": str(reference_fasta.relative_to(report_dir)),
+        "reference_index_asset": str(reference_fai.relative_to(report_dir)),
+        "bam_asset": str(bam_path.relative_to(report_dir)),
+        "bam_index_asset": str(bai_path.relative_to(report_dir)),
+        "viewer_label": "HAdV 参考比对视图",
+        "note": "展示自动选择的 HAdV 最优参考序列比对结果，可与上方突变位点表联动查看。",
+    }
+    if gff_path.is_file():
+        payload["gff_asset"] = str(gff_path.relative_to(report_dir))
+    return payload
+
+
 def _read_checkm2_quality(path: Path) -> dict:
     raw = _read_tsv_rows(path)
     if not raw["columns"]:
@@ -1884,6 +21505,324 @@ def _read_checkm2_quality(path: Path) -> dict:
             trimmed.append(value)
         rows.append(trimmed)
     return {"columns": columns, "rows": rows}
+
+
+def _bin_quality_tier(completeness: float | None, contamination: float | None) -> str:
+    comp = float(completeness or 0.0)
+    cont = float(contamination or 0.0)
+    if comp >= 90 and cont <= 5:
+        return "高质量"
+    if comp >= 50 and cont <= 10:
+        return "中质量"
+    return "低质量"
+
+
+def _build_binning_quality_section(path: Path) -> dict:
+    raw = _read_tsv_rows(path)
+    if not raw["columns"] or not raw["rows"]:
+        return {"status": "empty", "summary": {}, "charts": {}, "table": {"columns": [], "rows": []}}
+    name_map = _read_binning_name_map(path.parent.parent)
+    records: list[dict[str, object]] = []
+    for row in raw["rows"]:
+        record = {raw["columns"][index]: row[index] if index < len(row) else "" for index in range(len(raw["columns"]))}
+        completeness = _safe_float(record.get("Completeness"))
+        contamination = _safe_float(record.get("Contamination"))
+        genome_size = _safe_int(record.get("Genome_Size"))
+        total_contigs = _safe_int(record.get("Total_Contigs"))
+        contig_n50 = _safe_int(record.get("Contig_N50"))
+        gc_content = _safe_float(record.get("GC_Content"))
+        tier = _bin_quality_tier(completeness, contamination)
+        records.append(
+            {
+                "bin_id": name_map.get(str(record.get("Name") or "").strip(), str(record.get("Name") or "").strip()),
+                "completeness": completeness,
+                "contamination": contamination,
+                "tier": tier,
+                "genome_size": genome_size,
+                "total_contigs": total_contigs,
+                "contig_n50": contig_n50,
+                "gc_content": gc_content,
+                "coding_density": _safe_float(record.get("Coding_Density")),
+                "coding_sequences": _safe_int(record.get("Total_Coding_Sequences")),
+                "model": str(record.get("Completeness_Model_Used") or "").strip(),
+                "notes": str(record.get("Additional_Notes") or "").strip(),
+            }
+        )
+    records = [item for item in records if item.get("bin_id")]
+    if not records:
+        return {"status": "empty", "summary": {}, "charts": {}, "table": {"columns": [], "rows": []}}
+
+    completeness_buckets = [
+        ("<50", lambda v: v is not None and v < 50),
+        ("50-70", lambda v: v is not None and 50 <= v < 70),
+        ("70-90", lambda v: v is not None and 70 <= v < 90),
+        ("≥90", lambda v: v is not None and v >= 90),
+    ]
+    contamination_buckets = [
+        ("0-5", lambda v: v is not None and 0 <= v <= 5),
+        ("5-10", lambda v: v is not None and 5 < v <= 10),
+        ("10-20", lambda v: v is not None and 10 < v <= 20),
+        (">20", lambda v: v is not None and v > 20),
+    ]
+    quality_counts = {"高质量": 0, "中质量": 0, "低质量": 0}
+    for item in records:
+        quality_counts[str(item["tier"])] += 1
+
+    summary = {
+        "total_bins": len(records),
+        "hq_bins": quality_counts["高质量"],
+        "mq_bins": quality_counts["中质量"],
+        "lq_bins": quality_counts["低质量"],
+        "avg_completeness": round(sum(float(item["completeness"] or 0.0) for item in records) / len(records), 2),
+        "avg_contamination": round(sum(float(item["contamination"] or 0.0) for item in records) / len(records), 2),
+    }
+    charts = {
+        "completeness": {
+            "label": "bin 完整性分布",
+            "x_label": "完整性区间",
+            "y_label": "bin 数量",
+            "x_values": [label for label, _ in completeness_buckets],
+            "points": [sum(1 for item in records if predicate(item["completeness"])) for label, predicate in completeness_buckets],
+        },
+        "contamination": {
+            "label": "bin 污染率分布",
+            "x_label": "污染率区间",
+            "y_label": "bin 数量",
+            "x_values": [label for label, _ in contamination_buckets],
+            "points": [sum(1 for item in records if predicate(item["contamination"])) for label, predicate in contamination_buckets],
+        },
+        "quality_tier": {
+            "label": "bin 质量分层",
+            "x_label": "质量等级",
+            "y_label": "bin 数量",
+            "x_values": ["高质量", "中质量", "低质量"],
+            "points": [quality_counts["高质量"], quality_counts["中质量"], quality_counts["低质量"]],
+        },
+    }
+    table_columns = ["Bin名称", "质量等级", "完整性", "污染率", "基因组大小", "Contig总数", "Contig N50", "GC含量", "编码密度", "编码序列数", "完整性模型", "附加说明"]
+    table_rows: list[list[str]] = []
+    for item in records:
+        gc_value = item["gc_content"]
+        gc_display = "-" if gc_value is None else (f"{float(gc_value) * 100:.2f}%" if float(gc_value) <= 1 else f"{float(gc_value):.2f}%")
+        density_value = item["coding_density"]
+        density_display = "-" if density_value is None else (f"{float(density_value) * 100:.2f}%" if float(density_value) <= 1 else f"{float(density_value):.2f}%")
+        table_rows.append(
+            [
+                str(item["bin_id"]),
+                str(item["tier"]),
+                "-" if item["completeness"] is None else f"{float(item['completeness']):.2f}%",
+                "-" if item["contamination"] is None else f"{float(item['contamination']):.2f}%",
+                _human_bp(item["genome_size"]) if item["genome_size"] else "-",
+                str(item["total_contigs"] or "-"),
+                str(item["contig_n50"] or "-"),
+                gc_display,
+                density_display,
+                str(item["coding_sequences"] or "-"),
+                str(item["model"] or "-"),
+                str(item["notes"] or "-"),
+            ]
+        )
+    return {
+        "status": "ready",
+        "summary": summary,
+        "charts": charts,
+        "table": {"columns": table_columns, "rows": table_rows},
+    }
+
+
+def _parse_gtdb_classification(value: str) -> dict[str, str]:
+    result = {"domain": "-", "phylum": "-", "class": "-", "order": "-", "family": "-", "genus": "-", "species": "-"}
+    for part in str(value or "").split(";"):
+        text = part.strip()
+        if not text or "__" not in text:
+            continue
+        prefix, label = text.split("__", 1)
+        label = label.strip() or "-"
+        mapping = {
+            "d": "domain",
+            "p": "phylum",
+            "c": "class",
+            "o": "order",
+            "f": "family",
+            "g": "genus",
+            "s": "species",
+        }
+        target = mapping.get(prefix.strip().lower())
+        if target:
+            result[target] = label
+    return result
+
+
+def _read_binning_name_map(base_dir: Path) -> dict[str, str]:
+    raw = _read_tsv_rows(base_dir / "binning_name.tsv")
+    columns = raw.get("columns") or []
+    rows = raw.get("rows") or []
+    if not columns or not rows or "oldname" not in columns or "newname" not in columns:
+        return {}
+    old_index = columns.index("oldname")
+    new_index = columns.index("newname")
+    mapping: dict[str, str] = {}
+    for row in rows:
+        old_name = str(row[old_index] if old_index < len(row) else "").strip()
+        new_name = str(row[new_index] if new_index < len(row) else "").strip()
+        if old_name and new_name:
+            mapping[old_name] = new_name
+    return mapping
+
+
+def _build_binning_taxonomy_section(path: Path) -> dict:
+    raw = _read_tsv_rows(path)
+    if not raw["columns"] or not raw["rows"]:
+        return {"status": "empty", "summary": {}, "charts": {}, "table": {"columns": [], "rows": []}}
+    name_map = _read_binning_name_map(path.parent.parent)
+    records: list[dict[str, str]] = []
+    for row in raw["rows"]:
+        record = {raw["columns"][index]: row[index] if index < len(row) else "" for index in range(len(raw["columns"]))}
+        lineage = _parse_gtdb_classification(str(record.get("classification") or ""))
+        original_bin_id = str(record.get("user_genome") or "").strip()
+        records.append(
+            {
+                "bin_id": name_map.get(original_bin_id, original_bin_id),
+                "domain": lineage["domain"],
+                "phylum": lineage["phylum"],
+                "genus": lineage["genus"],
+                "species": lineage["species"],
+                "classification": str(record.get("classification") or "").strip(),
+                "reference": str(record.get("closest_genome_reference") or "").strip() or "-",
+                "ani": str(record.get("closest_genome_ani") or "").strip() or "-",
+                "af": str(record.get("closest_genome_af") or "").strip() or "-",
+                "method": str(record.get("classification_method") or "").strip() or "-",
+                "warning": str(record.get("warnings") or "").strip() or "-",
+            }
+        )
+    records = [item for item in records if item.get("bin_id")]
+    if not records:
+        return {"status": "empty", "summary": {}, "charts": {}, "table": {"columns": [], "rows": []}}
+
+    def top_counts(key: str, limit: int = 8) -> tuple[list[str], list[int]]:
+        counts: dict[str, int] = {}
+        for item in records:
+            label = str(item.get(key) or "-").strip() or "-"
+            counts[label] = counts.get(label, 0) + 1
+        ranked = sorted(counts.items(), key=lambda x: (-x[1], x[0]))[:limit]
+        return [name for name, _ in ranked], [count for _, count in ranked]
+
+    phylum_labels, phylum_counts = top_counts("phylum", 8)
+    genus_labels, genus_counts = top_counts("genus", 8)
+    method_labels, method_counts = top_counts("method", 6)
+    classified_count = sum(1 for item in records if str(item.get("species") or "-") not in {"-", "Unclassified"})
+    summary = {
+        "total_bins": len(records),
+        "classified_bins": classified_count,
+        "unclassified_bins": len(records) - classified_count,
+        "top_phylum": phylum_labels[0] if phylum_labels else "-",
+        "top_genus": genus_labels[0] if genus_labels else "-",
+    }
+    charts = {
+        "phylum": {
+            "label": "bin 门水平分布",
+            "x_label": "门",
+            "y_label": "bin 数量",
+            "x_values": phylum_labels,
+            "points": phylum_counts,
+        },
+        "genus": {
+            "label": "bin 属水平分布",
+            "x_label": "属",
+            "y_label": "bin 数量",
+            "x_values": genus_labels,
+            "points": genus_counts,
+        },
+        "method": {
+            "label": "GTDB-Tk 分类方法统计",
+            "x_label": "分类方法",
+            "y_label": "bin 数量",
+            "x_values": method_labels,
+            "points": method_counts,
+        },
+    }
+    table_columns = ["Bin名称", "门", "属", "种", "参考基因组", "ANI", "AF", "分类方法", "完整分类结果", "警告信息"]
+    table_rows = [
+        [
+            item["bin_id"],
+            item["phylum"],
+            item["genus"],
+            item["species"],
+            item["reference"],
+            item["ani"],
+            item["af"],
+            item["method"],
+            item["classification"] or "-",
+            item["warning"],
+        ]
+        for item in records
+    ]
+    return {
+        "status": "ready",
+        "summary": summary,
+        "charts": charts,
+        "table": {"columns": table_columns, "rows": table_rows},
+    }
+
+
+def _build_meta_viral_assembly_section(base_dir: Path) -> dict:
+    summary_raw = _read_tsv_rows(base_dir / "viral_summary.tsv")
+    contig_table = _read_tsv_rows(base_dir / "viral_contig_summary.tsv")
+    retained_summary = _read_fasta_assembly_summary(base_dir / "viral_retained_contigs.fa")
+    raw_contigs_summary = _read_fasta_assembly_summary(base_dir / "megahit_output" / "final.contigs.fa")
+    if not contig_table["columns"] and not summary_raw["rows"] and raw_contigs_summary.get("status") == "empty":
+        return {"status": "empty", "summary": {}, "table": {"columns": [], "rows": []}}
+
+    summary_map: dict[str, str] = {}
+    for row in summary_raw.get("rows", []):
+        if len(row) >= 2:
+            summary_map[str(row[0]).strip()] = str(row[1]).strip()
+
+    total_contigs = _safe_int(summary_map.get("病毒候选contig数"))
+    retained_contigs = _safe_int(summary_map.get("最终保留contig数"))
+    retained_length = _safe_int(summary_map.get("总保留长度"))
+    note = str(summary_map.get("说明") or "").strip()
+    rows = contig_table.get("rows") or []
+    kept_rows = [row for row in rows if len(row) >= 11 and str(row[10]).strip().lower() == "yes"]
+    quality_index = contig_table["columns"].index("checkv_quality") if "checkv_quality" in contig_table["columns"] else -1
+    best_quality = "-"
+    if quality_index >= 0 and kept_rows:
+        qualities = [str(row[quality_index]).strip() for row in kept_rows if quality_index < len(row) and str(row[quality_index]).strip()]
+        for label in ["Complete", "High-quality", "Medium-quality", "Low-quality", "Not-determined"]:
+            if label in qualities:
+                best_quality = label
+                break
+    summary = {
+        "candidate_contigs": total_contigs if total_contigs is not None else len(rows),
+        "retained_contigs": retained_contigs if retained_contigs is not None else len(kept_rows),
+        "retained_length": retained_length if retained_length is not None else retained_summary.get("total_length"),
+        "raw_contigs": raw_contigs_summary.get("contig_count"),
+        "best_quality": best_quality,
+        "note": note or "-",
+    }
+    display_columns = {
+        "contig_id": "Contig",
+        "contig_length": "长度",
+        "virsorter2_score": "VirSorter2得分",
+        "virsorter2_group": "病毒组别",
+        "hallmark": "Hallmark基因",
+        "viral_genes": "病毒基因数",
+        "host_genes": "宿主基因数",
+        "checkv_quality": "CheckV质量",
+        "completeness": "完整性",
+        "contamination": "污染率",
+        "retained": "是否保留",
+        "retention_reason": "保留依据",
+    }
+    if contig_table["columns"]:
+        remapped_columns = [display_columns.get(column, column) for column in contig_table["columns"]]
+    else:
+        remapped_columns = []
+    return {
+        "status": "ready",
+        "summary": summary,
+        "table": {"columns": remapped_columns, "rows": rows},
+    }
 
 
 def _read_fastp_metrics(path: Path) -> dict:
@@ -1992,7 +21931,23 @@ def _human_bp(value: object) -> str:
     return f"{scaled:.2f} {unit}"
 
 
+def _coerce_percent_value(value: object) -> float | None:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return None
+    if 0 <= numeric <= 1:
+        return round(numeric * 100, 2)
+    return round(numeric, 2)
+
+
 def _display_percent(value: object) -> str:
+    numeric = _coerce_percent_value(value)
+    if numeric is None:
+        return "--"
+    return f"{numeric:.2f}%"
+
+
+def _display_percent_points(value: object) -> str:
     numeric = _safe_float(value)
     if numeric is None:
         return "--"
@@ -2191,7 +22146,7 @@ window.addEventListener('DOMContentLoaded', function () {{
   var backButton = document.getElementById('portal-result-float-back');
   if (backButton) {{
     backButton.addEventListener('click', function () {{
-      window.location.href = '/?tab=queue'
+      window.location.href = '/workstation?tab=queue'
     }});
   }}
 }});
@@ -2233,7 +22188,7 @@ def _build_result_placeholder_page(task: dict) -> str:
 </head>
 <body>
   <div class="bar">
-    <div class="left"><button onclick="window.location.href='/?tab=queue'">返回任务列表</button><strong>{title}</strong></div>
+    <div class="left"><button onclick="window.location.href='/workstation?tab=queue'">返回任务列表</button><strong>{title}</strong></div>
     <div class="status">{status}</div>
   </div>
   <div class="body">当前没有可展示的结果页面。</div>

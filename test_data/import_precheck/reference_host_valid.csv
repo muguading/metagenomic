@@ -1,0 +1,2 @@
+host_name,genome_name,taxid,source_accession,source_label,fasta_path,description
+Mus musculus,TEST_GRCm39_FRAGMENT,10090,TEST_HOST_MOUSE,批量导入测试,test_data/import_precheck/references/host_mouse_test.fa,用于测试宿主参考基因组批量导入预检

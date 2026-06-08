@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "skills": {
+    "antv-s2-expert": {
+      "source": "antvis/chart-visualization-skills",
+      "sourceType": "github",
+      "computedHash": "f5cc1f303a733b031fd046019c3ab523068aeec6b7d9633dc8f8da65fc5b679b"
+    },
+    "antv-skills-maintainer": {
+      "source": "antvis/chart-visualization-skills",
+      "sourceType": "github",
+      "computedHash": "7fd6eed1c2247370a2c38ab0b90d1519aa166cebf836da6fb46da5fd8ee48e38"
+    },
+    "chart-visualization": {
+      "source": "antvis/chart-visualization-skills",
+      "sourceType": "github",
+      "computedHash": "27a656de2b14e537b6f3a9ef0237bcfb8ded8031fe5711da540c17bc9935f342"
+    },
+    "icon-retrieval": {
+      "source": "antvis/chart-visualization-skills",
+      "sourceType": "github",
+      "computedHash": "c0ce318f39a35870fd49efa2b9871b7d059c2c747f4c34fe330af53efe10764d"
+    },
+    "infographic-creator": {
+      "source": "antvis/chart-visualization-skills",
+      "sourceType": "github",
+      "computedHash": "28d634f32712ca06aec83497aa3aef1fdc591d12845f464dd43c29d0ac0769f2"
+    },
+    "narrative-text-visualization": {
+      "source": "antvis/chart-visualization-skills",
+      "sourceType": "github",
+      "computedHash": "eda161335a1d910121f1e8af1b8614aab68e6a47cef5214ddfe5b7c6e97568cb"
+    }
+  }
+}

@@ -4,15 +4,27 @@ import json
 import logging
 import math
 import os
+import signal
+import gzip
+import shlex
 import shutil
 import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pandas as pd
 
+from metagenomic_refactor.common import conda_run_command
 from metagenomic_refactor.context import get_runtime_context
+
+QC_FASTQC_TIMEOUT_SECONDS = int(os.environ.get("QC_FASTQC_TIMEOUT_SECONDS", "1800"))
+QC_FASTP_REPORT_TIMEOUT_SECONDS = int(os.environ.get("QC_FASTP_REPORT_TIMEOUT_SECONDS", "1800"))
+QC_FASTP_REPORT_STALL_SECONDS = int(os.environ.get("QC_FASTP_REPORT_STALL_SECONDS", "300"))
+QC_FASTP_REPORT_RETRIES = int(os.environ.get("QC_FASTP_REPORT_RETRIES", "1"))
+QC_MONITOR_INTERVAL_SECONDS = int(os.environ.get("QC_MONITOR_INTERVAL_SECONDS", "15"))
+QC_UNZIP_TIMEOUT_SECONDS = int(os.environ.get("QC_UNZIP_TIMEOUT_SECONDS", "300"))
 
 
 def get_logger(name="qc", level=logging.INFO):
@@ -24,6 +36,181 @@ def get_logger(name="qc", level=logging.INFO):
         h.setFormatter(fmt)
         logger.addHandler(h)
     return logger
+
+
+def _is_nonempty_file(path: str) -> bool:
+    return os.path.isfile(path) and os.path.getsize(path) > 0
+
+
+def _parse_base_limit(value: str) -> int:
+    text = str(value).strip().lower()
+    units = {
+        "kb": 1_000,
+        "mb": 1_000_000,
+        "gb": 1_000_000_000,
+        "k": 1_000,
+        "m": 1_000_000,
+        "g": 1_000_000_000,
+    }
+    for unit, multiplier in units.items():
+        if text.endswith(unit):
+            return int(float(text[: -len(unit)]) * multiplier)
+    return int(float(text))
+
+
+def _fastq_base_count(path: str | os.PathLike[str]) -> int:
+    raw_path = Path(path)
+    opener = gzip.open if raw_path.suffix == ".gz" else open
+    total = 0
+    with opener(raw_path, "rt", encoding="utf-8", errors="replace") as handle:
+        for index, line in enumerate(handle):
+            if index % 4 == 1:
+                total += len(line.strip())
+    return total
+
+
+def _replace_with_symlink(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+    source_path = Path(source).expanduser().resolve()
+    target_path = Path(target)
+    if target_path.exists() or target_path.is_symlink():
+        target_path.unlink()
+    target_path.symlink_to(source_path)
+
+
+def _use_rasusa_or_link(inputs: list[str], outputs: list[str], bases: str) -> None:
+    base_limit = _parse_base_limit(bases)
+    total_bases = sum(_fastq_base_count(path) for path in inputs)
+    if total_bases <= base_limit:
+        for source, target in zip(inputs, outputs):
+            _replace_with_symlink(source, target)
+        return
+
+    output_args = " ".join(f"-o {shlex.quote(output)}" for output in outputs)
+    input_args = " ".join(shlex.quote(path) for path in inputs)
+    subprocess.run(f"rasusa reads --bases {bases} {output_args} {input_args}", shell=True)
+
+
+def _log_qc_step(handle, message: str) -> None:
+    handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+    handle.flush()
+
+
+def _run_qc_logged(command: str, handle, label: str, timeout: int | None = None) -> int:
+    _log_qc_step(handle, f"START {label}: {command}")
+    process = subprocess.Popen(command, shell=True, stdout=handle, stderr=handle, start_new_session=True)
+    try:
+        exit_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            exit_code = process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            exit_code = process.wait()
+        _log_qc_step(handle, f"TIMEOUT {label}: killed after {timeout}s, exit={exit_code}")
+        return exit_code
+    _log_qc_step(handle, f"END {label}: exit={exit_code}")
+    return exit_code
+
+
+def _progress_snapshot(paths: list[str]) -> tuple[tuple[str, int, int], ...]:
+    snapshot = []
+    for raw_path in paths:
+        path = Path(raw_path)
+        try:
+            stat = path.stat()
+        except OSError:
+            snapshot.append((str(path), -1, -1))
+            continue
+        snapshot.append((str(path), stat.st_size, stat.st_mtime_ns))
+    return tuple(snapshot)
+
+
+def _terminate_process_group(process: subprocess.Popen, handle, label: str, reason: str) -> int:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        exit_code = process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        exit_code = process.wait()
+    _log_qc_step(handle, f"{reason} {label}: killed process group, exit={exit_code}")
+    return exit_code
+
+
+def _cleanup_partial_outputs(paths: list[str], handle, label: str) -> None:
+    for raw_path in paths:
+        path = Path(raw_path)
+        try:
+            if path.exists():
+                path.unlink()
+                _log_qc_step(handle, f"CLEAN {label}: removed partial {path}")
+        except OSError as exc:
+            _log_qc_step(handle, f"WARN {label}: failed to remove {path}: {exc}")
+
+
+def _run_qc_monitored(
+    command: str,
+    handle,
+    label: str,
+    watch_paths: list[str],
+    success_path: str,
+    cleanup_paths: list[str],
+    timeout: int | None,
+    stall_timeout: int,
+    retries: int,
+) -> int:
+    attempts = max(1, retries + 1)
+    last_exit = 1
+    for attempt in range(1, attempts + 1):
+        _log_qc_step(handle, f"START {label} attempt {attempt}/{attempts}: {command}")
+        process = subprocess.Popen(command, shell=True, stdout=handle, stderr=handle, start_new_session=True)
+        start_time = time.monotonic()
+        last_change_time = start_time
+        last_snapshot = _progress_snapshot(watch_paths)
+        stalled = False
+        timed_out = False
+        while True:
+            exit_code = process.poll()
+            if exit_code is not None:
+                last_exit = exit_code
+                break
+            time.sleep(max(1, QC_MONITOR_INTERVAL_SECONDS))
+            current_snapshot = _progress_snapshot(watch_paths)
+            if current_snapshot != last_snapshot:
+                last_snapshot = current_snapshot
+                last_change_time = time.monotonic()
+            if _is_nonempty_file(success_path):
+                continue
+            now = time.monotonic()
+            if timeout and now - start_time > timeout:
+                timed_out = True
+                last_exit = _terminate_process_group(process, handle, label, f"TIMEOUT after {timeout}s")
+                break
+            if stall_timeout and now - last_change_time > stall_timeout:
+                stalled = True
+                last_exit = _terminate_process_group(process, handle, label, f"STALL after {stall_timeout}s without output growth")
+                break
+        if _is_nonempty_file(success_path):
+            _log_qc_step(handle, f"END {label} attempt {attempt}/{attempts}: exit={last_exit}, success={success_path}")
+            return last_exit
+        _log_qc_step(handle, f"END {label} attempt {attempt}/{attempts}: exit={last_exit}, success missing={success_path}")
+        if attempt < attempts and (stalled or timed_out or last_exit != 0):
+            _cleanup_partial_outputs(cleanup_paths, handle, label)
+            continue
+        return last_exit
+    return last_exit
 
 
 def safe_read_json(path: str, logger: logging.Logger) -> Optional[Dict[str, Any]]:
@@ -78,7 +265,6 @@ def normalize_summary_txt(path: str, logger: logging.Logger):
     if not os.path.exists(path):
         logger.warning(f"summary.txt not found: {path}")
         return
-
     try:
         df = pd.read_table(path, names=["status", "names", "tt"])
         if df.shape[0] == 0:
@@ -93,6 +279,24 @@ def normalize_summary_txt(path: str, logger: logging.Logger):
         df.to_csv(path, sep="\t", index=False, header=False)
     except Exception as e:
         logger.error(f"Normalize summary.txt failed: {path} ({e})")
+
+
+def resolve_hostile_index_prefix(raw_value: str) -> str:
+    value = str(raw_value or "").strip()
+    if not value or value == "norm":
+        return ""
+    if value.endswith(".mmi"):
+        return value[:-4]
+    return value
+
+
+def hostile_index_for_minimap2(raw_value: str) -> str:
+    prefix = resolve_hostile_index_prefix(raw_value)
+    return f"{prefix}.mmi" if prefix else ""
+
+
+def hostile_index_for_bowtie2(raw_value: str) -> str:
+    return resolve_hostile_index_prefix(raw_value)
 
 
 def to_gb_str(x: Any) -> str:
@@ -289,10 +493,7 @@ def ngs_qc(Pre):
 def QC_func(inf, fq1, fq2, minq, minl, Pre, rnalib, threads, method):
     runtime = get_runtime_context()
     if inf:
-        if method != "meta":
-            subprocess.run(f"rasusa reads --bases 2gb -o {Pre}.sub.fastq {inf}", shell=True)
-        else:
-            subprocess.run(f"rasusa reads --bases 20gb -o {Pre}.sub.fastq {inf}", shell=True)
+        _use_rasusa_or_link([str(inf)], [f"{Pre}.sub.fastq"], "2gb" if method != "meta" else "20gb")
         subprocess.run(
             f"""fastp --in1 {Pre}.sub.fastq \
                     --out1 {Pre}.clean.fastq \
@@ -313,8 +514,9 @@ def QC_func(inf, fq1, fq2, minq, minl, Pre, rnalib, threads, method):
         if runtime.rmhost == "norm":
             subprocess.run(f"ln -s  {Pre}.filter.fastq {Pre}.rmhost.fastq", shell=True)
         else:
+            hostile_index = hostile_index_for_minimap2(runtime.rmhost)
             subprocess.run(
-                f"/home/dell/miniconda3/bin/conda run -n hostile hostile  clean --fastq1 {Pre}.filter.fastq --threads {threads} --aligner minimap2 --index /data/deploy/meta_new/Database/Host_Ref/hostile/human-t2t-hla.argos-bacteria-985_rs-viral-202401_ml-phage-202401.mmi > rmcont.json",
+                f"{conda_run_command('host_filter', f'hostile  clean --fastq1 {Pre}.filter.fastq --threads {threads} --aligner minimap2 --index {hostile_index}')} > rmcont.json",
                 shell=True,
             )
             subprocess.run(f"seqkit seq {Pre}.filter.clean.fastq.gz > {Pre}.rmhost.fastq", shell=True)
@@ -385,10 +587,11 @@ def QC_func(inf, fq1, fq2, minq, minl, Pre, rnalib, threads, method):
 
     if fq1 and fq2:
         if not os.path.isfile(f"{Pre}_sub.R1.fastq") or not os.path.isfile(f"{Pre}_sub.R2.fastq"):
-            if method != "meta":
-                subprocess.run(f"rasusa reads --bases 10gb -o {Pre}_sub.R1.fastq -o {Pre}_sub.R2.fastq {fq1} {fq2}", shell=True)
-            else:
-                subprocess.run(f"rasusa reads --bases 100gb -o {Pre}_sub.R1.fastq -o {Pre}_sub.R2.fastq {fq1} {fq2}", shell=True)
+            _use_rasusa_or_link(
+                [str(fq1), str(fq2)],
+                [f"{Pre}_sub.R1.fastq", f"{Pre}_sub.R2.fastq"],
+                "10gb" if method != "meta" else "100gb",
+            )
         subprocess.run(f"seqkit stat -T {Pre}_sub.R1.fastq {Pre}_sub.R2.fastq > raw_summary.tsv", shell=True)
         if not os.path.isfile(f"{Pre}.fastp2.json"):
             subprocess.run(
@@ -418,26 +621,42 @@ def QC_func(inf, fq1, fq2, minq, minl, Pre, rnalib, threads, method):
                     subprocess.run(f"ln -s {Pre}_t.R1.fastq.gz  {Pre}.R1.fastq.gz;ln -s {Pre}_t.R2.fastq.gz  {Pre}.R2.fastq.gz", shell=True)
                 else:
                     if rnalib == "0":
-                        subprocess.run(f"/home/dell/miniconda3/bin/conda run -n hostile hostile clean --fastq1 {Pre}_t.R1.fastq.gz --threads {threads} --fastq2 {Pre}_t.R2.fastq.gz --aligner bowtie2 --index /data/deploy/meta_new/Database/Host_Ref/hostile/human-t2t-hla.argos-bacteria-985_rs-viral-202401_ml-phage-202401 > rmcont.json", shell=True, stdout=f, stderr=f)
+                        hostile_index = hostile_index_for_bowtie2(runtime.rmhost)
+                        subprocess.run(f"{conda_run_command('host_filter', f'hostile clean --fastq1 {Pre}_t.R1.fastq.gz --threads {threads} --fastq2 {Pre}_t.R2.fastq.gz --aligner bowtie2 --index {hostile_index}')} > rmcont.json", shell=True, stdout=f, stderr=f)
                         subprocess.run(f"mv  {Pre}_t.R1.clean_1.fastq.gz  {Pre}.R1.fastq.gz", shell=True)
                         subprocess.run(f"mv  {Pre}_t.R2.clean_2.fastq.gz  {Pre}.R2.fastq.gz", shell=True)
                     else:
                         print("测试rna建库")
                         if not os.path.isfile(f"kneaddata_out/{Pre}_t.R1_kneaddata_paired_1.fastq"):
-                            subprocess.run(f"/home/dell/miniconda3/bin/conda run -n kneaddata kneaddata --bypass-trf --bypass-trim -i1 {Pre}_t.R1.fastq.gz  -i2 {Pre}_t.R2.fastq.gz -o kneaddata_out -t {threads} -db /data/Ref/human_hg38_refMrna -db /data/Ref/SILVA_128_LSUParc_SSUParc_ribosomal_RNA", shell=True, stdout=f, stderr=f)
+                            subprocess.run(conda_run_command("host_filter", f"kneaddata --bypass-trf --bypass-trim -i1 {Pre}_t.R1.fastq.gz  -i2 {Pre}_t.R2.fastq.gz -o kneaddata_out -t {threads} -db /data/Ref/human_hg38_refMrna -db /data/Ref/SILVA_128_LSUParc_SSUParc_ribosomal_RNA"), shell=True, stdout=f, stderr=f)
                         subprocess.run(f"pigz -p 10 kneaddata_out/{Pre}_t.R1_kneaddata_paired_1.fastq -c > {Pre}.R1.fastq.gz", shell=True, stdout=f, stderr=f)
                         subprocess.run(f"pigz -p 10 kneaddata_out/{Pre}_t.R1_kneaddata_paired_2.fastq -c > {Pre}.R2.fastq.gz", shell=True, stdout=f, stderr=f)
             if not os.path.isfile("R1_qc/raw.R1_fastqc.html"):
-                subprocess.run(f"fastqc raw.R1.fastq {Pre}.R1.fastq.gz -o R1_qc -t {threads}", shell=True, stdout=f, stderr=f)
-                subprocess.run(f"fastqc raw.R2.fastq {Pre}.R2.fastq.gz -o R2_qc -t {threads}", shell=True, stdout=f, stderr=f)
-                subprocess.run("unzip -o 'R1_qc/*.zip' ", shell=True, stdout=f, stderr=f)
-                subprocess.run("unzip -o 'R2_qc/*.zip' ", shell=True, stdout=f, stderr=f)
-            subprocess.run(f"fastp -i {Pre}.R1.fastq.gz -I {Pre}.R2.fastq.gz -o tt.1.fq -O tt.2.fq -w {threads} --json {Pre}.final.json", shell=True, stdout=f, stderr=f)
-            subprocess.run("rm tt.*.fq", shell=True)
+                _run_qc_logged(f"fastqc raw.R1.fastq {Pre}.R1.fastq.gz -o R1_qc -t {threads}", f, "fastqc R1", timeout=QC_FASTQC_TIMEOUT_SECONDS)
+                _run_qc_logged(f"fastqc raw.R2.fastq {Pre}.R2.fastq.gz -o R2_qc -t {threads}", f, "fastqc R2", timeout=QC_FASTQC_TIMEOUT_SECONDS)
+                _run_qc_logged("unzip -o 'R1_qc/*.zip' ", f, "unzip R1 fastqc", timeout=QC_UNZIP_TIMEOUT_SECONDS)
+                _run_qc_logged("unzip -o 'R2_qc/*.zip' ", f, "unzip R2 fastqc", timeout=QC_UNZIP_TIMEOUT_SECONDS)
+            else:
+                _log_qc_step(f, "SKIP fastqc: R1_qc/raw.R1_fastqc.html exists")
+            if not _is_nonempty_file(f"{Pre}.final.json"):
+                _run_qc_monitored(
+                    f"fastp -i {Pre}.R1.fastq.gz -I {Pre}.R2.fastq.gz -o tt.1.fq -O tt.2.fq -w {threads} --json {Pre}.final.json",
+                    f,
+                    "final fastp PE",
+                    watch_paths=["tt.1.fq", "tt.2.fq", f"{Pre}.final.json"],
+                    success_path=f"{Pre}.final.json",
+                    cleanup_paths=["tt.1.fq", "tt.2.fq", f"{Pre}.final.json"],
+                    timeout=QC_FASTP_REPORT_TIMEOUT_SECONDS,
+                    stall_timeout=QC_FASTP_REPORT_STALL_SECONDS,
+                    retries=QC_FASTP_REPORT_RETRIES,
+                )
+                subprocess.run("rm -f tt.*.fq", shell=True, stdout=f, stderr=f)
+            else:
+                _log_qc_step(f, f"SKIP final fastp PE: {Pre}.final.json exists")
 
     elif not fq2 and fq1:
         if not os.path.isfile(f"{Pre}_sub.R1.fastq"):
-            subprocess.run(f"rasusa reads --bases 20gb -o {Pre}_sub.R1.fastq  {fq1}", shell=True)
+            _use_rasusa_or_link([str(fq1)], [f"{Pre}_sub.R1.fastq"], "20gb")
         subprocess.run(f"seqkit stat -T {Pre}_sub.R1.fastq > raw_summary.tsv", shell=True)
         if not os.path.isfile(f"{Pre}_t.R1.fastq.gz"):
             subprocess.run(
@@ -461,17 +680,34 @@ def QC_func(inf, fq1, fq2, minq, minl, Pre, rnalib, threads, method):
                 subprocess.run(f"ln -s {Pre}_t.R1.fastq.gz {Pre}.R1.fastq.gz", shell=True)
             else:
                 if rnalib == "0":
-                    subprocess.run(f"/home/dell/miniconda3/bin/conda run -n hostile hostile clean --fastq1 {Pre}_t.R1.fastq.gz --threads {threads}  --aligner bowtie2 --index /data/deploy/meta_new/Database/Host_Ref/hostile/human-t2t-hla.argos-bacteria-985_rs-viral-202401_ml-phage-202401 > rmcont.json", shell=True, stdout=f, stderr=f)
+                    hostile_index = hostile_index_for_bowtie2(runtime.rmhost)
+                    subprocess.run(f"{conda_run_command('host_filter', f'hostile clean --fastq1 {Pre}_t.R1.fastq.gz --threads {threads}  --aligner bowtie2 --index {hostile_index}')} > rmcont.json", shell=True, stdout=f, stderr=f)
                     subprocess.run(f"mv  {Pre}_t.R1.clean.fastq.gz  {Pre}.R1.fastq.gz", shell=True)
                 else:
                     print("测试rna建库")
                     if not os.path.isfile(f"kneaddata_out/{Pre}_t.R1_kneaddata_paired_1.fastq"):
-                        subprocess.run(f"/home/dell/miniconda3/bin/conda run -n kneaddata kneaddata --bypass-trf --bypass-trim -i1 {Pre}_t.R1.fastq.gz  -o kneaddata_out -t {threads} -db /data/Ref/human_hg38_refMrna -db /data/Ref/SILVA_128_LSUParc_SSUParc_ribosomal_RNA", shell=True, stdout=f, stderr=f)
+                        subprocess.run(conda_run_command("host_filter", f"kneaddata --bypass-trf --bypass-trim -i1 {Pre}_t.R1.fastq.gz  -o kneaddata_out -t {threads} -db /data/Ref/human_hg38_refMrna -db /data/Ref/SILVA_128_LSUParc_SSUParc_ribosomal_RNA"), shell=True, stdout=f, stderr=f)
                     subprocess.run(f"pigz -p 10 kneaddata_out/{Pre}_t.R1_kneaddata_paired_1.fastq -c > {Pre}.R1.fastq.gz", shell=True, stdout=f, stderr=f)
-            subprocess.run(f"fastqc raw.R1.fastq {Pre}.R1.fastq.gz -o R1_qc -t {threads}", shell=True, stdout=f, stderr=f)
-            subprocess.run("unzip -o 'R1_qc/*.zip' ", shell=True, stdout=f, stderr=f)
-            subprocess.run(f"fastp -i {Pre}.R1.fastq.gz -o tt.1.fq -w {threads} --json {Pre}.final.json", shell=True, stdout=f, stderr=f)
-            subprocess.run("rm tt.*.fq", shell=True)
+            if not os.path.isfile("R1_qc/raw.R1_fastqc.html"):
+                _run_qc_logged(f"fastqc raw.R1.fastq {Pre}.R1.fastq.gz -o R1_qc -t {threads}", f, "fastqc R1", timeout=QC_FASTQC_TIMEOUT_SECONDS)
+                _run_qc_logged("unzip -o 'R1_qc/*.zip' ", f, "unzip R1 fastqc", timeout=QC_UNZIP_TIMEOUT_SECONDS)
+            else:
+                _log_qc_step(f, "SKIP fastqc: R1_qc/raw.R1_fastqc.html exists")
+            if not _is_nonempty_file(f"{Pre}.final.json"):
+                _run_qc_monitored(
+                    f"fastp -i {Pre}.R1.fastq.gz -o tt.1.fq -w {threads} --json {Pre}.final.json",
+                    f,
+                    "final fastp SE",
+                    watch_paths=["tt.1.fq", f"{Pre}.final.json"],
+                    success_path=f"{Pre}.final.json",
+                    cleanup_paths=["tt.1.fq", f"{Pre}.final.json"],
+                    timeout=QC_FASTP_REPORT_TIMEOUT_SECONDS,
+                    stall_timeout=QC_FASTP_REPORT_STALL_SECONDS,
+                    retries=QC_FASTP_REPORT_RETRIES,
+                )
+                subprocess.run("rm -f tt.*.fq", shell=True, stdout=f, stderr=f)
+            else:
+                _log_qc_step(f, f"SKIP final fastp SE: {Pre}.final.json exists")
 
     summaryfastqc_prod(Pre)
     open("QC_ok", "w").write("已跑过")

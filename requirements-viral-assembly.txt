@@ -1,0 +1,91 @@
+# 病毒组装节点依赖清单
+#
+# 说明:
+# 1. 这不是纯 pip requirements，而是“宏基因组病毒组装节点”实际需要的软件清单。
+# 2. 新增节点流程:
+#    原始样本 reads -> kraken2/bracken 病毒域提取 -> seqkit 提取 reads
+#    -> megahit 组装 -> VirSorter2(VFind) -> CheckV(VFind) -> 结果汇总
+# 3. 当前代码位置:
+#    metagenomic_refactor/assembly.py::_run_meta_viral_assembly
+
+###############################################################################
+# Python runtime
+###############################################################################
+python>=3.10
+pandas>=2.0
+biopython>=1.80
+
+###############################################################################
+# Command-line tools required in PATH
+###############################################################################
+# 物种分类与病毒域 reads 提取
+kraken2
+bracken
+seqkit
+
+# 病毒 reads 宏基因组组装
+megahit
+
+# 病毒 contig 筛选
+virsorter2
+checkv
+
+###############################################################################
+# Databases / reference resources
+###############################################################################
+# 必需:
+# - Kraken2 database
+# - VirSorter2 database
+# - CheckV database
+#
+# 建议通过环境变量显式配置:
+#   META_KRAKEN_DB=/path/to/kraken2_db
+#   META_VIRSORTER2_DB=/path/to/virsorter2/db
+#   META_CHECKV_DB=/path/to/checkv-db
+#
+# 可选: 如果需要覆盖默认调用方式，也可以指定:
+#   META_VIRSORTER2_BIN="conda run -n VFind --no-capture-output virsorter"
+#   META_CHECKV_BIN="conda run -n VFind --no-capture-output checkv"
+
+###############################################################################
+# Suggested conda environments
+###############################################################################
+# 现有代码默认沿用以下环境约定:
+#
+# 1. BASALT environment
+#    用于 megahit 组装
+#    command used by code:
+#      conda run -n BASALT megahit ...
+#
+# 2. VirSorter2 / CheckV environment
+#    当前代码默认通过 VFind 环境调用:
+#      conda run -n VFind --no-capture-output virsorter
+#      conda run -n VFind --no-capture-output checkv
+#    如需覆盖，可改写 META_VIRSORTER2_BIN / META_CHECKV_BIN。
+#
+# 如果你希望完全按环境隔离，建议至少准备:
+#   conda create -n BASALT megahit
+#   conda create -n VFind virsorter2 checkv
+#
+# 然后可显式写入:
+#   export META_VIRSORTER2_BIN="conda run -n VFind --no-capture-output virsorter"
+#   export META_CHECKV_BIN="conda run -n VFind --no-capture-output checkv"
+
+###############################################################################
+# Recommended installation example
+###############################################################################
+# mamba create -n BASALT -c bioconda -c conda-forge megahit
+# mamba create -n VFind  -c bioconda -c conda-forge virsorter checkv
+# mamba install -n <your-main-env> -c bioconda -c conda-forge kraken2 bracken seqkit
+# python -m pip install pandas biopython
+
+###############################################################################
+# Runtime outputs produced by this node
+###############################################################################
+# viral_assembly/viral_summary.tsv
+# viral_assembly/viral_contig_summary.tsv
+# viral_assembly/viral_retained_contigs.fa
+# viral_assembly/megahit_output/final.contigs.fa
+# viral_assembly/virsorter2/final-viral-score.tsv
+# viral_assembly/checkv/contamination.tsv
+# viral_assembly/checkv/quality_summary.tsv

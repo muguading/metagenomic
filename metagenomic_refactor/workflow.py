@@ -4,12 +4,19 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 
 from metagenomic_refactor.common import format_seconds, is_fastq_input
-from metagenomic_refactor.context import get_runtime_context
+from metagenomic_refactor.context import get_runtime_context, update_runtime_context
 from metagenomic_refactor.qc import QC_func
 from metagenomic_refactor.report import combine_func
-from metagenomic_refactor.typing import level2Spe
+from metagenomic_refactor.strain_typing import level2Spe
+from metagenomic_refactor.virus_analysis import (
+    _is_hepatovirus,
+    detect_influenza_type,
+    prepare_influenza_reference_set,
+    resolve_hepatovirus_reference,
+)
 
 
 CALLBACKS = {}
@@ -42,9 +49,27 @@ def append_sample_result(pre):
         subprocess.run(f"sed -n '2p' {result_tsv} >> {runtime.ofn}/sample_result.txt", shell=True)
 
 
+def is_assembly_output_ready(pre: str, method: str) -> bool:
+    if str(method or "").strip() == "meta":
+        meta_output = "tmp_combine.fa"
+        return os.path.isfile(meta_output) and os.path.getsize(meta_output) > 0
+    final_fasta = f"{pre}.final.fasta"
+    return os.path.isfile(final_fasta) and os.path.getsize(final_fasta) > 0
+
+
 def get_flow_list():
     runtime = get_runtime_context()
-    return [x.strip() for x in runtime.runflow.split(",") if x.strip()]
+    raw_flows = [x.strip() for x in runtime.runflow.split(",") if x.strip()]
+    expanded: list[str] = []
+    for flow in raw_flows:
+        if flow == "mlst与血清型":
+            for item in ("mlst检验", "血清型检验"):
+                if item not in expanded:
+                    expanded.append(item)
+            continue
+        if flow not in expanded:
+            expanded.append(flow)
+    return expanded
 
 
 def get_read_mode(pre):
@@ -73,6 +98,51 @@ def infer_species(pre, llid):
     return 0
 
 
+def _sample_skip_flag_path(pre: str) -> str:
+    return f"{pre}.skip_remaining.txt"
+
+
+def _clear_sample_skip_flag(pre: str) -> None:
+    path = _sample_skip_flag_path(pre)
+    if os.path.isfile(path):
+        os.remove(path)
+
+
+def _read_sample_skip_reason(pre: str) -> str:
+    path = _sample_skip_flag_path(pre)
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def _is_influenza_scope() -> bool:
+    runtime = get_runtime_context()
+    species = str(runtime.species or "").strip().lower()
+    if runtime.analysis_target != "virus":
+        return False
+    if "parainfluenza" in species or "副流感" in species:
+        return False
+    return "influenza" in species or "流感" in species
+
+
+def _is_sars_cov_2_scope() -> bool:
+    runtime = get_runtime_context()
+    species = str(runtime.species or "").strip().lower()
+    if runtime.analysis_target != "virus":
+        return False
+    return (
+        species == "sars-cov-2"
+        or species == "新型冠状病毒"
+        or species == "新冠病毒"
+        or species == "新冠"
+        or "sars-cov-2" in species
+    )
+
+
 def run_fake_pipeline(pre, sam_num, all_num):
     print_progress(0, 5, sam_num, all_num, pre, "开始假流程分析")
     subprocess.run("cp -r /data1/shanghai_pip/meta_genome/fakefile/Sample1/* ./", shell=True)
@@ -92,7 +162,52 @@ def run_fake_pipeline(pre, sam_num, all_num):
 
 def run_fastq_qc_and_assembly(infile, fastq1, fastq2, threads, llid, mm, pre, ml, mq, asmtype, pts, pst, rnalib, ref, gtf, flowlist, sam_num, all_num, start_time):
     runtime = get_runtime_context()
-    if not os.path.isfile(f"{pre}.final.fasta"):
+    _clear_sample_skip_flag(pre)
+    assembly_selected = "基因组组装" in runtime.runflow
+    preidentified_species = False
+    if _is_influenza_scope():
+        if not os.path.isfile("QC_ok"):
+            QC_func(infile, fastq1, fastq2, mq, ml, pre, rnalib, threads, runtime.method)
+        if not os.path.isfile("kk2_ok"):
+            run_species_identification(pre, threads)
+        if "物种鉴定" in flowlist:
+            flowlist.remove("物种鉴定")
+        preidentified_species = True
+        if asmtype in {"shortref", "longref"}:
+            flu_result = prepare_influenza_reference_set(
+                pre,
+                runtime.species,
+                runtime.ref or ref,
+                single_fastq=infile,
+                fq1=fastq1,
+                fq2=fastq2,
+                long_type=runtime.long_type,
+                threads=threads,
+            )
+            detected_type = str(flu_result.get("influenza_type") or "Other").strip()
+            if detected_type in {"Influenza A virus", "Influenza B virus"}:
+                update_runtime_context(species=detected_type, ref=str(flu_result.get("reference_path") or "").strip())
+                ref = str(flu_result.get("reference_path") or "").strip()
+            else:
+                detected_type = "Other"
+        else:
+            detected_type = detect_influenza_type(pre, runtime.species)
+            if detected_type != "-":
+                update_runtime_context(species=detected_type)
+        if detected_type == "Other":
+            t1 = time.time()
+            runtime_text = format_seconds(t1 - start_time)
+            print_progress(1, 1, sam_num, all_num, pre, "物种鉴定结束，未判定为甲/乙流感，终止后续组装与分型", runtime_text)
+            return {"flowstep": 1, "flownum": 1, "timepoint": t1, "species_only_complete": True}
+        if detected_type in {"Influenza C virus", "Influenza D virus"}:
+            if "virus_typing" in CALLBACKS:
+                CALLBACKS["virus_typing"](pre, detected_type)
+            t1 = time.time()
+            runtime_text = format_seconds(t1 - start_time)
+            print_progress(1, 1, sam_num, all_num, pre, f"物种鉴定结束，判定为{detected_type}，跳过后续组装与分型", runtime_text)
+            return {"flowstep": 1, "flownum": 1, "timepoint": t1, "species_only_complete": True}
+
+    if not is_assembly_output_ready(pre, runtime.method):
         flownum = len(flowlist) + 1
         flowstep = 1
         if "基因组组装" in flowlist:
@@ -109,18 +224,31 @@ def run_fastq_qc_and_assembly(infile, fastq1, fastq2, threads, llid, mm, pre, ml
             else:
                 CALLBACKS["asb_func"](f"{pre}.final.fastq", 0, 0, threads, pre, llid, pts, pst, runtime.method, asmtype, ref, gtf)
 
+            skip_reason = _read_sample_skip_reason(pre)
+            if skip_reason:
+                t1 = time.time()
+                runtime_text = format_seconds(t1 - start_time)
+                print_progress(1, 1, sam_num, all_num, pre, f"基因分型支持 reads 过少，跳过当前样本：{skip_reason}", runtime_text)
+                return {"flowstep": 1, "flownum": 1, "timepoint": t1, "species_only_complete": True}
+
             if runtime.method != "meta":
                 CALLBACKS["Annotate_func"](pre, threads)
 
         t1 = time.time()
         runtime_text = format_seconds(t1 - start_time)
-        print_progress(flowstep, flownum, sam_num, all_num, pre, "数据质控&组装结束", runtime_text)
-        return flowstep, flownum, t1
+        finish_message = "数据质控&物种鉴定&组装结束" if preidentified_species else "数据质控&组装结束"
+        print_progress(flowstep, flownum, sam_num, all_num, pre, finish_message, runtime_text)
+        return {"flowstep": flowstep, "flownum": flownum, "timepoint": t1, "species_only_complete": False}
 
-    flownum = len(flowlist)
-    flowstep = 0
+    if "基因组组装" in flowlist:
+        flowlist.remove("基因组组装")
+    flownum = len(flowlist) + (1 if assembly_selected else 0) + 1
+    flowstep = 1 if assembly_selected else 0
     t1 = time.time()
-    return flowstep, flownum, t1
+    if assembly_selected:
+        runtime_text = format_seconds(t1 - start_time)
+        print_progress(flowstep, flownum, sam_num, all_num, pre, "组装结果已完成，进行后面的分析", runtime_text)
+    return {"flowstep": flowstep, "flownum": flownum, "timepoint": t1, "species_only_complete": False}
 
 
 def run_species_identification(pre, threads):
@@ -151,6 +279,7 @@ def run_species_identification(pre, threads):
 
 
 def run_fastq_flow(flow, pre, threads, llid):
+    runtime = get_runtime_context()
     if flow == "物种鉴定":
         if not os.path.isfile("kk2_ok"):
             run_species_identification(pre, threads)
@@ -161,15 +290,26 @@ def run_fastq_flow(flow, pre, threads, llid):
         CALLBACKS["AnnoFun"](pre, threads)
     elif flow == "元件预测":
         CALLBACKS["AnnoEle"](pre, threads)
+    elif flow == "病毒组装" and runtime.method == "meta":
+        CALLBACKS["meta_viral_assembly"](pre, threads)
     elif flow == "耐药与毒力":
         CALLBACKS["VFDR"](pre, threads)
-    elif flow == "mlst与血清型":
+    elif flow == "mlst检验":
         species = infer_species(pre, llid)
-        CALLBACKS["mlst_serotype"](pre, species)
+        CALLBACKS["mlst_only"](pre, species)
+    elif flow == "血清型检验":
+        species = infer_species(pre, llid)
+        CALLBACKS["serotype_only"](pre, species)
+    elif flow == "分型鉴定" and runtime.analysis_target == "virus":
+        CALLBACKS["virus_typing"](pre, runtime.species)
 
 
 def run_fastq_pipeline(infile, fastq1, fastq2, threads, llid, mm, pre, ml, mq, asmtype, all_num, sam_num, pts, pst, rnalib, ref, gtf, flowlist, start_time):
-    flowstep, flownum, _ = run_fastq_qc_and_assembly(infile, fastq1, fastq2, threads, llid, mm, pre, ml, mq, asmtype, pts, pst, rnalib, ref, gtf, flowlist, sam_num, all_num, start_time)
+    init_result = run_fastq_qc_and_assembly(infile, fastq1, fastq2, threads, llid, mm, pre, ml, mq, asmtype, pts, pst, rnalib, ref, gtf, flowlist, sam_num, all_num, start_time)
+    flowstep = int(init_result["flowstep"])
+    flownum = int(init_result["flownum"])
+    if init_result.get("species_only_complete"):
+        return
     for flow in flowlist:
         flowstep += 1
         step_start = time.time()
@@ -182,7 +322,12 @@ def run_fastq_pipeline(infile, fastq1, fastq2, threads, llid, mm, pre, ml, mq, a
         print_progress(flowstep, flownum, sam_num, all_num, pre, f"{flow}已结束", runtime_text)
 
     flowstep += 1
-    combine_func(pre)
+    try:
+        combine_func(pre)
+    except Exception as e:
+        print(f"{pre} 数据合并失败: {e}")
+        traceback.print_exc()
+        sys.stdout.flush()
     total_runtime = format_seconds(time.time() - start_time)
     if "基因组组装" in get_runtime_context().runflow:
         append_sample_result(pre)
@@ -190,6 +335,12 @@ def run_fastq_pipeline(infile, fastq1, fastq2, threads, llid, mm, pre, ml, mq, a
 
 
 def run_fasta_init(pre, threads, flowlist, sam_num, all_num, start_time):
+    if _is_sars_cov_2_scope():
+        flowlist[:] = [item for item in flowlist if item not in {"基因组组装", "物种鉴定"}]
+        rt_flag = 0
+        flowstep = 0
+        flownum = len(flowlist) + 1
+        return rt_flag, flowstep, flownum
     runtime = get_runtime_context()
     prokka_dir = f"{runtime.ofn}/fastq_analysis/{pre}/{pre}_prokka"
     if not os.path.isdir(prokka_dir):
@@ -208,15 +359,42 @@ def run_fasta_init(pre, threads, flowlist, sam_num, all_num, start_time):
 
 
 def run_fasta_flow(flow, pre, threads, llid):
-    if flow == "功能注释":
+    runtime = get_runtime_context()
+    if flow == "物种鉴定" and runtime.analysis_target == "virus":
+        if _is_sars_cov_2_scope():
+            return
+        if _is_hepatovirus(runtime.species):
+            final_fasta = f"{pre}.final.fasta"
+            selection = resolve_hepatovirus_reference(
+                pre,
+                species=runtime.species,
+                requested_ref=str(runtime.ref or "").strip(),
+                query_fasta=final_fasta,
+                threads=threads,
+            )
+            selected_ref = str(selection.get("reference_path") or "").strip()
+            selected_gtf = str(selection.get("gff_path") or "").strip() or "nogtf"
+            selected_species = str(selection.get("species_label") or runtime.species).strip() or runtime.species
+            if selected_ref:
+                update_runtime_context(ref=selected_ref, gtf=selected_gtf, species=selected_species)
+            return
+        CALLBACKS["virus_nextclade_identify"](pre, runtime.species)
+    elif flow == "功能注释":
         CALLBACKS["AnnoFun"](pre, threads)
     elif flow == "元件预测":
         CALLBACKS["AnnoEle"](pre, threads)
+    elif flow == "病毒组装" and runtime.method == "meta":
+        CALLBACKS["meta_viral_assembly"](pre, threads)
     elif flow == "耐药与毒力":
         CALLBACKS["VFDR"](pre, threads, "fasta")
-    elif flow == "mlst与血清型":
+    elif flow == "mlst检验":
         species = infer_species(pre, llid)
-        CALLBACKS["mlst_serotype"](pre, species)
+        CALLBACKS["mlst_only"](pre, species)
+    elif flow == "血清型检验":
+        species = infer_species(pre, llid)
+        CALLBACKS["serotype_only"](pre, species)
+    elif flow == "分型鉴定" and runtime.analysis_target == "virus":
+        CALLBACKS["virus_typing"](pre, runtime.species)
 
 
 def run_fasta_pipeline(infile, threads, llid, mm, pre, all_num, sam_num, flowlist, start_time):
@@ -233,7 +411,12 @@ def run_fasta_pipeline(infile, threads, llid, mm, pre, all_num, sam_num, flowlis
         print_progress(flowstep, flownum, sam_num, all_num, pre, f"{flow}已结束", runtime_text)
 
     flowstep += 1
-    combine_func(pre)
+    try:
+        combine_func(pre)
+    except Exception as e:
+        print(f"{pre} 数据合并失败: {e}")
+        traceback.print_exc()
+        sys.stdout.flush()
     total_runtime = format_seconds(time.time() - start_time)
     if rt_flag:
         append_sample_result(pre)
@@ -242,6 +425,12 @@ def run_fasta_pipeline(infile, threads, llid, mm, pre, all_num, sam_num, flowlis
 
 def main_process(infile, fastq1, fastq2, threads, llid, mm, Pre, ml, mq, asmtype, Allnum, Samnum, pts, pst, rnalib, iffake=0, ref="noref", gtf="nogtf"):
     start_time = time.time()
+    runtime = get_runtime_context()
+    update_runtime_context(
+        species=runtime.base_species or runtime.species,
+        ref=runtime.base_ref or ref,
+        gtf=runtime.base_gtf or gtf,
+    )
     if iffake:
         run_fake_pipeline(Pre, Samnum, Allnum)
         return

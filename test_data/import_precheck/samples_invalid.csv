@@ -1,0 +1,4 @@
+sample_name,final_fasta_path,species_name,collection_date,note
+TEST_SAMPLE_MISSING_FASTA,,Escherichia coli,2026-05-19,缺少 final_fasta_path，应无法通过预检
+TEST_SAMPLE_BAD_PATH,test_data/import_precheck/fasta/not_exists.final.fasta,Klebsiella pneumoniae,2026-05-19,路径不存在，应无法通过预检
+,test_data/import_precheck/fasta/sample_alpha.final.fasta,Salmonella enterica,2026-05-19,缺少 sample_name，应无法通过预检

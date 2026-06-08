@@ -1,1 +1,72 @@
+# macOS and editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Python runtime and test caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local Python environments
+.venv/
+.venv_*/
+venv/
+env/
+
+# Build, packaging, and desktop app outputs
+build/
+dist/
+target/
+*.egg-info/
+.pyinstaller-cache/
+Windows_app/
+Windows_app.zip
+linux_minimal_portal/
+病原微生物分析工作台.spec
+病原微生物分析工作台_windows.spec
+
+# Local portal/task state
+analysis_tasks/
+.portal_report_cache/
+bac_analysis_portal.sqlite3
+bac_analysis_portal/*.db
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+
+# Heavy reference databases and downloaded tool bundles
 demo_data/
+database/
+host_database/
+genome_db/
+genome_db.sqlite3
+pathogen_database/
+soft/
+public/
+snpEff/
+vadr/
+scripts/datasets_linux
+scripts/datasets_macos
+
+# Generated inputs, scratch runs, and delivery artifacts
+generated_batch_inputs/
+delivery/
+tmp/
+tmp_*/
+tmp*.fa
+testoutput/
+_Inline/
+*.zip
+~$*
+
+# Local legal/package collateral, kept outside source control
+软著材料/
+软著示例/

@@ -1,4 +1,4 @@
-#!/home/dell/miniconda3/envs/TB_ONT/bin/python
+#!/home/dell/miniconda3/envs/meta_main/bin/python
 # 规定了应使用的Python解释器的路径
 import pandas as pd
 import os
@@ -8,6 +8,11 @@ import sys
 import time
 import re
 import multiprocessing
+import warnings
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=r".*Invalid date provided.*")
+
 from metagenomic_refactor.config import build_pipeline_config
 __author__='wsh'
 __version__='1.0.0'
@@ -16,6 +21,7 @@ __version__='1.0.0'
 __date__='20260306'
 parser = argparse.ArgumentParser(description='纯菌+宏测组装分析脚本')      # 创建一个名为'纯菌+宏测组装分析脚本'的解析器（对象）。通过parser.add_argument定义命令行参数， parser.parse_args() 获取并解析传入的参数
 parser.add_argument('--input','-i',type=str,default=False,help='输入文件路径')             # -i,输入文件路径。type=str，输入的值会被解析为'字符串'
+parser.add_argument('--analysis_target','-target',type=str,default='bacteria',help='分析对象：bacteria 或 virus')
 parser.add_argument('--inputtype','-tp',type=str,default='fastq',help='输入文件类型')      # -tp,默认为fastq
 parser.add_argument('--minlongfilt','-ml',type=str,default=500,help='最短序列长度')        # -ml,默认最短长度为500
 parser.add_argument('--Qfilt','-mq',type=str,default=10,help='最小序列质量')               # -mq,默认最小序列质量10
@@ -34,7 +40,7 @@ parser.add_argument('--polish_soft','-ps',type=str,default='medaka',help='抛光
 parser.add_argument('--species','-species',type=str,default='False',help='物种信息')    # -species,默认物种信息为False
 parser.add_argument('--ifAnno','-ifanno',type=str,default='Anno',help='是否注释')         # -ifanno，默认进行注释
 parser.add_argument('--rmhost','-rmh',type=str,default='norm',help='是否去宿主')          # -rmh，默认不去宿主.norm不去宿主，其他情况去
-parser.add_argument('--runflow','-rf',type=str,default='All',help='运行节点')             # -rf，运行节点:基因组组装，物种鉴定，结构变异检测，功能注释，元件预测，耐药与毒力，mlst与血清型
+parser.add_argument('--runflow','-rf',type=str,default='All',help='运行节点')             # -rf，运行节点:基因组组装，物种鉴定，结构变异检测，功能注释，元件预测，耐药与毒力，mlst检验，血清型检验
 parser.add_argument('--abun','-abun',type=str,default='1',help='过滤阈值')             # -abum,默认过滤阈值0.85
 parser.add_argument('--rna','-rna',type=str,default='0',help='是否rna建库')              # rna为0不是rna建库。rna != 0且-rmh ！= norm，进入rna分析
 argv = parser.parse_args()   # 解析输入的参数并存储到argv中
@@ -80,12 +86,15 @@ os.chdir(ofn)              # 切换到（ofn）路径下
 from metagenomic_refactor.assembly import (
     Annotate_func,
     asb_func,
+    run_meta_viral_assembly,
 )
-from metagenomic_refactor.annotation import AnnoEle, AnnoFun, DrugFinder, VFDR
+from metagenomic_refactor.annotation import AnnoFun, DrugFinder, VFDR
 from metagenomic_refactor.context import RuntimeContext, set_runtime_context
+from metagenomic_refactor.genomad_mge import AnnoEle
 from metagenomic_refactor.runner import RunnerConfig, run_pipeline_entry
 from metagenomic_refactor.taxonomy import kk2
-from metagenomic_refactor.typing import mlst_serotype
+from metagenomic_refactor.strain_typing import mlst_only, mlst_serotype, serotype_only
+from metagenomic_refactor.virus_analysis import nextclade_identify, virus_typing
 from metagenomic_refactor.workflow import main_process, register_workflow_callbacks
 
 set_runtime_context(
@@ -99,11 +108,16 @@ set_runtime_context(
         krdb=Krdb,
         wkdir=ofn,
         long_type=long_type,
+        analysis_target=pipeline_config.analysis_target,
         species=species,
         genome_len=genome_len,
         ref=ref,
         gtf=gtf,
+        base_species=species,
+        base_ref=ref,
+        base_gtf=gtf,
         vfmeta=vfmeta,
+        resources=pipeline_config.resources,
     )
 )
 
@@ -115,7 +129,12 @@ register_workflow_callbacks(
     AnnoFun=AnnoFun,
     AnnoEle=AnnoEle,
     VFDR=VFDR,
+    mlst_only=mlst_only,
+    serotype_only=serotype_only,
     mlst_serotype=mlst_serotype,
+    virus_nextclade_identify=nextclade_identify,
+    virus_typing=virus_typing,
+    meta_viral_assembly=run_meta_viral_assembly,
 )
 
 def main():

@@ -1,7 +1,0 @@
-[2026-03-19T03:13:48.836512+00:00] 任务开始: 20260319111348_b9b2bfa0
-Traceback (most recent call last):
-  File "/Users/wuhhh/Desktop/徐老师/代码/metagenomic/Bac_assemble_260112_newformat.py", line 3, in <module>
-    import pandas as pd
-ModuleNotFoundError: No module named 'pandas'
-
-[2026-03-19T03:13:48.849360+00:00] 任务结束，退出码: 1

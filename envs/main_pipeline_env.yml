@@ -1,0 +1,83 @@
+name: meta_main
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  # Base runtime
+  - python=3.10
+  - pip
+  - perl
+  - ruby
+  - openjdk=11
+
+  # Python packages imported by Bac_assemble_260112_newformat.py
+  # and metagenomic_refactor/.
+  - pandas>=2.0
+  - biopython>=1.80
+  - matplotlib
+  - openpyxl
+
+  # QC and sequence utilities
+  - fastp
+  - fastqc
+  - seqkit
+  - pigz
+
+  # Taxonomy
+  - kraken2
+  - bracken
+  - krona
+  - taxonkit
+
+  # Alignment, mapping, coverage, and variants
+  - blast
+  - diamond
+  - bwa
+  - samtools
+  - minimap2
+  - mosdepth
+  - bedtools
+  - bcftools
+  - freebayes
+
+  # Assembly paths used by the main pipeline.
+  - spades
+  - flye
+  - unicycler
+  - miniasm
+  - gfatools
+  - canu
+  - raven-assembler
+
+  # Annotation, typing, and report assets
+  - prokka
+  - abricate
+  - mlst
+  - minced
+  - mafft
+  - nextclade
+
+  # Python package used by strain_typing.py.
+  - pip:
+      - pytaxonkit
+
+# Not installed in this main environment on purpose:
+# - rasusa / porechop:
+#   present in some QC branches of this local codebase, but excluded here
+#   because your target main-flow deployment says they are not part of the
+#   actual主流程.
+# - hostile / kneaddata:
+#   host-removal branches call dedicated conda envs.
+# - medaka / clair3:
+#   polishing and ONT variant-calling branches call dedicated conda envs.
+# - RGI / hamronization / AMRFinder / ResFinder:
+#   resistance integration branches call RGI, RGI_new, and hamronization envs.
+# - VFind:
+#   virsorter2 and checkv stay in the VFind env.
+# - BASALT / MAG:
+#   megahit/BASALT, coverm, checkm2, gtdbtk, plasflow, genovi stay separate.
+# - VADR full runtime:
+#   this repository uses bundled soft/vadr assets or a separate ncov-style env.
+# - Web/desktop shell:
+#   use .venv_web + requirements-web.txt.

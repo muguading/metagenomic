@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>黄浦区公共卫生病原基因数据库和生物信息学分析系统</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body class="launcher-body">
+    <div class="launcher-backdrop">
+      <main class="launcher-shell">
+        <header class="launcher-head">
+          <div class="launcher-brand">
+            <div class="launcher-brand-mark" aria-hidden="true">
+              <img src="{{ url_for('static', filename='app_icon.png', v='20260601-logo') }}" alt="">
+            </div>
+            <div class="launcher-brand-copy">
+              <p class="eyebrow">Bioinformatics Application Hub</p>
+              <h1>黄浦区公共卫生病原基因数据库和生物信息学分析系统</h1>
+              <p class="launcher-copy">登录后先进入统一的软件入口，再选择具体分析工作站。后续新增工具时，这里会保持同一套应用组织方式。</p>
+            </div>
+          </div>
+          <button id="launcher-logout-button" class="ghost-button" type="button">退出登录</button>
+        </header>
+
+        <section class="launcher-grid" aria-label="软件入口">
+          <a class="launcher-app-card" href="/workstation?module=pathogen">
+            <span class="launcher-app-icon" aria-hidden="true">
+              <img src="{{ url_for('static', filename='Patho.png', v='20260601-logo') }}" alt="">
+            </span>
+            <div class="launcher-app-copy">
+              <strong>病原微生物分析</strong>
+              <p>任务提交、运行调度、结果审查与报告导出的一体化工作站。</p>
+            </div>
+            <span class="launcher-app-enter">进入软件</span>
+          </a>
+          <a class="launcher-app-card" href="/workstation?module=pathosource">
+            <span class="launcher-app-icon" aria-hidden="true">
+              <img src="{{ url_for('static', filename='Patho.png', v='20260601-logo') }}" alt="">
+            </span>
+            <div class="launcher-app-copy">
+              <strong>分子溯源</strong>
+              <p>接入 PathoSource 流程，用于分子分型、溯源判读与相关结果组织。</p>
+            </div>
+            <span class="launcher-app-enter">进入软件</span>
+          </a>
+        </section>
+      </main>
+    </div>
+    <div id="toast" class="toast hidden"></div>
+    <script>
+      const toast = document.getElementById("toast");
+      const showToast = (message, isError = false) => {
+        toast.textContent = message;
+        toast.style.background = isError ? "rgba(143, 51, 47, 0.96)" : "rgba(39, 68, 109, 0.94)";
+        toast.classList.remove("hidden");
+        window.clearTimeout(showToast.timer);
+        showToast.timer = window.setTimeout(() => toast.classList.add("hidden"), 2600);
+      };
+      document.getElementById("launcher-logout-button").addEventListener("click", async () => {
+        const response = await fetch("/logout", { method: "POST" });
+        if (!response.ok) {
+          showToast("退出登录失败", true);
+          return;
+        }
+        window.location.href = "/login";
+      });
+    </script>
+  </body>
+</html>

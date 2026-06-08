@@ -1,0 +1,4 @@
+host_name,genome_name,taxid,source_accession,source_label,fasta_path,description
+,TEST_MISSING_SPECIES,562,TEST_REF_BAD_001,批量导入测试,test_data/import_precheck/references/pathogen_ecoli_test.fa,缺少 host_name，应无法通过预检
+Escherichia coli,,562,TEST_REF_BAD_002,批量导入测试,test_data/import_precheck/references/pathogen_ecoli_test.fa,缺少 genome_name，应无法通过预检
+Escherichia coli,TEST_BAD_FASTA_PATH,562,TEST_REF_BAD_003,批量导入测试,test_data/import_precheck/references/not_exists.fa,FASTA 路径不存在，应无法通过预检

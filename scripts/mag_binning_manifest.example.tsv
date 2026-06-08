@@ -1,0 +1,3 @@
+sample	contigs	fastq1	fastq2
+sample01	/path/to/sample01/megahit_output/final.contigs.fa	/path/to/sample01.clean.fastq.gz	
+sample02	/path/to/sample02/megahit_output/final.contigs.fa	/path/to/sample02.clean.R1.fastq.gz	/path/to/sample02.clean.R2.fastq.gz

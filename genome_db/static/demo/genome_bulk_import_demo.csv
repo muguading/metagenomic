@@ -1,2 +1,0 @@
-genome_id,sample_name,species_name,taxid,genome_file_path,gender,country,location_province,location_city,location_district,location_detail,collection_time,sample_type,sequencing_method,description
-demo_chikv_001,CHIKV-Demo-001,Chikungunya virus,37124,/path/to/your/genome_demo_001.fna,Female,中国,上海市,上海市,黄浦区,People's Square sentinel site,2026-03-18T09:30,Serum,Illumina,Replace genome_file_path with a valid server-side FASTA path before import.

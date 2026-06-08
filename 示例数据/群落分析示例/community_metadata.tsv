@@ -1,0 +1,9 @@
+SampleID	Group	Cohort	Timepoint	SampleType	HostStatus	LibraryBatch
+S01	Case	Respiratory	Baseline	BAL	Critical	B1
+S02	Case	Respiratory	Baseline	Sputum	Critical	B1
+S03	Case	Respiratory	Followup	BAL	Improving	B1
+S04	Case	Respiratory	Followup	Sputum	Improving	B2
+S05	Control	Respiratory	Baseline	BAL	Stable	B2
+S06	Control	Respiratory	Baseline	Sputum	Stable	B2
+S07	Control	Respiratory	Followup	BAL	Stable	B3
+S08	Control	Respiratory	Followup	Sputum	Stable	B3

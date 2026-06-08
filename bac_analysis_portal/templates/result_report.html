@@ -7,18 +7,42 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='report.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='report.css', v=report_static_version) }}">
+    {% set is_community_report = ((task.params.method or task.method or '') == 'community') or ((task.params.workstation_key or '') == 'community') %}
+    {% if is_community_report %}
+    <style>
+      .report-shell[data-expected-report-kind="community"]:not([data-report-ready="true"]) {
+        visibility: hidden;
+      }
+      .report-shell[data-expected-report-kind="community"][data-report-ready="true"] {
+        visibility: visible;
+      }
+    </style>
+    {% endif %}
   </head>
   <body>
-    <div class="report-shell" data-report-endpoint="{{ url_for('task_report_data', task_id=task.id) }}" data-export-endpoint="{{ url_for('export_table') }}" data-task-name="{{ task.name or task.id }}">
+    <div class="report-shell" data-report-endpoint="{{ url_for('task_report_data', task_id=task.id) }}" data-export-endpoint="{{ url_for('export_table') }}" data-task-name="{{ task.name or task.id }}" data-selected-sample="{{ selected_sample or '' }}" data-expected-report-kind="{% if is_community_report %}community{% else %}default{% endif %}" data-report-ready="{% if is_community_report %}false{% else %}true{% endif %}">
       <header class="report-topbar">
-        <button class="report-back" type="button" onclick="window.location.href='/?tab=queue'">返回任务列表</button>
+        <button class="report-back" type="button" onclick="window.location.href='/workstation?tab=queue'">返回任务列表</button>
         <div class="report-title-block">
           <p class="report-kicker">Laboratory Report</p>
-          <h1>细菌组装分析结果</h1>
+          <h1>病原微生物分析结果</h1>
           <p class="report-subtitle">本报告按分析流程整理样本质控、组装、物种、耐药毒力及分型结果，供结果判读与存档使用。</p>
+          <p id="report-current-section" class="report-current-section" aria-live="polite">当前位置：报告首页</p>
         </div>
         <div class="report-topbar-actions">
+          <div id="report-scene-switcher-topbar" class="report-scene-switcher report-scene-switcher-topbar" role="tablist" aria-label="报告场景切换">
+            <button class="report-scene-button active" type="button" data-report-scene="research">科研报告</button>
+            <button class="report-scene-button" type="button" data-report-scene="clinical">医院报告</button>
+            <button class="report-scene-button" type="button" data-report-scene="cdc">疾控报告</button>
+          </div>
+          <div class="report-search-toolbar" role="search" aria-label="报告内搜索">
+            <input id="report-search-input" type="search" placeholder="搜索基因、物种、药物..." autocomplete="off">
+            <span id="report-search-count" aria-live="polite">0 / 0</span>
+            <button id="report-search-prev" class="report-search-button" type="button" aria-label="上一个搜索结果">上一处</button>
+            <button id="report-search-next" class="report-search-button" type="button" aria-label="下一个搜索结果">下一处</button>
+            <button id="report-search-clear" class="report-search-button" type="button" aria-label="清空搜索">清空</button>
+          </div>
           <div class="report-export-toolbar">
             <button class="report-export-button" type="button" data-report-export-format="html">导出 HTML</button>
             <button class="report-export-button" type="button" data-report-export-format="word">导出 Word</button>
@@ -39,6 +63,9 @@
             <div class="report-nav-group">
               <a class="report-nav-link" href="#section-overview">1. 数据概览</a>
             </div>
+            <div id="nav-group-clinical-wrapper" class="report-nav-group hidden">
+              <a class="report-nav-link" href="#section-clinical-report">临床辅助诊断</a>
+            </div>
             <div class="report-nav-group has-children" data-nav-group>
               <button class="report-nav-link report-nav-toggle" type="button" data-nav-toggle data-nav-section="section-raw-qc" aria-expanded="false" aria-controls="nav-group-qc">
                 <span>2. 原始数据质控</span>
@@ -53,7 +80,6 @@
               </button>
               <div class="report-subnav" id="nav-group-species" hidden>
                 <a class="report-nav-link subnav-link" href="#section-species-identification">3.1 序列物种鉴定</a>
-                <a class="report-nav-link subnav-link" href="#section-assembly-species-identification">3.2 组装物种鉴定</a>
                 <a class="report-nav-link subnav-link" href="#section-taxonomy-abundance">3.3 物种丰度堆积图</a>
               </div>
             </div>
@@ -63,29 +89,52 @@
               </button>
               <div class="report-subnav" id="nav-group-assembly" hidden>
                 <a class="report-nav-link subnav-link" href="#section-assembly-summary">4.1 组装后信息统计</a>
-                <a class="report-nav-link subnav-link" href="#section-contig-annotation">4.2 Contig 注释结果</a>
-                <a class="report-nav-link subnav-link" href="#section-checkm">4.3 CheckM 统计结果</a>
-                <a class="report-nav-link subnav-link" href="#section-gene-annotation">4.4 基因注释统计</a>
+                <a class="report-nav-link subnav-link" href="#section-contig-annotation">4.2 {% if (task.params.method or task.method) == 'meta' %}质粒基因组预测{% else %}Contig 注释结果{% endif %}</a>
+                {% if (task.params.method or task.method) != 'meta' %}
+                <a class="report-nav-link subnav-link" href="#section-cgview">4.3 基因组环形图</a>
+                <a class="report-nav-link subnav-link" href="#section-checkm">4.4 CheckM 统计结果</a>
+                <a class="report-nav-link subnav-link" href="#section-gene-annotation">4.5 基因注释统计</a>
+                {% endif %}
+              </div>
+            </div>
+            <div id="nav-group-binning-wrapper" class="report-nav-group has-children{% if (task.params.method or task.method) != 'meta' %} hidden{% endif %}" data-nav-group>
+              <button class="report-nav-link report-nav-toggle" type="button" data-nav-toggle data-nav-section="section-binning" aria-expanded="false" aria-controls="nav-group-binning">
+                <span>5. Binning结果</span>
+              </button>
+              <div class="report-subnav" id="nav-group-binning" hidden>
+                <a class="report-nav-link subnav-link" href="#section-binning-quality">5.1 bin 完整性分析</a>
+                <a class="report-nav-link subnav-link" href="#section-binning-taxonomy">5.2 bin 物种鉴定结果</a>
+                <a class="report-nav-link subnav-link" href="#section-binning-viral">5.3 病毒组装筛选</a>
               </div>
             </div>
             <div class="report-nav-group has-children" data-nav-group>
               <button class="report-nav-link report-nav-toggle" type="button" data-nav-toggle data-nav-section="section-rv" aria-expanded="false" aria-controls="nav-group-rv">
-                <span>5. 耐药与毒力分析</span>
+                <span>6. 耐药与毒力分析</span>
               </button>
               <div class="report-subnav" id="nav-group-rv" hidden>
-                <a class="report-nav-link subnav-link" href="#section-rv-summary">5.1 耐药毒力结果汇总</a>
-                <a class="report-nav-link subnav-link" href="#section-virulence">5.2 毒力元件</a>
-                <a class="report-nav-link subnav-link" href="#section-resistance">5.3 耐药元件</a>
+                <a class="report-nav-link subnav-link" href="#section-rv-summary">6.1 耐药毒力结果汇总</a>
+                <a class="report-nav-link subnav-link" href="#section-virulence">6.2 毒力元件</a>
+                <a class="report-nav-link subnav-link" href="#section-resistance">6.3 耐药元件</a>
+                <a class="report-nav-link subnav-link" href="#section-resistance-mutation">6.4 耐药突变</a>
               </div>
             </div>
-            <div class="report-nav-group">
-              <a class="report-nav-link" href="#section-mlst">6. MLST 分析结果</a>
+            <div class="report-nav-group{% if (task.params.method or task.method) == 'meta' %} hidden{% endif %}">
+              <a class="report-nav-link" href="#section-mlst">7. MLST 分析结果</a>
             </div>
-            <div class="report-nav-group">
-              <a class="report-nav-link" href="#section-serotype">7. 血清型鉴定</a>
+            <div class="report-nav-group{% if (task.params.method or task.method) == 'meta' %} hidden{% endif %}">
+              <a class="report-nav-link" href="#section-serotype">8. 血清型鉴定</a>
             </div>
-            <div class="report-nav-group">
-              <a class="report-nav-link" href="#section-priority-serotype">8. 关注毒力血清型</a>
+            <div class="report-nav-group{% if (task.params.method or task.method) == 'meta' %} hidden{% endif %}">
+              <a class="report-nav-link" href="#section-priority-serotype">9. 关注毒力血清型</a>
+            </div>
+            <div class="report-nav-group has-children" data-nav-group>
+              <button class="report-nav-link report-nav-toggle" type="button" data-nav-toggle data-nav-section="section-mge" aria-expanded="false" aria-controls="nav-group-mge">
+                <span>{% if (task.params.method or task.method) == 'meta' %}7. 移动元件监测{% else %}10. 移动元件监测{% endif %}</span>
+              </button>
+              <div class="report-subnav" id="nav-group-mge" hidden>
+                <a class="report-nav-link subnav-link" href="#section-mge-resistance">{% if (task.params.method or task.method) == 'meta' %}7.1 耐药相关移动元件{% else %}10.1 耐药相关移动元件{% endif %}</a>
+                <a class="report-nav-link subnav-link" href="#section-mge-virulence">{% if (task.params.method or task.method) == 'meta' %}7.2 毒力相关移动元件{% else %}10.2 毒力相关移动元件{% endif %}</a>
+              </div>
             </div>
           </nav>
         </aside>
@@ -96,6 +145,7 @@
               <p class="report-kicker">样本信息</p>
               <h2 id="report-sample-title">{{ task.name or task.id }}</h2>
               <p id="report-sample-copy">记录本次分析任务的归属信息、输入输出路径及组装参数。</p>
+              <div id="report-sample-switcher" class="report-sample-switcher hidden" aria-label="样本列表"></div>
             </div>
             <dl class="report-meta-grid">
               <div><dt>任务归属</dt><dd id="meta-owner">{{ task.owner or "-" }}</dd></div>
@@ -113,9 +163,26 @@
                 <p class="report-kicker">Executive Summary</p>
                 <h2>报告首页摘要</h2>
               </div>
-              <p>首屏概述测序质量、组装判读、物种预估及重点关注方向，便于快速判读。</p>
+              <div class="summary-strip-controls">
+                <p>首屏概述测序质量、组装判读、物种预估及重点关注方向，便于快速判读。</p>
+                <div id="report-scene-switcher" class="report-scene-switcher report-scene-switcher-inline" role="tablist" aria-label="报告场景切换">
+                  <button class="report-scene-button active" type="button" data-report-scene="research">科研报告</button>
+                  <button class="report-scene-button" type="button" data-report-scene="clinical">医院报告</button>
+                  <button class="report-scene-button" type="button" data-report-scene="cdc">疾控报告</button>
+                </div>
+              </div>
             </div>
             <div id="report-summary-grid" class="report-summary-grid"></div>
+            <div id="report-scene-panel" class="report-scene-panel hidden"></div>
+          </section>
+
+          <section id="section-clinical-report" class="report-section hidden">
+            <div class="section-heading">
+              <p class="report-kicker">Clinical Focus</p>
+              <h2>临床辅助诊断报告</h2>
+              <p>面向临床医生的正式阅读视图，突出病原体意义、耐药风险、毒力提示和原则性诊疗建议。</p>
+            </div>
+            <div id="clinical-report-body" class="clinical-report-body"></div>
           </section>
 
           <section id="section-overview" class="report-section">
@@ -124,6 +191,7 @@
               <h2>数据概览</h2>
               <p>概述测序规模、组装情况、质量指标及物种预估结果。</p>
             </div>
+            <div id="multi-sample-overview" class="multi-sample-overview hidden"></div>
             <div id="overview-metrics" class="metric-grid"></div>
           </section>
 
@@ -214,6 +282,26 @@
                 </div>
               </article>
             </div>
+            <div class="two-column taxonomy-summary-grid taxonomy-interpretation-grid">
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>相近物种混淆提示</h3>
+                  <span class="card-tag">辅助判读</span>
+                </div>
+                <div id="taxonomy-confusion-hint" class="empty-box">
+                  <p>根据种水平分类结果，提示是否存在近缘物种竞争或混淆风险。</p>
+                </div>
+              </article>
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>单菌 / 混菌提示</h3>
+                  <span class="card-tag">样本状态</span>
+                </div>
+                <div id="taxonomy-mixture-hint" class="empty-box">
+                  <p>根据主导物种占比与高丰度物种数，提示样本更偏向单菌还是混菌。</p>
+                </div>
+              </article>
+            </div>
           </section>
 
           <section id="section-species-identification" class="report-section compact-section">
@@ -235,19 +323,17 @@
                 <div id="taxonomy-source-table" class="report-table-card"></div>
               </div>
               <div class="taxonomy-block">
+                <span class="mini-chart-title">分类稀释曲线</span>
+                <div id="taxonomy-rarefaction-chart" class="empty-box">
+                  <p>记录随累计序列数量增加而检出的分类数变化趋势。</p>
+                </div>
+              </div>
+              <div class="taxonomy-block">
                 <span class="mini-chart-title">层级统计</span>
                 <div id="taxonomy-rank-tags" class="taxonomy-rank-tags"></div>
                 <div id="taxonomy-summary-table" class="report-table-card"></div>
               </div>
             </article>
-          </section>
-
-          <section id="section-assembly-species-identification" class="report-section compact-section">
-            <div class="section-heading">
-              <p class="report-kicker">Section 3.2</p>
-              <h2>组装物种鉴定</h2>
-            </div>
-            <div id="assembly-species-table" class="report-table-card"></div>
           </section>
 
           <section id="section-taxonomy-abundance" class="report-section compact-section">
@@ -291,7 +377,7 @@
               <h2>组装后信息统计</h2>
             </div>
             <div id="assembly-summary-table" class="report-table-card"></div>
-            <article class="result-card coverage-card">
+            <article id="assembly-coverage-card" class="result-card coverage-card">
               <div class="card-head">
                 <div class="card-title-stack">
                   <span class="section-chip">主图</span>
@@ -308,10 +394,10 @@
           <section id="section-contig-annotation" class="report-section compact-section">
             <div class="section-heading">
               <p class="report-kicker">Section 4.2</p>
-              <h2>各个 Contig 注释结果</h2>
+              <h2>{% if (task.params.method or task.method) == 'meta' %}质粒基因组预测{% else %}各个 Contig 注释结果{% endif %}</h2>
             </div>
             <div id="contig-annotation-table" class="report-table-card"></div>
-            <article class="result-card coverage-card">
+            <article id="contig-depth-relationship-card" class="result-card coverage-card">
               <div class="card-head">
                 <div class="card-title-stack">
                   <span class="section-chip">关系主图</span>
@@ -323,7 +409,7 @@
                 <p>展示不同序列类型与平均深度的对应关系。</p>
               </div>
             </article>
-            <article class="result-card coverage-card">
+            <article id="contig-length-depth-scatter-card" class="result-card coverage-card">
               <div class="card-head">
                 <div class="card-title-stack">
                   <span class="section-chip">补充散点图</span>
@@ -337,17 +423,38 @@
             </article>
           </section>
 
-          <section id="section-checkm" class="report-section compact-section">
+          <section id="section-cgview" class="report-section compact-section{% if (task.params.method or task.method) == 'meta' %} hidden{% endif %}">
             <div class="section-heading">
               <p class="report-kicker">Section 4.3</p>
+              <h2>基因组环形图</h2>
+              <p>基于 Prokka 注释和 CGView JSON 产物，交互展示主基因组与质粒的环形结构图谱。</p>
+            </div>
+            <div id="cgview-summary" class="mini-stat-grid"></div>
+            <article class="result-card coverage-card">
+              <div class="card-head">
+                <div class="card-title-stack">
+                  <span class="section-chip">交互图谱</span>
+                  <h3>CGView 环形图</h3>
+                </div>
+                <span class="card-tag">CGView.js</span>
+              </div>
+              <div id="cgview-viewer-card" class="empty-box">
+                <p>优先展示主基因组环形图，并允许切换到质粒或其他序列的图谱。</p>
+              </div>
+            </article>
+          </section>
+
+          <section id="section-checkm" class="report-section compact-section{% if (task.params.method or task.method) == 'meta' %} hidden{% endif %}">
+            <div class="section-heading">
+              <p class="report-kicker">Section 4.4</p>
               <h2>CheckM 统计结果</h2>
             </div>
             <div id="checkm-table" class="report-table-card"></div>
           </section>
 
-          <section id="section-gene-annotation" class="report-section compact-section">
+          <section id="section-gene-annotation" class="report-section compact-section{% if (task.params.method or task.method) == 'meta' %} hidden{% endif %}">
             <div class="section-heading">
-              <p class="report-kicker">Section 4.4</p>
+              <p class="report-kicker">Section 4.5</p>
               <h2>基因注释统计</h2>
             </div>
             <div id="gene-annotation-summary-table" class="report-table-card"></div>
@@ -365,9 +472,47 @@
             </article>
           </section>
 
-          <section id="section-rv" class="report-section">
+          <section id="section-binning" class="report-section{% if (task.params.method or task.method) != 'meta' %} hidden{% endif %}">
             <div class="section-heading">
               <p class="report-kicker">Section 5</p>
+              <h2>Binning结果</h2>
+              <p>记录宏基因组 bin 的完整性评估和 GTDB-Tk 物种鉴定结果。</p>
+            </div>
+          </section>
+
+          <section id="section-binning-quality" class="report-section compact-section{% if (task.params.method or task.method) != 'meta' %} hidden{% endif %}">
+            <div class="section-heading">
+              <p class="report-kicker">Section 5.1</p>
+              <h2>bin 完整性分析</h2>
+            </div>
+            <div id="binning-quality-summary" class="two-column taxonomy-summary-grid"></div>
+            <div id="binning-quality-charts" class="two-column taxonomy-summary-grid"></div>
+            <div id="binning-quality-table" class="report-table-card"></div>
+          </section>
+
+          <section id="section-binning-taxonomy" class="report-section compact-section{% if (task.params.method or task.method) != 'meta' %} hidden{% endif %}">
+            <div class="section-heading">
+              <p class="report-kicker">Section 5.2</p>
+              <h2>bin 物种鉴定结果</h2>
+            </div>
+            <div id="binning-taxonomy-summary" class="two-column taxonomy-summary-grid"></div>
+            <div id="binning-taxonomy-charts" class="two-column taxonomy-summary-grid"></div>
+            <div id="binning-taxonomy-table" class="report-table-card"></div>
+          </section>
+
+          <section id="section-binning-viral" class="report-section compact-section{% if (task.params.method or task.method) != 'meta' %} hidden{% endif %}">
+            <div class="section-heading">
+              <p class="report-kicker">Section 5.3</p>
+              <h2>病毒组装筛选</h2>
+              <p>基于病毒 reads 提取、宏基因组组装、VirSorter2 与 CheckV 规则筛选保留病毒 contig。</p>
+            </div>
+            <div id="binning-viral-summary" class="two-column taxonomy-summary-grid"></div>
+            <div id="binning-viral-table" class="report-table-card"></div>
+          </section>
+
+          <section id="section-rv" class="report-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 6</p>
               <h2>耐药与毒力分析</h2>
               <p>记录耐药与毒力相关结果，并列出元件级明细。</p>
             </div>
@@ -395,7 +540,7 @@
 
           <section id="section-rv-summary" class="report-section compact-section">
             <div class="section-heading">
-              <p class="report-kicker">Section 5.1</p>
+              <p class="report-kicker">Section 6.1</p>
               <h2>耐药毒力结果汇总</h2>
             </div>
             <div id="rv-summary-table" class="report-table-card"></div>
@@ -403,7 +548,7 @@
 
           <section id="section-virulence" class="report-section compact-section">
             <div class="section-heading">
-              <p class="report-kicker">Section 5.2</p>
+              <p class="report-kicker">Section 6.2</p>
               <h2>毒力元件</h2>
             </div>
             <div id="virulence-table" class="report-table-card"></div>
@@ -423,7 +568,7 @@
 
           <section id="section-resistance" class="report-section compact-section">
             <div class="section-heading">
-              <p class="report-kicker">Section 5.3</p>
+              <p class="report-kicker">Section 6.3</p>
               <h2>耐药元件</h2>
             </div>
             <div id="resistance-table" class="report-table-card"></div>
@@ -441,11 +586,26 @@
             </article>
           </section>
 
-          <section id="section-mlst" class="report-section">
+          <section id="section-resistance-mutation" class="report-section compact-section">
             <div class="section-heading">
-              <p class="report-kicker">Section 6</p>
+              <p class="report-kicker">Section 6.4</p>
+              <h2>耐药突变</h2>
+              <p>当 MLST 或物种鉴定提示为脑膜炎奈瑟菌时，这里将展示基于组装注释结果的耐药突变识别与知识库判读。</p>
+            </div>
+            <div id="resistance-neisseria-amr-summary-panel" class="result-card compact-interpretation-card empty-box">
+              <p>将基于脑膜炎奈瑟菌耐药位点库，对命中位点进行知识库判读与风险提示。</p>
+            </div>
+            <div id="resistance-neisseria-amr-table" class="report-table-card"></div>
+          </section>
+
+          <section id="section-mlst" class="report-section{% if (task.params.method or task.method) == 'meta' %} hidden{% endif %}">
+            <div class="section-heading">
+              <p class="report-kicker">Section 7</p>
               <h2>MLST 分析结果</h2>
               <p>记录 MLST 分型结果及各 host gene 比对信息。</p>
+            </div>
+            <div id="mlst-knowledge-summary-panel" class="result-card compact-interpretation-card empty-box">
+              <p>将结合知识库中的 ST 分型背景、毒力、耐药和地域分布，对 MLST 结果给出总结性提示。</p>
             </div>
             <div id="mlst-table" class="report-table-card"></div>
             <article class="result-card coverage-card">
@@ -459,27 +619,127 @@
             </article>
           </section>
 
-          <section id="section-serotype" class="report-section">
+          <section id="section-serotype" class="report-section{% if (task.params.method or task.method) == 'meta' %} hidden{% endif %}">
             <div class="section-heading">
-              <p class="report-kicker">Section 7</p>
+              <p class="report-kicker">Section 8</p>
               <h2>血清型鉴定</h2>
               <p>记录血清型鉴定结果及相关位点信息。</p>
             </div>
             <div id="serotype-table" class="report-table-card"></div>
           </section>
 
-          <section id="section-priority-serotype" class="report-section">
+          <section id="section-priority-serotype" class="report-section{% if (task.params.method or task.method) == 'meta' %} hidden{% endif %}">
             <div class="section-heading">
-              <p class="report-kicker">Section 8</p>
+              <p class="report-kicker">Section 9</p>
               <h2>关注毒力血清型</h2>
               <p>记录重点关注毒力血清型结果。</p>
             </div>
             <div id="priority-serotype-table" class="report-table-card"></div>
           </section>
+
+          <section id="section-mge" class="report-section">
+            <div class="section-heading">
+              <p class="report-kicker">{% if (task.params.method or task.method) == 'meta' %}Section 7{% else %}Section 10{% endif %}</p>
+              <h2>移动元件监测</h2>
+              <p>综合 geNomad、mobileOG、耐药/毒力注释与基因邻域信息，评估潜在的移动元件关联与基因转移风险。</p>
+            </div>
+            <div class="two-column rv-summary-grid">
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>总体监测概览</h3>
+                  <span class="card-tag">统计摘要</span>
+                </div>
+                <div id="mge-overview-summary" class="empty-box">
+                  <p>汇总移动元件相关命中数量、耐药/毒力分布及整体转移风险等级。</p>
+                </div>
+              </article>
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>移动元件类型统计</h3>
+                  <span class="card-tag">类型分布</span>
+                </div>
+                <div id="mge-type-chart" class="empty-box">
+                  <p>统计质粒、前噬菌体及不同核心模块类型的检出情况。</p>
+                </div>
+              </article>
+            </div>
+            <article class="result-card coverage-card">
+              <div class="card-head">
+                <div class="card-title-stack">
+                  <span class="section-chip">主图</span>
+                  <h3>基因转移风险等级分布</h3>
+                </div>
+                <span class="card-tag">风险分级</span>
+              </div>
+              <div id="mge-risk-chart" class="empty-box">
+                <p>按照 Level A-D 展示移动元件相关耐药/毒力位点的风险等级分布。</p>
+              </div>
+            </article>
+          </section>
+
+          <section id="section-mge-resistance" class="report-section compact-section">
+            <div class="section-heading">
+              <p class="report-kicker">{% if (task.params.method or task.method) == 'meta' %}Section 7.1{% else %}Section 10.1{% endif %}</p>
+              <h2>耐药相关移动元件</h2>
+            </div>
+            <div class="two-column rv-summary-grid">
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>耐药移动元件摘要</h3>
+                  <span class="card-tag">判读摘要</span>
+                </div>
+                <div id="mge-resistance-summary" class="empty-box">
+                  <p>汇总耐药基因与移动元件边界、核心模块及风险等级的整体情况。</p>
+                </div>
+              </article>
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>耐药基因与移动元件类型关系</h3>
+                  <span class="card-tag">关系图</span>
+                </div>
+                <div id="mge-resistance-relationship-chart" class="empty-box">
+                  <p>展示耐药基因与不同移动元件类型之间的对应关系。</p>
+                </div>
+              </article>
+            </div>
+            <div id="mge-resistance-table" class="report-table-card"></div>
+          </section>
+
+          <section id="section-mge-virulence" class="report-section compact-section">
+            <div class="section-heading">
+              <p class="report-kicker">{% if (task.params.method or task.method) == 'meta' %}Section 7.2{% else %}Section 10.2{% endif %}</p>
+              <h2>毒力相关移动元件</h2>
+            </div>
+            <div class="two-column rv-summary-grid">
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>毒力移动元件摘要</h3>
+                  <span class="card-tag">判读摘要</span>
+                </div>
+                <div id="mge-virulence-summary" class="empty-box">
+                  <p>汇总毒力基因与移动元件边界、核心模块及风险等级的整体情况。</p>
+                </div>
+              </article>
+              <article class="result-card">
+                <div class="card-head">
+                  <h3>毒力基因与移动元件类型关系</h3>
+                  <span class="card-tag">关系图</span>
+                </div>
+                <div id="mge-virulence-relationship-chart" class="empty-box">
+                  <p>展示毒力基因与不同移动元件类型之间的对应关系。</p>
+                </div>
+              </article>
+            </div>
+            <div id="mge-virulence-table" class="report-table-card"></div>
+          </section>
         </div>
       </main>
     </div>
 
-    <script src="{{ url_for('static', filename='report_runtime.js') }}" defer></script>
+    <script src="{{ url_for('public_asset', filename='cgview/d3.min.js') }}"></script>
+    <link rel="stylesheet" href="{{ url_for('public_asset', filename='cgview/cgview.css') }}">
+    <script src="{{ url_for('public_asset', filename='cgview/cgparse.min.js') }}"></script>
+    <script src="{{ url_for('public_asset', filename='cgview/cgview.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='report_runtime.js', v=report_static_version) }}" defer></script>
   </body>
 </html>

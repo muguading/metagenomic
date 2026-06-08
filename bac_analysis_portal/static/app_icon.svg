@@ -1,0 +1,26 @@
+<svg width="1024" height="1024" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <path id="huangpu-map" d="M123 234.4L143 286.3L168.4 316.4L184.8 357.8L212.5 391.6L294.5 383.4L332.4 362L385.8 286.5L391.2 243.4L352.9 193.9L308.7 151.7L315.6 120.2L269.7 110.5L233.1 130.2L184.6 135.8L166.8 158.1L173.7 215.4L118.2 215.2Z"/>
+    <clipPath id="map-clip">
+      <use href="#huangpu-map"/>
+    </clipPath>
+  </defs>
+
+  <rect x="44" y="44" width="424" height="424" rx="92" fill="#F6F1E7"/>
+  <g transform="translate(256 256) scale(1.17) translate(-256 -256)">
+    <use href="#huangpu-map" fill="#17324A"/>
+    <use href="#huangpu-map" stroke="#C99A35" stroke-width="8" stroke-linejoin="round"/>
+
+    <g clip-path="url(#map-clip)">
+      <path d="M146 210H238" stroke="#F8F1E5" stroke-width="13" stroke-linecap="round"/>
+      <path d="M170 260H316" stroke="#F8F1E5" stroke-width="13" stroke-linecap="round"/>
+      <path d="M208 310H304" stroke="#F8F1E5" stroke-width="13" stroke-linecap="round"/>
+      <path d="M254 128C214 174 212 226 252 270C294 316 288 356 250 400" stroke="#F6F1E7" stroke-width="15" stroke-linecap="round"/>
+      <path d="M254 128C214 174 212 226 252 270C294 316 288 356 250 400" stroke="#17324A" stroke-width="6" stroke-linecap="round"/>
+      <circle cx="252" cy="270" r="18" fill="#1EA6A0"/>
+      <circle cx="252" cy="270" r="7" fill="#F8F1E5"/>
+      <path d="M328 224H376" stroke="#C99A35" stroke-width="11" stroke-linecap="round"/>
+      <path d="M282 352H338" stroke="#C99A35" stroke-width="11" stroke-linecap="round"/>
+    </g>
+  </g>
+</svg>

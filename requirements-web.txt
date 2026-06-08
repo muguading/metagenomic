@@ -1,2 +1,4 @@
 Flask>=3.0,<4.0
 SQLAlchemy>=2.0,<3.0
+pywebview>=5.1,<6.0
+PyInstaller>=6.0,<7.0

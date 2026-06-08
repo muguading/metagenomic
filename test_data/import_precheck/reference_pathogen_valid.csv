@@ -1,0 +1,2 @@
+host_name,genome_name,taxid,source_accession,source_label,fasta_path,description
+Escherichia coli,TEST_ECOLI_FRAGMENT,562,TEST_PATHOGEN_ECOLI,批量导入测试,test_data/import_precheck/references/pathogen_ecoli_test.fa,用于测试病原参考基因组批量导入预检
