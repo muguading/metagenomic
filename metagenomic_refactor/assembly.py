@@ -16,6 +16,7 @@ from Bio import SeqIO
 from metagenomic_refactor.common import conda_run_command, conda_run_prefix, run_command
 from metagenomic_refactor.context import get_runtime_context, update_runtime_context
 from metagenomic_refactor.mag_binning import (
+    MagBinningError,
     MagBinningConfig,
     MagSample,
     export_legacy_binning_layout,
@@ -1059,8 +1060,11 @@ def asb_func(inf, fq1, fq2, threads, Pre, lelID, pts, pst, method, asmt="longasm
                         renamefa(outputfa, finalfa)
                 else:
                     subprocess.run(f'cp {outputfa} {finalfa}',shell=True)
-                
-                map_assembly_reads(finalfa, inf, fq1, fq2, threads, Pre, asmt, runtime.long_type, f)
+                if runtime.analysis_target == 'virus':
+                    print('virus!!!!!')
+                    #map_assembly_reads(finalfa, inf, '10239.2.fastq', '10239.1.fastq', threads, Pre, asmt, runtime.long_type, f)
+                else:
+                    map_assembly_reads(finalfa, inf, fq1, fq2, threads, Pre, asmt, runtime.long_type, f)
                 if hiv_reference_method and runtime.analysis_target == 'virus' and _is_hiv_species(runtime.species):
                     _build_hiv_hxb2_consensus(inf, fq1, fq2, threads, Pre, pts, pst, hiv_reference_method, asmt, f)
                 if runtime.analysis_target != 'virus':
@@ -1196,6 +1200,11 @@ def wait_for_file(filepath, cinterval=2):
 def rebinning():
     infpath = "BASALT_out/meta_drep_out/dereplicated_genomes/"
     outpath = "BASALT_out/meta_drep_out/binning_genomes/"
+    if not os.path.isdir(infpath):
+        os.makedirs(infpath, exist_ok=True)
+        fallback_contigs = "megahit_output/final.contigs.fa"
+        if os.path.isfile(fallback_contigs) and os.path.getsize(fallback_contigs) > 0:
+            shutil.copy2(fallback_contigs, os.path.join(infpath, f"{Path.cwd().name}.fa"))
     if not os.path.isdir(outpath):
         os.makedirs(outpath)
     else:
@@ -1228,8 +1237,78 @@ def rebinning():
             n += 1
 
 
+def _fasta_headers(path):
+    if not os.path.isfile(path):
+        return []
+    return [record.id for record in SeqIO.parse(path, "fasta")]
+
+
+def _write_empty_tsv(path, columns):
+    pd.DataFrame(columns=columns).to_csv(path, sep="\t", index=False)
+
+
+def _read_table_or_empty(path, columns):
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        return pd.DataFrame(columns=columns)
+    try:
+        table = pd.read_table(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=columns)
+    for column in columns:
+        if column not in table.columns:
+            table[column] = pd.Series(dtype="object")
+    return table
+
+
+def _report_progress(progress, message):
+    if progress is not None:
+        progress(message)
+
+
+def _ensure_meta_binning_input(Pre):
+    derep_dir = "BASALT_out/meta_drep_out/dereplicated_genomes"
+    fasta_exts = (".fa", ".fasta", ".fna")
+    if os.path.isdir(derep_dir) and any(name.endswith(fasta_exts) for name in os.listdir(derep_dir)):
+        return True
+
+    fallback_contigs = "megahit_output/final.contigs.fa"
+    if not os.path.isfile(fallback_contigs) or os.path.getsize(fallback_contigs) == 0:
+        _write_empty_tsv(
+            "meta_plas_vf_card.tsv",
+            [
+                "contig_name",
+                "label",
+                "Plasmid",
+                "VF Gene",
+                "ARG",
+                "Name",
+                "AR Gene(abricate)",
+                "AR Gene(rgi)",
+                "AR Gene(resfinder)",
+                "D",
+                "P",
+                "C",
+                "O",
+                "F",
+                "G",
+                "S",
+                Pre,
+            ],
+        )
+        return False
+
+    os.makedirs(derep_dir, exist_ok=True)
+    shutil.copy2(fallback_contigs, os.path.join(derep_dir, f"{Pre}.fa"))
+    with open("binning_status.tsv", "w", encoding="utf-8") as handle:
+        handle.write("status\treason\n")
+        handle.write("fallback\tMAG binning produced no final bins; using assembly contigs for downstream annotation\n")
+    return True
+
+
 def combinebin(refinedir, ofa):
     open(ofa, "w").write("")
+    if not os.path.isdir(refinedir):
+        return
     list1 = [i for i in os.listdir(refinedir) if i.endswith("fa")]
     for i in list1:
         filen = f"{refinedir}/{i}"
@@ -1276,20 +1355,26 @@ def binvfdrdb():
             subprocess.run(f"staramr search -d {staramr_db} BASALT_out/meta_drep_out/binning_genomes/*.fa -o staramr_result -n 10", shell=True, stdout=f, stderr=f)
 
 
-def meta_plasmid(Pre):
+def meta_plasmid(Pre, run_missing_tools=True):
     staramr_db = shlex.quote(_staramr_database_path())
     with open("plasmid.log", "w") as f:
-        if not os.path.isfile(f"{Pre}_plaspredict.tsv") or not os.path.isfile("staramr_result/plasmidfinder.tsv"):
+        if run_missing_tools and (not os.path.isfile(f"{Pre}_plaspredict.tsv") or not os.path.isfile("staramr_result/plasmidfinder.tsv")):
             subprocess.run(conda_run_command("plasflow", f"PlasFlow.py --input tmp_combine.fa --output {Pre}_plaspredict.tsv"), shell=True, stdout=f, stderr=f)
             subprocess.run(f"staramr search -d {staramr_db} BASALT_out/meta_drep_out/binning_genomes/*.fa -o staramr_result -n 10", shell=True, stdout=f, stderr=f)
-        plasmiddb = pd.read_table("staramr_result/plasmidfinder.tsv")
+        if not os.path.isfile(f"{Pre}_plaspredict.tsv") or os.path.getsize(f"{Pre}_plaspredict.tsv") == 0:
+            headers = _fasta_headers("tmp_combine.fa")
+            pd.DataFrame({"contig_name": headers, "label": ["unclassified"] * len(headers)}).to_csv(f"{Pre}_plaspredict.tsv", sep="\t", index=False)
+        plasmiddb = _read_table_or_empty("staramr_result/plasmidfinder.tsv", ["Isolate ID", "Contig", "Plasmid"])
         rawindexname = plasmiddb.index.name
         if plasmiddb.shape[0] > 1:
             plasmiddb = plasmiddb.groupby("Contig").apply(_join_plasmid)
             plasmiddb.index.name = rawindexname
-        plasmiddb["contig_name"] = plasmiddb.apply(lambda x: f"{x['Isolate ID']}_{x['Contig']}", axis=1)
-        plasmiddb = plasmiddb[["contig_name", "Plasmid"]]
-        plasflowdb = pd.read_table(f"{Pre}_plaspredict.tsv")
+        if plasmiddb.empty:
+            plasmiddb = pd.DataFrame(columns=["contig_name", "Plasmid"])
+        else:
+            plasmiddb["contig_name"] = plasmiddb.apply(lambda x: f"{x['Isolate ID']}_{x['Contig']}", axis=1)
+            plasmiddb = plasmiddb[["contig_name", "Plasmid"]]
+        plasflowdb = _read_table_or_empty(f"{Pre}_plaspredict.tsv", ["contig_name", "label"])
         plasflowdb = plasflowdb[["contig_name", "label"]]
         plasdb = plasflowdb.merge(plasmiddb, on="contig_name", how="left").fillna("-")
         plasdb.to_csv(f"{Pre}_meta_plaspredict.tsv", sep="\t", index=False)
@@ -1302,34 +1387,60 @@ def meta_tpm():
             subprocess.run(conda_run_command("mag_aux", "coverm contig -1 2.1.fastq -2 2.2.fastq -r tmp_combine.fa --min-read-percent-identity 95 --min-read-aligned-percent 75 -m metabat -o meta_contig_metabat.tsv -t 10"), shell=True, stderr=f, stdout=f)
 
 
-def binning_result(Pre):
+def binning_result(Pre, run_missing_tools=True, progress=None):
+    _report_progress(progress, "[1/9] 准备 MAG/contig 输入")
+    if not _ensure_meta_binning_input(Pre):
+        _report_progress(progress, "[完成] 缺少可用 contigs，已写出空 meta_plas_vf_card.tsv")
+        return
+    _report_progress(progress, "[2/9] 整理 legacy binning 目录")
     rebinning()
+    _report_progress(progress, "[3/9] 合并 MAG/contig FASTA")
     combinebin("BASALT_out/meta_drep_out/binning_genomes", "tmp_combine.fa")
-    bingtdbtk_fun()
-    bincheckm2_fun()
-    binvfdrdb()
-    meta_plasmid(Pre)
-    meta_tpm()
-    vfdb = pd.read_table("bin_vfdb.tsv")
+    if run_missing_tools:
+        _report_progress(progress, "[4/9] GTDB-Tk 物种分类")
+        bingtdbtk_fun()
+        _report_progress(progress, "[5/9] CheckM2 完整性/污染率")
+        bincheckm2_fun()
+        _report_progress(progress, "[6/9] VFDB/CARD/RGI/staramr 注释")
+        binvfdrdb()
+    else:
+        _report_progress(progress, "[4/9] 跳过外部注释计算，仅复用现有结果")
+        _report_progress(progress, "[5/9] 跳过 CheckM2 计算，仅复用现有结果")
+        _report_progress(progress, "[6/9] 跳过 VFDB/CARD/RGI/staramr 计算，仅复用现有结果")
+    _report_progress(progress, "[7/9] 质粒预测/质粒分型汇总")
+    meta_plasmid(Pre, run_missing_tools=run_missing_tools)
+    if run_missing_tools:
+        _report_progress(progress, "[8/9] CoverM TPM 丰度计算")
+        meta_tpm()
+    else:
+        _report_progress(progress, "[8/9] 跳过 CoverM 计算，仅复用现有结果")
+    _report_progress(progress, "[9/9] 合并生成 meta_plas_vf_card.tsv")
+    vfdb = _read_table_or_empty("bin_vfdb.tsv", ["#FILE", "SEQUENCE", "GENE"])
     argdict = {"ARG": [], "contig_name": [], "Name": [], "AR Gene(abricate)": [], "AR Gene(rgi)": [], "AR Gene(resfinder)": []}
-    vfdb["Name"] = vfdb["#FILE"].str.split("/").str[-1].str.split(".").str[0]
-    vfdb["contig_name"] = vfdb.apply(lambda x: f"{x['Name']}_{x['SEQUENCE']}", axis=1)
-    vfdb = vfdb[["contig_name", "GENE"]]
-    vfdb.rename(columns={"GENE": "VF Gene"}, inplace=True)
-    carddb = pd.read_table("bin_card.tsv")
+    if vfdb.empty:
+        vfdb = pd.DataFrame(columns=["contig_name", "VF Gene"])
+    else:
+        vfdb["Name"] = vfdb["#FILE"].str.split("/").str[-1].str.split(".").str[0]
+        vfdb["contig_name"] = vfdb.apply(lambda x: f"{x['Name']}_{x['SEQUENCE']}", axis=1)
+        vfdb = vfdb[["contig_name", "GENE"]]
+        vfdb.rename(columns={"GENE": "VF Gene"}, inplace=True)
+    carddb = _read_table_or_empty("bin_card.tsv", ["#FILE", "SEQUENCE", "GENE"])
     carddb["tmpgene"] = carddb["GENE"].str.lower()
-    rgidb = pd.read_table("binning_rgi_new.txt")
+    rgidb = _read_table_or_empty("binning_rgi_new.txt", ["Cut_Off", "Best_Hit_ARO", "Contig"])
     rgidb = rgidb[rgidb["Cut_Off"].isin(["Strict", "Perfect"])]
     rgidb["tmpgene"] = rgidb["Best_Hit_ARO"].str.lower()
     rgidb["contig_name"] = rgidb["Contig"]
-    resdb = pd.read_table("staramr_result/resfinder.tsv")
+    resdb = _read_table_or_empty("staramr_result/resfinder.tsv", ["Isolate ID", "Contig", "Gene"])
     resdb["tmpgene"] = resdb["Gene"].str.lower()
     resdb["contig_name"] = resdb.apply(lambda x: f"{x['Isolate ID']}_{x['Contig']}", axis=1)
-    carddb["Name"] = carddb["#FILE"].str.split("/").str[-1].str.split(".").str[0]
-    carddb["contig_name"] = carddb.apply(lambda x: f"{x['Name']}_{x['SEQUENCE']}", axis=1)
-    carddb = carddb[["contig_name", "GENE"]]
-    carddb["tmpgene"] = carddb["GENE"].str.lower()
-    carddb.rename(columns={"GENE": "AR Gene"}, inplace=True)
+    if carddb.empty:
+        carddb = pd.DataFrame(columns=["contig_name", "AR Gene", "tmpgene"])
+    else:
+        carddb["Name"] = carddb["#FILE"].str.split("/").str[-1].str.split(".").str[0]
+        carddb["contig_name"] = carddb.apply(lambda x: f"{x['Name']}_{x['SEQUENCE']}", axis=1)
+        carddb = carddb[["contig_name", "GENE"]]
+        carddb["tmpgene"] = carddb["GENE"].str.lower()
+        carddb.rename(columns={"GENE": "AR Gene"}, inplace=True)
     arglist = list(set(resdb["tmpgene"].tolist() + rgidb["tmpgene"].tolist() + carddb["tmpgene"].tolist()))
     for argene in arglist:
         argdict["ARG"].append(argene)
@@ -1356,21 +1467,31 @@ def binning_result(Pre):
         else:
             argdict["contig_name"].append("-")
     argdb = pd.DataFrame(argdict)
-    Alldb = pd.read_table(f"{Pre}_meta_plaspredict.tsv")
+    Alldb = _read_table_or_empty(f"{Pre}_meta_plaspredict.tsv", ["contig_name", "label", "Plasmid"])
     Alldb = Alldb.merge(vfdb, on="contig_name", how="left").merge(argdb, on="contig_name", how="left").fillna("-")
     Alldb["Name"] = Alldb["contig_name"].str.split("_").str[:2].str.join("_")
-    gtdbdb = pd.read_table("gtdbtk_out/gtdbtk.bac120.summary.tsv")
+    gtdbdb = _read_table_or_empty("gtdbtk_out/gtdbtk.bac120.summary.tsv", ["user_genome", "classification"])
     gtdbdb["Name"] = gtdbdb["user_genome"]
     lvlist = ["D", "P", "C", "O", "F", "G", "S"]
     for lv in lvlist:
         gtdbdb[lv] = gtdbdb["classification"].str.split(";").str[lvlist.index(lv)].str.split("__").str[1]
     gtdbdb = gtdbdb[["Name", "D", "P", "C", "O", "F", "G", "S"]]
-    binnamedb = pd.read_table("binning_name.tsv")
-    gtdbdb = gtdbdb.merge(binnamedb, left_on="Name", right_on="oldname")[["newname", "D", "P", "C", "O", "F", "G", "S"]].rename(columns={"newname": "Name"})
-    tpmdb = pd.read_table("meta_tpm.tsv")
-    tpmdb.columns = ["Name", Pre]
+    binnamedb = _read_table_or_empty("binning_name.tsv", ["oldname", "newname"])
+    if not gtdbdb.empty and not binnamedb.empty:
+        gtdbdb = gtdbdb.merge(binnamedb, left_on="Name", right_on="oldname")[["newname", "D", "P", "C", "O", "F", "G", "S"]].rename(columns={"newname": "Name"})
+    tpmdb = _read_table_or_empty("meta_tpm.tsv", ["Name", Pre])
+    if len(tpmdb.columns) >= 2:
+        tpmdb = tpmdb.iloc[:, :2]
+        tpmdb.columns = ["Name", Pre]
+    else:
+        tpmdb = pd.DataFrame(columns=["Name", Pre])
     Alldb = Alldb.merge(gtdbdb, on="Name", how="left").merge(tpmdb, on="Name", how="left")
+    for column in ["D", "P", "C", "O", "F", "G", "S", Pre]:
+        if column not in Alldb.columns:
+            Alldb[column] = "-"
+    Alldb.fillna("-", inplace=True)
     Alldb.to_csv("meta_plas_vf_card.tsv", sep="\t", index=False)
+    _report_progress(progress, "[完成] meta_plas_vf_card.tsv")
 
 
 def run_meta_mag_binning(fq1, fq2, threads, Pre, log_handle):
@@ -1477,7 +1598,11 @@ def denovo_asb(inf, fq1, fq2, threads, Pre, pts, pst, method, asmt, f, outputfa)
             if os.path.isfile("megahit_output/final.contigs.fa") and os.path.getsize("megahit_output/final.contigs.fa") != 0:
                 if not os.path.isdir("BASALT_out"):
                     os.makedirs("BASALT_out")
-                run_meta_mag_binning(fq1, fq2, threads, Pre, f)
+                try:
+                    run_meta_mag_binning(fq1, fq2, threads, Pre, f)
+                except MagBinningError as exc:
+                    print(f"MAG分箱失败，继续执行后续注释流程: {exc}", file=f)
+                    f.flush()
                 binning_result(Pre)
             else:
                 print("宏基因组组装失败")
@@ -1560,15 +1685,15 @@ def reassm_fun(inf, fq1, fq2, threads, Pre, pts, pst, method, asmt, f, outputfa)
         if runtime_ref:
             update_runtime_context(ref=runtime_ref, gtf=runtime_gtf_selected, species=runtime_species_selected)
     if _is_zika_species(runtime.species) and (not runtime_ref or runtime_ref == "noref" or not Path(runtime_ref).is_file()):
-        zika_ref = PROJECT_ROOT / "database" / "nextclade_db" / "zikav" / "reference.fasta"
-        zika_gtf = PROJECT_ROOT / "database" / "nextclade_db" / "zikav" / "genome_annotation.gff3"
+        zika_ref = _database_root() / "nextclade_db" / "zikav" / "reference.fasta"
+        zika_gtf = _database_root() / "nextclade_db" / "zikav" / "genome_annotation.gff3"
         runtime_ref = str(zika_ref.resolve()) if zika_ref.is_file() else runtime_ref
         runtime_gtf_selected = str(zika_gtf.resolve()) if zika_gtf.is_file() else str(runtime.gtf or "nogtf").strip() or "nogtf"
         if runtime_ref and runtime_ref != "noref" and Path(runtime_ref).is_file():
             update_runtime_context(ref=runtime_ref, gtf=runtime_gtf_selected, species=runtime.species)
     if _is_chikv_species(runtime.species) and (not runtime_ref or runtime_ref == "noref" or not Path(runtime_ref).is_file()):
-        chikv_ref = PROJECT_ROOT / "database" / "nextclade_db" / "chikv" / "reference.fasta"
-        chikv_gtf = PROJECT_ROOT / "database" / "nextclade_db" / "chikv" / "genome_annotation.gff3"
+        chikv_ref = _database_root() / "nextclade_db" / "chikv" / "reference.fasta"
+        chikv_gtf = _database_root() / "nextclade_db" / "chikv" / "genome_annotation.gff3"
         runtime_ref = str(chikv_ref.resolve()) if chikv_ref.is_file() else runtime_ref
         runtime_gtf_selected = str(chikv_gtf.resolve()) if chikv_gtf.is_file() else str(runtime.gtf or "nogtf").strip() or "nogtf"
         if runtime_ref and runtime_ref != "noref" and Path(runtime_ref).is_file():
@@ -1836,12 +1961,12 @@ def reassm_fun(inf, fq1, fq2, threads, Pre, pts, pst, method, asmt, f, outputfa)
             runtime_gtf = str(denv_selection.get("gff_path") or "").strip() or runtime_gtf
             update_runtime_context(gtf=runtime_gtf)
     if _is_zika_species(runtime.species) and (not str(runtime_gtf or "").strip() or str(runtime_gtf).strip() == "nogtf"):
-        zika_gtf = PROJECT_ROOT / "database" / "nextclade_db" / "zikav" / "genome_annotation.gff3"
+        zika_gtf = _database_root() / "nextclade_db" / "zikav" / "genome_annotation.gff3"
         if zika_gtf.is_file():
             runtime_gtf = str(zika_gtf.resolve())
             update_runtime_context(gtf=runtime_gtf)
     if _is_chikv_species(runtime.species) and (not str(runtime_gtf or "").strip() or str(runtime_gtf).strip() == "nogtf"):
-        chikv_gtf = PROJECT_ROOT / "database" / "nextclade_db" / "chikv" / "genome_annotation.gff3"
+        chikv_gtf = _database_root() / "nextclade_db" / "chikv" / "genome_annotation.gff3"
         if chikv_gtf.is_file():
             runtime_gtf = str(chikv_gtf.resolve())
             update_runtime_context(gtf=runtime_gtf)

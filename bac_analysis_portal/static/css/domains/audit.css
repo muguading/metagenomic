@@ -1,0 +1,43 @@
+.audit-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.audit-summary-card {
+  min-height: 110px;
+}
+
+.audit-summary-card small {
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+
+.audit-filter-row {
+  display: grid;
+  grid-template-columns: minmax(240px, 2fr) repeat(4, minmax(140px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.audit-filter-row input,
+.audit-filter-row select {
+  width: 100%;
+}
+
+@media (max-width: 1200px) {
+  .audit-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .audit-filter-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .audit-summary-grid,
+  .audit-filter-row {
+    grid-template-columns: 1fr;
+  }
+}

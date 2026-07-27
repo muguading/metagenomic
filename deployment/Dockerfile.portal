@@ -1,0 +1,21 @@
+FROM python:3.10-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-release.lock /app/requirements-release.lock
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r /app/requirements-release.lock
+
+COPY . /app
+
+EXPOSE 5055
+
+CMD ["sh", "-c", "gunicorn -w ${GUNICORN_WORKERS:-2} -b 0.0.0.0:${APP_PORT:-5055} 'bac_analysis_portal:create_app()'"]

@@ -1,0 +1,769 @@
+            <section id="admin-tab" class="tab-panel">
+          <section id="admin-panel" class="panel detail-panel hidden">
+            <div class="panel-head">
+              <div>
+                <p class="section-kicker">Admin</p>
+                <h2>后台管理</h2>
+                <p class="field-note">管理员可维护脚本路径，并管理门户用户。</p>
+              </div>
+              <div class="admin-section-tabs" role="tablist" aria-label="后台管理分区">
+                <button class="admin-section-tab active" type="button" data-admin-section="admin-settings-section">脚本设置</button>
+                <button class="admin-section-tab" type="button" data-admin-section="admin-monitor-section">实时监控</button>
+                <button class="admin-section-tab" type="button" data-admin-section="admin-pathosource-rules-section">溯源触发规则</button>
+                <button class="admin-section-tab" type="button" data-admin-section="admin-update-section">更新管理</button>
+                <button class="admin-section-tab" type="button" data-admin-section="admin-users-section">用户管理</button>
+              </div>
+            </div>
+
+            <div id="admin-settings-section" class="admin-section-panel active">
+            <div class="detail-block">
+              <h3>脚本路径设置</h3>
+              <form id="settings-form" class="admin-form">
+                <label class="wide">
+                  <span>部署基准目录</span>
+                  <div class="picker-field">
+                    <input id="admin_workspace_root" required readonly placeholder="选择部署基准目录">
+                    <button id="choose-workspace-root" class="ghost-button" type="button">选择目录</button>
+                  </div>
+                </label>
+                <label class="wide">
+                  <span>脚本相对路径（相对于部署基准目录）</span>
+                  <div class="picker-field">
+                    <input id="admin_pipeline_script" required readonly placeholder="选择脚本文件">
+                    <button id="choose-pipeline-script" class="ghost-button" type="button">选择脚本</button>
+                  </div>
+                </label>
+                <label class="wide">
+                  <span>Conda 安装路径</span>
+                  <div class="picker-field">
+                    <input id="admin_conda_root" readonly placeholder="选择 Miniconda / Anaconda 安装目录，例如 /opt/conda 或 ~/miniconda3">
+                    <button id="choose-conda-root" class="ghost-button" type="button">选择目录</button>
+                  </div>
+                </label>
+                <label class="wide">
+                  <span>运行环境 Conda 环境名</span>
+                  <div class="picker-field">
+                    <select id="admin_pipeline_python" required></select>
+                    <button id="choose-pipeline-python" class="ghost-button" type="button">刷新环境</button>
+                  </div>
+                </label>
+                <label class="wide">
+                  <span>数据库部署目录</span>
+                  <div class="picker-field">
+                    <input id="admin_database_root" required readonly placeholder="选择分析数据库的根目录">
+                    <button id="choose-database-root" class="ghost-button" type="button">选择目录</button>
+                  </div>
+                </label>
+                <label>
+                  <span>最大同时运行任务数量</span>
+                  <input id="admin_max_concurrent_tasks" type="number" min="1" value="2">
+                </label>
+                <p class="field-note">先选择 Conda 安装路径，系统会扫描该目录下的 base 与 envs 环境；运行时使用当前 Conda 安装路径下的 conda 执行 conda run -n 环境名 --no-capture-output python -u 主脚本。数据库部署目录用于参考数据库、病毒分型数据库等统一定位。</p>
+                <div class="admin-env-block">
+                  <div class="admin-env-head">
+                    <div>
+                      <strong>Conda 运行环境映射</strong>
+                      <p class="field-note">把代码里写死的 conda 环境统一暴露出来。客户只需要改环境名，不需要再去翻脚本。</p>
+                    </div>
+                  </div>
+                  <div class="admin-env-detected">
+                    <div>
+                      <strong>已识别环境</strong>
+                      <p class="field-note">下面每个环境映射项和主流程运行环境都会直接使用这里识别到的 conda 环境作为下拉选项；如果当前值不在识别列表中，也会保留为一个自定义选项。</p>
+                    </div>
+                  </div>
+                  <div class="admin-env-groups">
+                    <details class="admin-env-group" open>
+                      <summary>
+                        <span>主流程与病毒发现</span>
+                        <small>最常改的一组，建议默认先看这里</small>
+                      </summary>
+                      <div class="admin-env-grid">
+                        <label>
+                          <span>VFind</span>
+                          <select id="admin_env_vfind"></select>
+                          <small class="field-note">病毒组装筛选、CheckV 与 cgMLST panel 默认共用。</small>
+                        </label>
+                      </div>
+                    </details>
+                    <details class="admin-env-group" open>
+                      <summary>
+                        <span>去宿主与清洗</span>
+                        <small>二代和去宿主相关流程</small>
+                      </summary>
+                      <div class="admin-env-grid">
+                        <label>
+                          <span>hostile</span>
+                          <select id="admin_env_hostile"></select>
+                          <small class="field-note">hostile 去宿主流程。</small>
+                        </label>
+                        <label>
+                          <span>kneaddata</span>
+                          <select id="admin_env_kneaddata"></select>
+                          <small class="field-note">二代去宿主与去污染。</small>
+                        </label>
+                      </div>
+                    </details>
+                    <details class="admin-env-group">
+                      <summary>
+                        <span>耐药整合</span>
+                        <small>耐药、毒力与标准化输出</small>
+                      </summary>
+                      <div class="admin-env-grid">
+                        <label>
+                          <span>hamronization</span>
+                          <select id="admin_env_hamronization"></select>
+                          <small class="field-note">耐药整合与标准化输出。</small>
+                        </label>
+                        <label>
+                          <span>RGI</span>
+                          <select id="admin_env_rgi"></select>
+                          <small class="field-note">RGI 及部分分型补充工具。</small>
+                        </label>
+                        <label>
+                          <span>RGI_new</span>
+                          <select id="admin_env_rgi_new"></select>
+                          <small class="field-note">宏基因组 bin 的新版 RGI 运行环境。</small>
+                        </label>
+                      </div>
+                    </details>
+                    <details class="admin-env-group">
+                      <summary>
+                        <span>宏基因组</span>
+                        <small>组装、分箱、质量评估与定量</small>
+                      </summary>
+                      <div class="admin-env-grid">
+                        <label>
+                          <span>BASALT</span>
+                          <select id="admin_env_basalt"></select>
+                          <small class="field-note">宏基因组组装与分箱主链。</small>
+                        </label>
+                        <label>
+                          <span>coverm</span>
+                          <select id="admin_env_coverm"></select>
+                          <small class="field-note">宏基因组覆盖度与 TPM 定量。</small>
+                        </label>
+                        <label>
+                          <span>cm210</span>
+                          <select id="admin_env_cm210"></select>
+                          <small class="field-note">质量评估与补充分型。</small>
+                        </label>
+                        <label>
+                          <span>gtdbtk</span>
+                          <select id="admin_env_gtdbtk"></select>
+                          <small class="field-note">宏基因组 bin 分类。</small>
+                        </label>
+                      </div>
+                    </details>
+                    <details class="admin-env-group">
+                      <summary>
+                        <span>群落分析</span>
+                        <small>扩增子生态统计与可视化</small>
+                      </summary>
+                      <div class="admin-env-grid">
+                        <label>
+                          <span>qiime2</span>
+                          <select id="admin_env_qiime2"></select>
+                          <small class="field-note">Alpha / Beta 多样性、分类器与多样本统计。</small>
+                        </label>
+                        <label>
+                          <span>microeco</span>
+                          <select id="admin_env_microeco"></select>
+                          <small class="field-note">LEfSe、生态统计与可视化分析。</small>
+                        </label>
+                      </div>
+                    </details>
+                    <details class="admin-env-group">
+                      <summary>
+                        <span>图谱与注释</span>
+                        <small>注释统计、质粒与结果可视化</small>
+                      </summary>
+                      <div class="admin-env-grid">
+                        <label>
+                          <span>genovi</span>
+                          <select id="admin_env_genovi"></select>
+                          <small class="field-note">图谱生成与 COG 分类统计。</small>
+                        </label>
+                        <label>
+                          <span>plasflow</span>
+                          <select id="admin_env_plasflow"></select>
+                          <small class="field-note">质粒判定补充流程。</small>
+                        </label>
+                        <label>
+                          <span>report_env</span>
+                          <select id="admin_env_report_env"></select>
+                          <small class="field-note">Rscript 报告输出。</small>
+                        </label>
+                      </div>
+                    </details>
+                    <details class="admin-env-group">
+                      <summary>
+                        <span>三代纠错与变异</span>
+                        <small>ONT 抛光与变异检测</small>
+                      </summary>
+                      <div class="admin-env-grid">
+                        <label>
+                          <span>medaka</span>
+                          <select id="admin_env_medaka"></select>
+                          <small class="field-note">ONT 抛光。</small>
+                        </label>
+                        <label>
+                          <span>clair3</span>
+                          <select id="admin_env_clair3"></select>
+                          <small class="field-note">ONT 变异检测。</small>
+                        </label>
+                      </div>
+                    </details>
+                    <details class="admin-env-group">
+                      <summary>
+                        <span>分型补充</span>
+                        <small>cgMLST、血清型与专用工具</small>
+                      </summary>
+                      <div class="admin-env-grid">
+                        <label>
+                          <span>sistr_hicap</span>
+                          <select id="admin_env_sistr_hicap"></select>
+                          <small class="field-note">hicap / sistr 等补充分型。</small>
+                        </label>
+                        <label>
+                          <span>chewie</span>
+                          <select id="admin_env_chewie"></select>
+                          <small class="field-note">溯源分析与 cgMLST 兼容环境。</small>
+                        </label>
+                        <label>
+                          <span>choleraefinder</span>
+                          <select id="admin_env_choleraefinder"></select>
+                          <small class="field-note">霍乱弧菌专用工具。</small>
+                        </label>
+                      </div>
+                    </details>
+                    <details class="admin-env-group">
+                      <summary>
+                        <span>旧流程兼容</span>
+                        <small>仅在旧版病毒脚本仍使用时才需要</small>
+                      </summary>
+                      <div class="admin-env-grid">
+                        <label>
+                          <span>Vlib</span>
+                          <select id="admin_env_vlib"></select>
+                          <small class="field-note">旧版病毒分析兼容环境。</small>
+                        </label>
+                        <label>
+                          <span>tNGS</span>
+                          <select id="admin_env_tngs"></select>
+                          <small class="field-note">旧版病毒流程补充环境。</small>
+                        </label>
+                      </div>
+                    </details>
+                  </div>
+                  <p class="field-note">这里展示的是当前项目里真实出现过的 conda run -n 环境，执行时统一走上方 Conda 安装路径下的 conda。已经接入后台联动的有：主流程环境、VFind（VirSorter2 / CheckV）、以及 cgMLST panel 构建用的 chewBBACA。</p>
+                </div>
+                <button class="primary-button" type="submit">保存脚本路径</button>
+              </form>
+            </div>
+            </div>
+
+            <div id="admin-monitor-section" class="admin-section-panel">
+            <div class="detail-block admin-monitor-block">
+              <div class="admin-monitor-hero">
+                <div>
+                  <h3>实时监控</h3>
+                  <p class="field-note">识别测序仪下机目录，确认目录在一段时间内不再变化后，自动生成监听任务并进入标准分析队列。</p>
+                </div>
+                <div class="admin-monitor-hero-badge">
+                  <span>Run Watch</span>
+                  <strong>自动下机分析</strong>
+                </div>
+              </div>
+              <form id="admin-monitor-form" class="admin-monitor-form">
+                <div class="admin-monitor-grid">
+                  <label class="wide admin-monitor-field">
+                    <span>监控名称</span>
+                    <input id="admin-monitor-name" placeholder="例如：NovaSeq 夜间下机监听">
+                    <small class="field-note">用于生成任务名前缀，便于后续在队列中快速定位。</small>
+                  </label>
+                  <label class="wide admin-monitor-field">
+                    <span>默认测序下机目录</span>
+                    <div class="picker-field">
+                      <input id="admin-monitor-input-dir" readonly placeholder="选择默认测序仪输出目录">
+                      <button id="choose-admin-monitor-input-dir" class="ghost-button" type="button">选择目录</button>
+                    </div>
+                    <small class="field-note">作为所有模块的默认监听目录；如果某个模块单独指定了目录，会优先使用模块自己的目录。</small>
+                  </label>
+                  <label class="wide admin-monitor-field">
+                    <span>默认分析输出根目录</span>
+                    <div class="picker-field">
+                      <input id="admin-monitor-output-root" readonly placeholder="选择默认自动分析输出目录">
+                      <button id="choose-admin-monitor-output-root" class="ghost-button" type="button">选择目录</button>
+                    </div>
+                    <small class="field-note">作为所有模块的默认输出目录；如果模块内单独指定了输出目录，会优先使用模块自己的目录。</small>
+                  </label>
+                </div>
+                <div class="admin-monitor-grid admin-monitor-grid-compact">
+                  <label class="admin-monitor-field">
+                    <span>目录稳定时长</span>
+                    <input id="admin-monitor-stable-minutes" type="number" min="5" step="5" value="30">
+                    <small class="field-note">目录持续稳定多久后，判定为下机完成。</small>
+                  </label>
+                  <label class="admin-monitor-field">
+                    <span>轮询间隔</span>
+                    <input id="admin-monitor-poll-minutes" type="number" min="1" step="1" value="5">
+                    <small class="field-note">后台检查目录变化的时间间隔。</small>
+                  </label>
+                  <label class="admin-monitor-field">
+                    <span>自动运行样本上限</span>
+                    <input id="admin-monitor-max-samples" type="number" min="0" step="1" value="0">
+                    <small class="field-note"><code>0</code> 表示不限制；超出时会保留监听结果但不自动运行。</small>
+                  </label>
+                </div>
+                <div class="admin-monitor-module-head">
+                  <div>
+                    <strong>选择需要运行的模块</strong>
+                    <p class="field-note">可同时勾选多个模块；每个模块都可以单独绑定自己的监听目录和输出目录，系统会分别创建对应的监听任务。</p>
+                  </div>
+                </div>
+                <div class="admin-monitor-module-grid">
+                  <article class="admin-monitor-module-card" data-monitor-module-card="bacteria">
+                    <label class="admin-monitor-module-toggle">
+                      <input id="admin-monitor-module-bacteria" type="checkbox" data-monitor-module="bacteria" checked>
+                      <span>细菌分析</span>
+                    </label>
+                    <p>适合常规细菌样本的自动下机分析、注释与分型。</p>
+                    <label class="admin-monitor-field compact">
+                      <span>模块监控目录</span>
+                      <div class="picker-field">
+                        <input id="admin-monitor-input-dir-bacteria" readonly placeholder="可选：单独指定细菌分析监听目录">
+                        <button id="choose-admin-monitor-input-dir-bacteria" class="ghost-button" type="button">选择目录</button>
+                      </div>
+                    </label>
+                    <label class="admin-monitor-field compact">
+                      <span>模块输出目录</span>
+                      <div class="picker-field">
+                        <input id="admin-monitor-output-root-bacteria" readonly placeholder="可选：单独指定细菌分析输出目录">
+                        <button id="choose-admin-monitor-output-root-bacteria" class="ghost-button" type="button">选择目录</button>
+                      </div>
+                    </label>
+                    <label class="admin-monitor-field compact">
+                      <span>预设参数</span>
+                      <select id="admin-monitor-preset-bacteria" data-monitor-preset="bacteria">
+                        <option value="standard">常规细菌组装</option>
+                        <option value="fast-track">快速质控筛查</option>
+                      </select>
+                      <div class="admin-monitor-preset-editor" data-monitor-preset-editor="bacteria">
+                        <label class="admin-monitor-field compact">
+                          <span>组装模式</span>
+                          <select data-monitor-param="asm_type" data-monitor-module-key="bacteria">
+                            <option value="shortasm">短读长组装</option>
+                            <option value="shortref">短读长参考比对</option>
+                          </select>
+                        </label>
+                        <label class="admin-monitor-field compact">
+                          <span>组装软件</span>
+                          <select data-monitor-param="method" data-monitor-module-key="bacteria">
+                            <option value="spades">SPAdes</option>
+                            <option value="freebayes">FreeBayes</option>
+                          </select>
+                        </label>
+                        <label class="admin-monitor-field compact">
+                          <span>线程数</span>
+                          <input data-monitor-param="thread" data-monitor-module-key="bacteria" type="number" min="1" step="1" value="10">
+                        </label>
+                        <label class="admin-monitor-field compact admin-monitor-param-runflow">
+                          <span>执行流程</span>
+                          <input data-monitor-param="runflow" data-monitor-module-key="bacteria" placeholder="留空则使用该预设默认流程">
+                        </label>
+                      </div>
+                      <small class="field-note">切换预设后会自动带出默认参数，也可以继续按字段微调。</small>
+                    </label>
+                  </article>
+                  <article class="admin-monitor-module-card" data-monitor-module-card="virus">
+                    <label class="admin-monitor-module-toggle">
+                      <input id="admin-monitor-module-virus" type="checkbox" data-monitor-module="virus">
+                      <span>病毒分析</span>
+                    </label>
+                    <p>适合病毒样本的参考比对与病毒分型流程。</p>
+                    <label class="admin-monitor-field compact">
+                      <span>模块监控目录</span>
+                      <div class="picker-field">
+                        <input id="admin-monitor-input-dir-virus" readonly placeholder="可选：单独指定病毒分析监听目录">
+                        <button id="choose-admin-monitor-input-dir-virus" class="ghost-button" type="button">选择目录</button>
+                      </div>
+                    </label>
+                    <label class="admin-monitor-field compact">
+                      <span>模块输出目录</span>
+                      <div class="picker-field">
+                        <input id="admin-monitor-output-root-virus" readonly placeholder="可选：单独指定病毒分析输出目录">
+                        <button id="choose-admin-monitor-output-root-virus" class="ghost-button" type="button">选择目录</button>
+                      </div>
+                    </label>
+                    <label class="admin-monitor-field compact">
+                      <span>预设参数</span>
+                      <select id="admin-monitor-preset-virus" data-monitor-preset="virus">
+                        <option value="reference">病毒参考比对</option>
+                      </select>
+                      <div class="admin-monitor-preset-editor" data-monitor-preset-editor="virus">
+                        <label class="admin-monitor-field compact">
+                          <span>病毒分类</span>
+                          <select id="admin-monitor-virus-group-select">
+                            <option value="all">全部病毒</option>
+                            <option value="respiratory">呼吸道病毒</option>
+                            <option value="enteric">肠道病毒</option>
+                            <option value="vector">虫媒病毒</option>
+                            <option value="contact">接触传播病毒</option>
+                            <option value="hepatitis">肝炎病毒</option>
+                          </select>
+                          <small class="field-note">先缩小到病毒分类，再选择具体目标病毒。</small>
+                        </label>
+                        <label class="admin-monitor-field compact">
+                          <span>目标病毒</span>
+                          <select data-monitor-param="species" data-monitor-module-key="virus">
+                            <option value="">请选择病毒类型</option>
+                            <optgroup label="呼吸道病毒" data-monitor-virus-option-group="respiratory">
+                              <option value="Influenza virus">流感病毒</option>
+                              <option value="Respiratory syncytial virus">呼吸道合胞病毒</option>
+                              <option value="Human metapneumovirus">人偏肺病毒</option>
+                              <option value="Human parainfluenza virus">副流感病毒</option>
+                              <option value="Human rhinovirus">鼻病毒</option>
+                              <option value="Human coronavirus">人冠状病毒</option>
+                              <option value="SARS-CoV-2">新型冠状病毒</option>
+                              <option value="Adenovirus">腺病毒</option>
+                            </optgroup>
+                            <optgroup label="虫媒病毒" data-monitor-virus-option-group="vector">
+                              <option value="Dengue virus">登革热病毒</option>
+                              <option value="Zika virus">寨卡病毒</option>
+                              <option value="Chikungunya virus">基孔肯雅病毒</option>
+                              <option value="Bandavirus dabieense">班达病毒</option>
+                            </optgroup>
+                            <optgroup label="出血热病毒" data-monitor-virus-option-group="hemorrhagic">
+                              <option value="Ebola virus">埃博拉病毒</option>
+                              <option value="Orthoebolavirus">正埃博拉病毒属</option>
+                            </optgroup>
+                            <optgroup label="肠道病毒" data-monitor-virus-option-group="enteric">
+                              <option value="Norovirus">诺如病毒</option>
+                              <option value="Rotavirus A">A组轮状病毒</option>
+                              <option value="Sapovirus">札如病毒</option>
+                              <option value="Astrovirus">星状病毒</option>
+                              <option value="Human enterovirus">肠道病毒</option>
+                            </optgroup>
+                            <optgroup label="肝炎病毒" data-monitor-virus-option-group="hepatitis">
+                              <option value="Hepatovirus">肝炎病毒总入口</option>
+                              <option value="Hepatitis A virus">甲型肝炎病毒</option>
+                              <option value="Hepatitis B virus">乙型肝炎病毒</option>
+                              <option value="Hepatitis C virus">丙型肝炎病毒</option>
+                              <option value="Hepatitis D virus">丁型肝炎病毒</option>
+                              <option value="Hepatitis E virus">戊型肝炎病毒</option>
+                            </optgroup>
+                            <optgroup label="慢性病毒" data-monitor-virus-option-group="chronic">
+                              <option value="HIV-1">HIV-1</option>
+                            </optgroup>
+                            <optgroup label="接触传播病毒" data-monitor-virus-option-group="contact">
+                              <option value="Monkeypox virus">猴痘病毒</option>
+                            </optgroup>
+                          </select>
+                        </label>
+                        <label class="admin-monitor-field compact">
+                          <span>分析模式</span>
+                          <select data-monitor-param="asm_type" data-monitor-module-key="virus">
+                            <option value="shortref">短读长参考比对</option>
+                            <option value="shortasm">短读长组装</option>
+                          </select>
+                        </label>
+                        <label class="admin-monitor-field compact">
+                          <span>比对软件</span>
+                          <select data-monitor-param="method" data-monitor-module-key="virus">
+                            <option value="bwa">BWA</option>
+                            <option value="freebayes">FreeBayes</option>
+                          </select>
+                        </label>
+                        <label class="admin-monitor-field compact">
+                          <span>线程数</span>
+                          <input data-monitor-param="thread" data-monitor-module-key="virus" type="number" min="1" step="1" value="10">
+                        </label>
+                      </div>
+                      <small class="field-note">建议先按传播类型定位，再选择具体病毒；系统会按该病毒优先匹配参考库与后续分型流程。</small>
+                    </label>
+                  </article>
+                  <article class="admin-monitor-module-card" data-monitor-module-card="metagenome">
+                    <label class="admin-monitor-module-toggle">
+                      <input id="admin-monitor-module-metagenome" type="checkbox" data-monitor-module="metagenome">
+                      <span>宏基因组分析</span>
+                    </label>
+                    <p>适合混合样本的宏基因组组装、物种识别与结果汇总。</p>
+                    <label class="admin-monitor-field compact">
+                      <span>模块监控目录</span>
+                      <div class="picker-field">
+                        <input id="admin-monitor-input-dir-metagenome" readonly placeholder="可选：单独指定宏基因组监听目录">
+                        <button id="choose-admin-monitor-input-dir-metagenome" class="ghost-button" type="button">选择目录</button>
+                      </div>
+                    </label>
+                    <label class="admin-monitor-field compact">
+                      <span>模块输出目录</span>
+                      <div class="picker-field">
+                        <input id="admin-monitor-output-root-metagenome" readonly placeholder="可选：单独指定宏基因组输出目录">
+                        <button id="choose-admin-monitor-output-root-metagenome" class="ghost-button" type="button">选择目录</button>
+                      </div>
+                    </label>
+                    <label class="admin-monitor-field compact">
+                      <span>预设参数</span>
+                      <select id="admin-monitor-preset-metagenome" data-monitor-preset="metagenome">
+                        <option value="screening">宏基因组筛查</option>
+                        <option value="deep">宏基因组深度组装</option>
+                      </select>
+                      <div class="admin-monitor-preset-editor" data-monitor-preset-editor="metagenome">
+                        <label class="admin-monitor-field compact">
+                          <span>分析模式</span>
+                          <select data-monitor-param="asm_type" data-monitor-module-key="metagenome">
+                            <option value="shortasm">短读长组装</option>
+                          </select>
+                        </label>
+                        <label class="admin-monitor-field compact">
+                          <span>分析软件</span>
+                          <select data-monitor-param="method" data-monitor-module-key="metagenome">
+                            <option value="meta">Meta Pipeline</option>
+                          </select>
+                        </label>
+                        <label class="admin-monitor-field compact">
+                          <span>线程数</span>
+                          <input data-monitor-param="thread" data-monitor-module-key="metagenome" type="number" min="1" step="1" value="10">
+                        </label>
+                      </div>
+                      <small class="field-note">切换预设后会自动带出默认参数，也可以继续按字段微调。</small>
+                    </label>
+                  </article>
+                </div>
+                <div class="admin-monitor-actions">
+                  <button id="submit-admin-monitor" class="primary-button" type="submit">创建监控任务</button>
+                </div>
+              </form>
+              <div id="admin-monitor-result" class="admin-monitor-result empty-state">尚未创建实时监控任务。</div>
+            </div>
+            <div class="detail-block admin-monitor-block">
+              <div class="admin-monitor-list-head">
+                <div>
+                  <h3>当前监控任务</h3>
+                  <p class="field-note">这里聚合当前队列中启用了目录监听的任务，可快速查看监听状态、稳定时长和已识别样本数。</p>
+                </div>
+              </div>
+              <div id="admin-monitor-task-list" class="admin-monitor-task-list"></div>
+            </div>
+            </div>
+
+            <div id="admin-pathosource-rules-section" class="admin-section-panel">
+            <div class="detail-block admin-trigger-block">
+              <div class="admin-trigger-hero">
+                <div>
+                  <p class="section-kicker">PathoSource Trigger</p>
+                  <h3>宏基因组自动溯源触发规则</h3>
+                  <p class="field-note">配置宏基因组结果进入本地 ANI / SNP 溯源分析的触发条件。</p>
+                </div>
+                <div id="admin-trigger-summary" class="admin-trigger-summary">
+                  <span>当前状态</span>
+                  <strong>规则加载中</strong>
+                  <p>正在读取服务端配置。</p>
+                </div>
+              </div>
+              <form id="admin-pathosource-trigger-form" class="admin-trigger-form">
+                <section class="admin-trigger-section admin-trigger-section-switches" aria-labelledby="admin-trigger-switch-title">
+                  <div class="admin-trigger-section-head">
+                    <div>
+                      <span>01</span>
+                      <h4 id="admin-trigger-switch-title">触发策略</h4>
+                    </div>
+                    <p>先决定系统是否介入，再决定介入范围和执行方式。</p>
+                  </div>
+                  <div class="admin-trigger-switch-grid">
+                    <label class="admin-trigger-switch admin-trigger-switch-primary">
+                      <input id="admin-pathosource-trigger-enabled" type="checkbox">
+                      <div>
+                        <strong>启用自动触发</strong>
+                        <p>宏基因组任务完成后执行规则判定。</p>
+                      </div>
+                    </label>
+                    <label class="admin-trigger-switch">
+                      <input id="admin-pathosource-trigger-priority-only" type="checkbox">
+                      <div>
+                        <strong>仅重点病原触发</strong>
+                        <p>只纳入重点病原名单中的物种。</p>
+                      </div>
+                    </label>
+                    <label class="admin-trigger-switch">
+                      <input id="admin-pathosource-trigger-auto-start" type="checkbox" checked>
+                      <div>
+                        <strong>自动启动子任务</strong>
+                        <p>关闭后只生成触发建议，不创建任务。</p>
+                      </div>
+                    </label>
+                  </div>
+                </section>
+
+                <section class="admin-trigger-section" aria-labelledby="admin-trigger-threshold-title">
+                  <div class="admin-trigger-section-head">
+                    <div>
+                      <span>02</span>
+                      <h4 id="admin-trigger-threshold-title">阈值参数</h4>
+                    </div>
+                    <p id="admin-trigger-threshold-summary">丰度、reads 与覆盖度同时达标才会进入溯源判定。</p>
+                  </div>
+                  <div class="admin-trigger-threshold-grid">
+                    <label class="admin-monitor-field admin-trigger-metric-field">
+                      <span>最小相对丰度 (%)</span>
+                      <input id="admin-pathosource-trigger-min-abundance" type="number" min="0" max="100" step="0.1" value="15">
+                    </label>
+                    <label class="admin-monitor-field admin-trigger-metric-field">
+                      <span>最小支持 reads</span>
+                      <input id="admin-pathosource-trigger-min-reads" type="number" min="0" step="50" value="800">
+                    </label>
+                    <label class="admin-monitor-field admin-trigger-metric-field">
+                      <span>最小参考覆盖度 (%)</span>
+                      <input id="admin-pathosource-trigger-min-coverage" type="number" min="0" max="100" step="0.1" value="20">
+                    </label>
+                    <label class="admin-monitor-field admin-trigger-metric-field">
+                      <span>最大纳入历史株数</span>
+                      <input id="admin-pathosource-trigger-max-genomes" type="number" min="1" step="1" value="30">
+                    </label>
+                  </div>
+                </section>
+
+                <section class="admin-trigger-section" aria-labelledby="admin-trigger-analysis-title">
+                  <div class="admin-trigger-section-head">
+                    <div>
+                      <span>03</span>
+                      <h4 id="admin-trigger-analysis-title">分析参数</h4>
+                    </div>
+                    <p>命中后写入 PathoSource 子任务的默认分析方式。</p>
+                  </div>
+                  <div class="admin-trigger-analysis-grid">
+                    <label class="admin-monitor-field">
+                      <span>默认比对模式</span>
+                      <select id="admin-pathosource-trigger-msa-method">
+                        <option value="snippy">snippy</option>
+                        <option value="ska">ska</option>
+                      </select>
+                    </label>
+                    <label class="admin-monitor-field">
+                      <span>默认建树方法</span>
+                      <select id="admin-pathosource-trigger-tree-method">
+                        <option value="ML">最大似然 (ML)</option>
+                        <option value="NJ">邻接法 (NJ)</option>
+                      </select>
+                    </label>
+                  </div>
+                </section>
+
+                <section class="admin-trigger-section" aria-labelledby="admin-trigger-lists-title">
+                  <div class="admin-trigger-section-head">
+                    <div>
+                      <span>04</span>
+                      <h4 id="admin-trigger-lists-title">名单限制</h4>
+                    </div>
+                    <p>用来源和物种名单收紧触发范围，留空表示不限制。</p>
+                  </div>
+                  <div class="admin-trigger-list-grid">
+                    <details class="admin-trigger-list-card">
+                      <summary>
+                        <span>限制样本来源</span>
+                        <strong id="admin-trigger-sample-source-count">不限</strong>
+                      </summary>
+                      <div id="admin-trigger-sample-source-preview" class="admin-trigger-list-preview">未设置来源限制</div>
+                      <label class="admin-monitor-field">
+                        <span>选择允许触发的样本来源</span>
+                        <select id="admin-pathosource-trigger-sample-sources" multiple size="7" aria-describedby="admin-pathosource-trigger-source-note"></select>
+                        <small id="admin-pathosource-trigger-source-note" class="field-note">不选择表示不限制；按住 Ctrl / Command 可选择多项。</small>
+                      </label>
+                    </details>
+                    <details class="admin-trigger-list-card">
+                      <summary>
+                        <span>重点病原名单</span>
+                        <strong id="admin-trigger-priority-species-count">0 个</strong>
+                      </summary>
+                      <div id="admin-trigger-priority-species-preview" class="admin-trigger-list-preview">未设置重点病原</div>
+                      <label class="admin-monitor-field">
+                        <textarea id="admin-pathosource-trigger-priority-species" rows="6" placeholder="每行一个物种名，例如：&#10;Klebsiella pneumoniae&#10;Acinetobacter baumannii&#10;Candida auris"></textarea>
+                        <small class="field-note">勾选“仅重点病原触发”时，这里至少需要填写一个物种。</small>
+                      </label>
+                    </details>
+                    <details class="admin-trigger-list-card">
+                      <summary>
+                        <span>排除物种名单</span>
+                        <strong id="admin-trigger-excluded-species-count">0 个</strong>
+                      </summary>
+                      <div id="admin-trigger-excluded-species-preview" class="admin-trigger-list-preview">未设置排除物种</div>
+                      <label class="admin-monitor-field">
+                        <textarea id="admin-pathosource-trigger-excluded-species" rows="6" placeholder="每行一个物种名，例如：&#10;Cutibacterium acnes&#10;Ralstonia pickettii"></textarea>
+                        <small class="field-note">用于屏蔽常见背景菌、污染物种或暂不参与自动溯源的目标。</small>
+                      </label>
+                    </details>
+                  </div>
+                </section>
+
+                <div class="admin-trigger-footer">
+                  <div id="admin-pathosource-trigger-result" class="admin-monitor-result empty-state">规则尚未修改。</div>
+                  <button id="save-admin-pathosource-trigger" class="primary-button" type="submit">保存触发规则</button>
+                </div>
+              </form>
+            </div>
+            </div>
+
+            <div id="admin-update-section" class="admin-section-panel">
+            <div class="detail-block">
+              <h3>更新管理</h3>
+              <div class="admin-update-panel">
+                <div class="admin-update-card">
+                  <div class="admin-update-head">
+                    <div>
+                      <strong>Nextclade 数据库</strong>
+                      <p class="field-note">使用 <code>ncov</code> 环境检测本地数据集与最新兼容版本。</p>
+                    </div>
+                    <div class="admin-update-actions nextclade-update-actions">
+                      <button id="check-nextclade-datasets" class="ui-button ui-button--secondary" type="button">检测库版本</button>
+                      <button id="update-nextclade-datasets" class="ui-button ui-button--warning hidden" type="button">更新过期库</button>
+                    </div>
+                  </div>
+                  <div id="nextclade-dataset-result" class="admin-update-result nextclade-dataset-result empty-state" aria-live="polite">尚未检测数据库版本。</div>
+                </div>
+                <div class="admin-update-card">
+                  <div class="admin-update-head">
+                    <div>
+                      <strong>在线更新</strong>
+                      <p class="field-note">从 GitHub 更新部署代码，更新源固定为 <code>https://github.com/muguading/metagenomic.git</code>。</p>
+                    </div>
+                    <button id="run-online-update" class="primary-button" type="button">在线更新</button>
+                  </div>
+                </div>
+                <div class="admin-update-card">
+                  <div class="admin-update-head">
+                    <div>
+                      <strong>离线更新</strong>
+                      <p class="field-note">先手动选择优盘中的更新目录，只有在真正执行离线更新时才会校验目录结构并比较差异。</p>
+                    </div>
+                  </div>
+                  <label class="wide">
+                    <span>离线更新目录</span>
+                    <div class="picker-field">
+                      <input id="offline-update-source" readonly placeholder="点击右侧按钮选择优盘中的更新目录">
+                      <button id="choose-offline-update-source" class="ghost-button" type="button">选择目录</button>
+                    </div>
+                  </label>
+                  <div class="admin-update-actions">
+                    <button id="run-offline-update" class="ghost-button" type="button">离线更新</button>
+                  </div>
+                </div>
+                <div id="admin-update-result" class="admin-update-result empty-state">尚未执行更新。</div>
+              </div>
+            </div>
+            </div>
+
+            <div id="admin-users-section" class="admin-section-panel">
+            <div class="detail-block">
+              <div class="admin-users-head">
+                <div>
+                  <h3>用户信息管理</h3>
+                  <p class="field-note">用户新增收进独立弹窗，避免管理页被表单长期占据。</p>
+                </div>
+                <button id="open-create-user-modal" class="primary-button" type="button">添加用户</button>
+              </div>
+              <div id="user-list" class="user-list"></div>
+            </div>
+            </div>
+          </section>
+            </section>

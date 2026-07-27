@@ -1165,6 +1165,17 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _database_root() -> Path:
+    configured = str(os.environ.get("META_DATABASE_ROOT") or "").strip()
+    if configured:
+        configured_path = Path(configured).expanduser()
+        nested_database = configured_path / "database"
+        if configured_path.name != "database" and nested_database.is_dir():
+            return nested_database
+        return configured_path
+    return _project_root() / "database"
+
+
 def _build_vadr_env(project_root: Path, model_dir: Path) -> dict[str, str] | None:
     vadr_root = (project_root / "soft").resolve()
     vadr_scripts_dir = (vadr_root / "vadr").resolve()
@@ -1776,7 +1787,7 @@ def _run_vadr_flu_annotation(pre: str, final_fasta: Path, blast_dir: Path, threa
         ]
     )
     try:
-        run_command(cmd, logf=logf, env=norovirus_env)
+        run_command(cmd, logf=logf, env=env)
     except Exception as exc:
         return {
             "status": "failed",
@@ -2459,7 +2470,7 @@ def detect_influenza_type(pre: str, species: str = "") -> str:
     return "-"
 
 
-def _resolve_db_path(env_name: str, default_path: str) -> Path:
+def _resolve_db_path(env_name: str, default_path: str | Path) -> Path:
     project_root = _project_root()
     database_root = str(os.environ.get("META_DATABASE_ROOT") or "").strip()
     raw = str(os.environ.get(env_name) or "").strip()
@@ -2522,17 +2533,22 @@ def _resolve_nextclade_dataset(flu_type: str) -> Path:
     database_root = str(os.environ.get("META_DATABASE_ROOT") or "").strip()
     if database_root:
         return (Path(database_root) / "virus" / "nextclade" / f"influenza_{normalized.lower()}").expanduser().resolve()
-    return Path(f"/data/deploy/meta_genome/database/virus/nextclade/influenza_{normalized.lower()}").expanduser().resolve()
+    return (_database_root() / "virus" / "nextclade" / f"influenza_{normalized.lower()}").expanduser().resolve()
 
 
 def _resolve_sars_cov_2_nextclade_dataset() -> Path:
     raw = str(os.environ.get("META_NEXTCLADE_SC2_DATASET") or "").strip()
     if raw:
         return Path(raw).expanduser().resolve()
-    database_root = str(os.environ.get("META_DATABASE_ROOT") or "").strip()
-    if database_root:
-        return (Path(database_root) / "virus" / "nextclade" / "sars-cov-2").expanduser().resolve()
-    return Path("/data/deploy/meta_genome/database/virus/nextclade/sars-cov-2").expanduser().resolve()
+    database_root = _database_root()
+    project_root = _project_root()
+    candidates = [
+        database_root / "virus" / "nextclade" / "sars-cov-2",
+        database_root / "nextclade_db" / "sars-cov-2",
+        project_root / "database" / "virus" / "nextclade" / "sars-cov-2",
+        project_root / "database" / "nextclade_db" / "sars-cov-2",
+    ]
+    return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
 
 
 def _resolve_monkeypox_nextclade_dataset() -> Path:
@@ -2550,7 +2566,7 @@ def _resolve_monkeypox_nextclade_dataset() -> Path:
     candidates.extend([
         project_root / "database" / "virus" / "nextclade" / "hMPXV",
         project_root / "database" / "nextclade_db" / "hMPXV",
-        Path("/data/deploy/meta_genome/database/virus/nextclade/hMPXV"),
+        _database_root() / "virus" / "nextclade" / "hMPXV",
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -2573,8 +2589,8 @@ def _resolve_hmpv_nextclade_dataset() -> Path:
     candidates.extend([
         project_root / "database" / "virus" / "nextclade" / "hmpv",
         project_root / "database" / "nextclade_db" / "hmpv",
-        Path("/data/deploy/meta_genome/database/nextclade_db/hmpv"),
-        Path("/data/deploy/meta_genome/database/virus/nextclade/hmpv"),
+        _database_root() / "nextclade_db" / "hmpv",
+        _database_root() / "virus" / "nextclade" / "hmpv",
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -2600,8 +2616,8 @@ def _resolve_denv_nextclade_dataset(denv_type: str) -> Path:
     candidates.extend([
         project_root / "database" / "virus" / "nextclade" / suffix,
         project_root / "database" / "nextclade_db" / suffix,
-        Path(f"/data/deploy/meta_genome/database/nextclade_db/{suffix}"),
-        Path(f"/data/deploy/meta_genome/database/virus/nextclade/{suffix}"),
+        _database_root() / "nextclade_db" / suffix,
+        _database_root() / "virus" / "nextclade" / suffix,
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -2624,8 +2640,8 @@ def _resolve_zika_nextclade_dataset() -> Path:
     candidates.extend([
         project_root / "database" / "virus" / "nextclade" / "zikav",
         project_root / "database" / "nextclade_db" / "zikav",
-        Path("/data/deploy/meta_genome/database/nextclade_db/zikav"),
-        Path("/data/deploy/meta_genome/database/virus/nextclade/zikav"),
+        _database_root() / "nextclade_db" / "zikav",
+        _database_root() / "virus" / "nextclade" / "zikav",
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -2648,8 +2664,8 @@ def _resolve_chikv_nextclade_dataset() -> Path:
     candidates.extend([
         project_root / "database" / "virus" / "nextclade" / "chikv",
         project_root / "database" / "nextclade_db" / "chikv",
-        Path("/data/deploy/meta_genome/database/nextclade_db/chikv"),
-        Path("/data/deploy/meta_genome/database/virus/nextclade/chikv"),
+        _database_root() / "nextclade_db" / "chikv",
+        _database_root() / "virus" / "nextclade" / "chikv",
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -2672,8 +2688,8 @@ def _resolve_ebola_nextclade_dataset() -> Path:
     candidates.extend([
         project_root / "database" / "virus" / "nextclade" / "ebola",
         project_root / "database" / "nextclade_db" / "ebola",
-        Path("/data/deploy/meta_genome/database/nextclade_db/ebola"),
-        Path("/data/deploy/meta_genome/database/virus/nextclade/ebola"),
+        _database_root() / "nextclade_db" / "ebola",
+        _database_root() / "virus" / "nextclade" / "ebola",
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -2699,8 +2715,8 @@ def _resolve_rsv_nextclade_dataset(rsv_type: str) -> Path:
     candidates.extend([
         project_root / "database" / "virus" / "nextclade" / suffix,
         project_root / "database" / "nextclade_db" / suffix,
-        Path(f"/data/deploy/meta_genome/database/nextclade_db/{suffix}"),
-        Path(f"/data/deploy/meta_genome/database/virus/nextclade/{suffix}"),
+        _database_root() / "nextclade_db" / suffix,
+        _database_root() / "virus" / "nextclade" / suffix,
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -2737,8 +2753,8 @@ def _resolve_denv_reference_assets(denv_type: str) -> dict[str, Path]:
         candidates.extend([
             project_root / "database" / "virus" / "nextclade" / suffix,
             project_root / "database" / "nextclade_db" / suffix,
-            Path(f"/data/deploy/meta_genome/database/nextclade_db/{suffix}"),
-            Path(f"/data/deploy/meta_genome/database/virus/nextclade/{suffix}"),
+            _database_root() / "nextclade_db" / suffix,
+            _database_root() / "virus" / "nextclade" / suffix,
         ])
         ref_dir = next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
     return {
@@ -2761,7 +2777,7 @@ def _resolve_hpiv_db_dir() -> Path:
         candidates.append((Path(database_root) / "virus" / "hpiv").expanduser())
     candidates.extend([
         project_root / "database" / "virus" / "hpiv",
-        Path("/data/deploy/meta_genome/database/virus/hpiv"),
+        _database_root() / "virus" / "hpiv",
     ])
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
 
@@ -2809,7 +2825,7 @@ def _resolve_hadv_db_dir() -> Path:
         candidates.append((Path(database_root) / "virus" / "hadv").expanduser())
     candidates.extend([
         project_root / "database" / "virus" / "hadv",
-        Path("/data/deploy/meta_genome/database/virus/hadv"),
+        _database_root() / "virus" / "hadv",
     ])
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
 
@@ -2847,7 +2863,7 @@ def _resolve_rhinovirus_db_dir() -> Path:
         candidates.append((Path(database_root) / "virus" / "rhinovirus").expanduser())
     candidates.extend([
         project_root / "database" / "virus" / "rhinovirus",
-        Path("/data/deploy/meta_genome/database/virus/rhinovirus"),
+        _database_root() / "virus" / "rhinovirus",
     ])
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
 
@@ -3732,7 +3748,7 @@ def _resolve_enterovirus_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "enterovirus",
-            Path("/data/deploy/meta_genome/database/virus/enterovirus"),
+            _database_root() / "virus" / "enterovirus",
         ]
     )
     for candidate in candidates:
@@ -4740,7 +4756,7 @@ def _resolve_bandavirus_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "bandavirus",
-            Path("/data/deploy/meta_genome/database/virus/bandavirus"),
+            _database_root() / "virus" / "bandavirus",
         ]
     )
     for candidate in candidates:
@@ -4761,7 +4777,7 @@ def _resolve_orthohantavirus_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "orthohantavirus",
-            Path("/data/deploy/meta_genome/database/virus/orthohantavirus"),
+            _database_root() / "virus" / "orthohantavirus",
         ]
     )
     for candidate in candidates:
@@ -4786,7 +4802,7 @@ def _resolve_orthoebolavirus_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "Orthoebolavirus",
-            Path("/data/deploy/meta_genome/database/virus/Orthoebolavirus"),
+            _database_root() / "virus" / "Orthoebolavirus",
         ]
     )
     for candidate in candidates:
@@ -6404,7 +6420,7 @@ def _resolve_astroviridae_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "astroviridae",
-            Path("/data/deploy/meta_genome/database/virus/astroviridae"),
+            _database_root() / "virus" / "astroviridae",
         ]
     )
     for candidate in candidates:
@@ -7479,7 +7495,7 @@ def _resolve_rotavirus_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "Rotavirus",
-            Path("/data/deploy/meta_genome/database/virus/Rotavirus"),
+            _database_root() / "virus" / "Rotavirus",
         ]
     )
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
@@ -8496,7 +8512,7 @@ def _resolve_seasonal_hcov_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "seasonal_coronavirus",
-            Path("/data/deploy/meta_genome/database/virus/seasonal_coronavirus"),
+            _database_root() / "virus" / "seasonal_coronavirus",
         ]
     )
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
@@ -9250,7 +9266,7 @@ def _resolve_norovirus_db_dir() -> Path:
         candidates.append((Path(database_root) / "virus" / "norovirus").expanduser())
     candidates.extend([
         project_root / "database" / "virus" / "norovirus",
-        Path("/data/deploy/meta_genome/database/virus/norovirus"),
+        _database_root() / "virus" / "norovirus",
     ])
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
 
@@ -10677,7 +10693,7 @@ def _resolve_hepatovirus_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "Hepatovirus",
-            Path("/data/deploy/meta_genome/database/virus/Hepatovirus"),
+            _database_root() / "virus" / "Hepatovirus",
         ]
     )
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
@@ -13718,7 +13734,7 @@ def _resolve_hiv_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "HIV",
-            Path("/data/deploy/meta_genome/database/virus/HIV"),
+            _database_root() / "virus" / "HIV",
         ]
     )
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
@@ -14333,9 +14349,9 @@ def virus_typing(pre: str, species: str) -> None:
         _write_placeholder(pre, columns, [pre, species or "-", "-", "-", "-", "-", "-", "当前仅内置流感病毒分型流程"])
         return
 
-    type_source = _resolve_db_path("META_FLU_TYPE_DB", "/data/deploy/meta_genome/database/virus/influenza/type_refs.fa")
-    ha_source = _resolve_db_path("META_FLUA_HA_DB", "/data/deploy/meta_genome/database/virus/influenza_a/ha_subtypes.fa")
-    na_source = _resolve_db_path("META_FLUA_NA_DB", "/data/deploy/meta_genome/database/virus/influenza_a/na_subtypes.fa")
+    type_source = _resolve_db_path("META_FLU_TYPE_DB", _database_root() / "virus" / "influenza" / "type_refs.fa")
+    ha_source = _resolve_db_path("META_FLUA_HA_DB", _database_root() / "virus" / "influenza_a" / "ha_subtypes.fa")
+    na_source = _resolve_db_path("META_FLUA_NA_DB", _database_root() / "virus" / "influenza_a" / "na_subtypes.fa")
     if not type_source.is_file():
         _write_placeholder(pre, columns, [pre, species or "-", "-", "-", "-", "-", "-", "未找到流感 A/B 判型参考数据库"])
         return

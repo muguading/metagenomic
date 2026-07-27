@@ -1,0 +1,2 @@
+host_name	genome_name	fasta_path
+Escherichia coli	S1	tests/fixtures/release_data/minimal.fasta

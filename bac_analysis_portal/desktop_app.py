@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from flask import Flask, jsonify, request
 from werkzeug.serving import make_server
 
-from .app import create_app
+from .application import create_app
 
 APP_NAME = "黄浦区公共卫生病原基因数据库和生物信息学分析系统"
 DESKTOP_CONFIG_PATH = Path.home() / ".bac_analysis_portal_desktop.json"
@@ -356,7 +356,7 @@ class PortalServerThread(threading.Thread):
         super().__init__(name="bac-analysis-portal-server", daemon=True)
         self.host = host
         self.port = port
-        self.app = create_app()
+        self.app = create_app({"PORTAL_MODE": "development"})
         self.server = make_server(host, port, self.app, threaded=True)
         self.context = self.app.app_context()
         self.context.push()

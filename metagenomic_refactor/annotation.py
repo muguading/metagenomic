@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
+from pathlib import Path
 
 import pandas as pd
 
 from metagenomic_refactor.assembly import outfun, run_genovi_summary, write_gene_summaries
 from metagenomic_refactor.common import conda_base_bin, conda_run_command
 from metagenomic_refactor.context import get_runtime_context
+
+
+DEPLOY_ROOT_DEFAULT = Path(os.environ.get("META_DEPLOY_ROOT", Path(__file__).resolve().parents[1]))
+MOBILEOG_DB_DEFAULT = str(DEPLOY_ROOT_DEFAULT / "database/beatrix/mobileOG-db.dmnd")
+MOBILEOG_META_DEFAULT = str(DEPLOY_ROOT_DEFAULT / "database/beatrix/mobileOG-db-beatrix-1.6-All.csv")
 
 
 def AnnoFun(Pre, threads):
@@ -204,8 +211,10 @@ def AnnoEle(Pre, threads):
         CRIdb = CRIdb[["序列ID", "软件版本", "片段类型", "开始位置", "终止位置", "得分", "结果注释"]]
         CRIdb.to_csv(f"{Pre}.CRISPR.tsv", sep="\t", index=False)
     with open("mobileOG.log", "w") as mbf:
-        mgemt = pd.read_table("/data/deploy/meta_genome/database/beatrix/mobileOG-db-beatrix-1.6-All.csv", sep=",", low_memory=False)
-        subprocess.run(f"diamond blastp -q {Pre}.faa --db /data/deploy/meta_genome/database/beatrix/mobileOG-db  --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore --out {Pre}.mgeblast.tsv", shell=True, stdout=mbf, stderr=mbf)
+        mobileog_meta = os.environ.get("META_MOBILEOG_META", MOBILEOG_META_DEFAULT)
+        mobileog_db = os.environ.get("META_MOBILEOG_DB", MOBILEOG_DB_DEFAULT)
+        mgemt = pd.read_table(mobileog_meta, sep=",", low_memory=False)
+        subprocess.run(f"diamond blastp -q {shlex.quote(f'{Pre}.faa')} --db {shlex.quote(mobileog_db)}  --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore --out {shlex.quote(f'{Pre}.mgeblast.tsv')}", shell=True, stdout=mbf, stderr=mbf)
         mgedb = pd.read_table(f"{Pre}.mgeblast.tsv", names=["序列名称", "参考基因组名称", "相似性(%)", "长度", "差异数量", "空缺数量", "序列起始", "序列终止", "参考起始", "参考终止", "evalue", "比对得分"])
         mgedb = mgedb[(mgedb["相似性(%)"] > 25) & (mgedb["evalue"] < 1e-5)]
         mgedb["ID"] = mgedb["参考基因组名称"].str.split("|").str[0]

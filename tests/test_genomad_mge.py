@@ -118,21 +118,23 @@ def test_build_parser_accepts_single_sample_mode() -> None:
     assert args.sample == "S1"
 
 
-def test_genomad_prefix_uses_fixed_genomad_env() -> None:
+def test_genomad_prefix_uses_configured_conda_and_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("META_CONDA_EXE", "/opt/test/conda")
     assert _genomad_prefix() == [
-        "/home/dell/miniconda3/condabin/conda",
+        "/opt/test/conda",
         "run",
         "--no-capture-output",
         "-n",
-        "genomad",
+        "genomad_aux",
     ]
 
 
-def test_tool_prefix_uses_cfg_env_for_non_genomad_tools(tmp_path: Path) -> None:
+def test_tool_prefix_uses_cfg_env_for_non_genomad_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("META_CONDA_EXE", "/opt/test/conda")
     cfg = GeNomadConfig(outdir=tmp_path, database=tmp_path, conda_env="mge_tools")
 
     assert _tool_prefix(cfg) == [
-        "/home/dell/miniconda3/condabin/conda",
+        "/opt/test/conda",
         "run",
         "--no-capture-output",
         "-n",

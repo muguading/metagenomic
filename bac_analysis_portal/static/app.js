@@ -1,6 +1,23 @@
+import { configureApi, requestJson } from "./workbench/core/api.js";
+import { escapeHtml } from "./workbench/core/ui.js";
+import { createNavigation } from "./workbench/core/navigation.js";
+import { createPathBrowser } from "./workbench/core/path-browser.js";
+import { createWorkbenchRuntime } from "./workbench/core/runtime.js";
+import * as projectDomain from "./workbench/domains/project/index.js";
+import * as adminDomain from "./workbench/domains/admin/index.js";
+import * as auditDomain from "./workbench/domains/audit/index.js";
+
+const navigation = createNavigation();
+const pathBrowser = createPathBrowser(openPathBrowser);
+
 const state = {
   tasks: [],
+  adminUsers: [],
   selectedTaskId: "",
+  closureSyncLastSeen: "",
+  closureSyncEventsBound: false,
+  pendingClosureActionFromUrl: "",
+  pendingDatabaseSampleKeyFromUrl: "",
   activeTab: "submission-tab",
   pollTimer: null,
   asmOptions: {},
@@ -13,6 +30,8 @@ const state = {
   pathogenReferenceSelection: {},
   pendingReferenceJobs: [],
   databaseRecords: [],
+  databaseLoadedAt: 0,
+  databaseLoadPromise: null,
   databaseSubmissions: [],
   databaseVersionLogs: [],
   databaseReleaseVersions: [],
@@ -21,6 +40,30 @@ const state = {
   auspiceUploads: [],
   databaseMetadataTemplates: [],
   databaseSelectedSamples: [],
+  databaseModelingConfig: {
+    sampleFilter: "all",
+    labelField: "modeling_review_label",
+    algorithm: "auto_baseline",
+  },
+  modeling: {
+    loaded: false,
+    activeSection: "modeling-samples-section",
+    sampleSearch: null,
+    datasets: [],
+    featureSets: [],
+    models: [],
+    predictions: [],
+    options: {},
+    selectedDatasetId: "",
+    selectedFeatureSetId: "",
+    selectedModelId: "",
+    compareModelIds: [],
+    selectedPredictionId: "",
+    predictionPage: 1,
+    predictionPageSize: 20,
+    samplePage: 1,
+    samplePageSize: 20,
+  },
   knowledgeBaseBundle: null,
   virusReportTemplates: [],
   activeVirusReportTemplateId: "",
@@ -108,6 +151,8 @@ const state = {
     sortKey: "imported_at",
     sortDirection: "desc",
     view: "key",
+    page: 1,
+    pageSize: 50,
     filters: {
       sample_name: "",
       task_name: "",
@@ -143,6 +188,7 @@ const state = {
   },
   queueView: "queue",
   queueSelectedTaskIds: [],
+  queueClosureOverviewCollapsed: (window.localStorage?.getItem("bac-queue-closure-overview-collapsed") || "1") !== "0",
   queueAnalytics: {
     filters: {
       workstation: "",
@@ -172,6 +218,9 @@ const state = {
   },
   taskDetailOpen: false,
   resultViewerOpen: false,
+  workbenchModalStack: [],
+  workbenchModalLockCount: 0,
+  modalLockElements: new Set(),
   rebuildModalOpen: false,
   rebuildMode: "rebuild",
   rebuildTaskId: "",
@@ -200,6 +249,13 @@ const state = {
     sortKey: "sample_name",
     sortDirection: "asc",
     exportFormat: "xlsx",
+  },
+  analysisExport: {
+    open: false,
+    downloading: false,
+    mode: "filtered",
+    samples: [],
+    selectedTypes: ["fasta", "qc", "assembly", "resistance_virulence", "mge", "serotype"],
   },
   currentTaskDeleteId: "",
   currentQueueReport: null,
@@ -531,6 +587,20 @@ const ADMIN_PATHOSOURCE_TRIGGER_DEFAULTS = {
   auto_start: true,
 };
 
+const ADMIN_PATHOSOURCE_SAMPLE_SOURCE_OPTIONS = [
+  "血液",
+  "脑脊液",
+  "呼吸道",
+  "粪便/肛拭子",
+  "尿液",
+  "脓液/分泌物",
+  "组织/活检",
+  "环境拭子",
+  "污水/水体",
+  "食品",
+  "其他",
+];
+
 const ADMIN_CONDA_ENV_FIELDS = [
   "vfind",
   "hamronization",
@@ -665,6 +735,9 @@ const elements = {
   databaseSectionPanels: Array.from(document.querySelectorAll(".database-section-panel")),
   databaseExtraSectionTabs: Array.from(document.querySelectorAll("[data-database-extra-section]")),
   databaseExtraSectionPanels: Array.from(document.querySelectorAll(".database-extra-section-panel")),
+  modelingSectionTabs: Array.from(document.querySelectorAll("[data-modeling-section]")),
+  modelingContent: document.getElementById("modeling-content"),
+  modelingRefreshButton: document.getElementById("modeling-refresh-button"),
   databaseSampleViewTabs: Array.from(document.querySelectorAll("[data-database-sample-view]")),
   databaseSampleViewPanels: Array.from(document.querySelectorAll(".database-sample-view-panel")),
   referenceSectionTabs: Array.from(document.querySelectorAll("[data-reference-section]")),
@@ -874,6 +947,13 @@ const elements = {
   mergedExportFilteredButton: document.getElementById("merged-export-filtered"),
   mergedExportSelectedButton: document.getElementById("merged-export-selected"),
   closeMergedExportModalButton: document.getElementById("close-merged-export-modal"),
+  analysisExportModal: document.getElementById("analysis-export-modal"),
+  analysisExportBackdrop: document.getElementById("analysis-export-backdrop"),
+  analysisExportDescription: document.getElementById("analysis-export-description"),
+  analysisExportOptions: document.getElementById("analysis-export-options"),
+  confirmAnalysisExportButton: document.getElementById("confirm-analysis-export"),
+  cancelAnalysisExportButton: document.getElementById("cancel-analysis-export"),
+  closeAnalysisExportModalButton: document.getElementById("close-analysis-export-modal"),
   serverSummary: document.getElementById("server-summary"),
   serverMetrics: document.getElementById("server-metrics"),
   refreshDatabaseButton: document.getElementById("refresh-database-button"),
@@ -1080,6 +1160,7 @@ const elements = {
   adminMonitorPresetInputs: Array.from(document.querySelectorAll("[data-monitor-preset]")),
   adminPathosourceTriggerForm: document.getElementById("admin-pathosource-trigger-form"),
   adminPathosourceTriggerSummary: document.getElementById("admin-trigger-summary"),
+  adminPathosourceTriggerThresholdSummary: document.getElementById("admin-trigger-threshold-summary"),
   adminPathosourceTriggerResult: document.getElementById("admin-pathosource-trigger-result"),
   adminPathosourceTriggerEnabled: document.getElementById("admin-pathosource-trigger-enabled"),
   adminPathosourceTriggerPriorityOnly: document.getElementById("admin-pathosource-trigger-priority-only"),
@@ -1093,6 +1174,12 @@ const elements = {
   adminPathosourceTriggerSampleSources: document.getElementById("admin-pathosource-trigger-sample-sources"),
   adminPathosourceTriggerPrioritySpecies: document.getElementById("admin-pathosource-trigger-priority-species"),
   adminPathosourceTriggerExcludedSpecies: document.getElementById("admin-pathosource-trigger-excluded-species"),
+  adminPathosourceTriggerSampleSourceCount: document.getElementById("admin-trigger-sample-source-count"),
+  adminPathosourceTriggerSampleSourcePreview: document.getElementById("admin-trigger-sample-source-preview"),
+  adminPathosourceTriggerPrioritySpeciesCount: document.getElementById("admin-trigger-priority-species-count"),
+  adminPathosourceTriggerPrioritySpeciesPreview: document.getElementById("admin-trigger-priority-species-preview"),
+  adminPathosourceTriggerExcludedSpeciesCount: document.getElementById("admin-trigger-excluded-species-count"),
+  adminPathosourceTriggerExcludedSpeciesPreview: document.getElementById("admin-trigger-excluded-species-preview"),
   chooseAdminMonitorInputDirButton: document.getElementById("choose-admin-monitor-input-dir"),
   chooseAdminMonitorOutputRootButton: document.getElementById("choose-admin-monitor-output-root"),
   chooseAdminMonitorInputDirBacteriaButton: document.getElementById("choose-admin-monitor-input-dir-bacteria"),
@@ -1106,9 +1193,13 @@ const elements = {
   runOfflineUpdateButton: document.getElementById("run-offline-update"),
   runOnlineUpdateButton: document.getElementById("run-online-update"),
   adminUpdateResult: document.getElementById("admin-update-result"),
+  checkNextcladeDatasetsButton: document.getElementById("check-nextclade-datasets"),
+  updateNextcladeDatasetsButton: document.getElementById("update-nextclade-datasets"),
+  nextcladeDatasetResult: document.getElementById("nextclade-dataset-result"),
   openCreateUserModalButton: document.getElementById("open-create-user-modal"),
   userForm: document.getElementById("user-form"),
   userList: document.getElementById("user-list"),
+  reviewerReadinessPanel: document.getElementById("reviewer-readiness-panel"),
   newGroupName: document.getElementById("new_group_name"),
   newRole: document.getElementById("new_role"),
   newAccountExpiresAt: document.getElementById("new_account_expires_at"),
@@ -1406,9 +1497,54 @@ const LEGACY_RUNFLOW_EXPANSIONS = {
   "mlst与血清型": ["mlst检验", "血清型检验"],
 };
 
+const CLOSURE_SYNC_STORAGE_KEY = "bac-closure-sync-event";
+
+function parseClosureSyncEvent(raw) {
+  if (!raw) return null;
+  try {
+    const event = JSON.parse(raw);
+    return event && typeof event === "object" ? event : null;
+  } catch (error) {
+    console.warn("无法解析闭环同步事件", error);
+    return null;
+  }
+}
+
+async function refreshClosureStateFromSignal(raw, source = "") {
+  if (!state.currentUser || !raw || raw === state.closureSyncLastSeen) return;
+  const event = parseClosureSyncEvent(raw);
+  if (!event) return;
+  state.closureSyncLastSeen = raw;
+  const taskId = String(event.task_id || "").trim();
+  if (taskId) state.selectedTaskId = taskId;
+  await Promise.all([loadTasks(), loadDatabaseRecords()]);
+  if (source === "storage") {
+    showToast("闭环状态已同步");
+  }
+}
+
+function bindClosureSyncEvents() {
+  if (state.closureSyncEventsBound || typeof window === "undefined") return;
+  state.closureSyncEventsBound = true;
+  window.addEventListener("storage", (event) => {
+    if (event.key !== CLOSURE_SYNC_STORAGE_KEY) return;
+    refreshClosureStateFromSignal(event.newValue, "storage").catch((error) => console.error(error));
+  });
+  window.addEventListener("focus", () => {
+    let raw = "";
+    try {
+      raw = window.localStorage?.getItem(CLOSURE_SYNC_STORAGE_KEY) || "";
+    } catch (error) {
+      console.warn("无法读取闭环同步事件", error);
+    }
+    refreshClosureStateFromSignal(raw, "focus").catch((error) => console.error(error));
+  });
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
+  initializeDomainModules();
   await loadReferenceData();
-  renderProjectManagement();
+  projectDomain.refresh();
   initializeBatchInput();
   syncPermissionUi("create");
   syncPermissionUi("edit");
@@ -1419,18 +1555,76 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
   syncAdminMonitorModuleState();
   await loadSession();
+  bindClosureSyncEvents();
   applyInitialTabFromUrl();
   await loadAsmOptions();
   syncWorkstationFieldState();
   await loadTasks();
+  await consumePendingClosureActionFromUrl();
   await loadServerStatus();
   await loadDatabaseRecords();
   if (state.currentUser?.role === "admin") {
-    await Promise.all([loadAdminSettings(), loadUsers(), loadAuditLogs()]);
+    await Promise.all([adminDomain.refresh(), auditDomain.refresh()]);
   }
   syncSegmentedControls();
   startPolling();
 });
+
+function initializeDomainModules() {
+  configureApi({ onError: showToast });
+  const runtime = createWorkbenchRuntime({
+    api: { requestJson },
+    ui: { escapeHtml, formatDate, renderEmptyState, renderMobileCellAttributes, renderTableFilterInput, showToast, truncateText },
+    navigation,
+    pathBrowser,
+    constants: { adminPathosourceTriggerDefaults: ADMIN_PATHOSOURCE_TRIGGER_DEFAULTS },
+    selectors: { elements: () => elements, state: () => state },
+    actions: {
+      bindImeSafeInput,
+      closePathBrowser,
+      confirmDangerAction,
+      loadTasks,
+      getAdminSettingsDraft,
+      isAdminSettingsDirty,
+      onCreateUser,
+      onRunOfflineUpdate,
+      onRunOnlineUpdate,
+      onSaveAdminPathosourceTriggerRules,
+      onSaveSettings,
+      onSaveUserEdit,
+      onSubmitAdminMonitor,
+      appendFieldValidationMessage,
+      clearScopedValidation,
+      getDatabaseMetadataDisplayValue,
+      hideModalElement,
+      markFieldInvalid,
+      openDatabaseSampleModal,
+      parseLocationJson,
+      renderAdminDetectedCondaEnvs,
+      renderAdminMonitorTaskList,
+      renderReviewerReadinessPanel,
+      renderUserList,
+      rebuildAdminPipelineEnvSelectOptions,
+      applyAdminCondaEnvValues,
+      applyAdminPathosourceTriggerRules,
+      refreshAdminCondaEnvsForRoot,
+      rememberPathBrowserLocation,
+      scheduleSegmentedControlsSync,
+      setActiveTab,
+      setAdminPipelinePython,
+      setAdminScriptPath,
+      syncAdminMonitorModuleState,
+      showModalElement,
+      withSubmittingState,
+    },
+  });
+  projectDomain.init(runtime);
+  adminDomain.init(runtime);
+  auditDomain.init(runtime);
+  navigation.register("project-tab", projectDomain);
+  navigation.register("admin-tab", adminDomain);
+  navigation.register("audit-tab", auditDomain);
+}
 
 const SEGMENTED_CONTROL_SELECTORS = [
   ".queue-view-tabs",
@@ -1631,6 +1825,160 @@ function renderOperationError(target, {
       ? recovery
       : ["请检查输入内容或文件路径后重试。", "如果问题仍然存在，请保留当前错误信息并联系管理员。"],
   });
+}
+
+function setWorkbenchModalScrollLocked(locked) {
+  state.workbenchModalLockCount = Math.max(0, (state.workbenchModalLockCount || 0) + (locked ? 1 : -1));
+  const shouldLock = state.workbenchModalLockCount > 0;
+  document.documentElement.classList.toggle("modal-scroll-locked", shouldLock);
+  document.body.classList.toggle("modal-scroll-locked", shouldLock);
+}
+
+function showModalElement(modal) {
+  if (!(modal instanceof HTMLElement)) return;
+  const wasOpen = isVisibleModal(modal);
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  if (!wasOpen && !state.modalLockElements.has(modal)) {
+    state.modalLockElements.add(modal);
+    setWorkbenchModalScrollLocked(true);
+  }
+}
+
+function hideModalElement(modal) {
+  if (!(modal instanceof HTMLElement)) return;
+  const wasLocked = state.modalLockElements.has(modal);
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  if (wasLocked) {
+    state.modalLockElements.delete(modal);
+    setWorkbenchModalScrollLocked(false);
+  }
+}
+
+function getWorkbenchModalToneClass(tone = "neutral") {
+  if (tone === "danger") return "is-danger";
+  if (tone === "warning") return "is-warning";
+  if (tone === "success") return "is-success";
+  return "is-neutral";
+}
+
+function closeWorkbenchModal(modal, resolve, result = null) {
+  if (!(modal instanceof HTMLElement)) {
+    resolve(result);
+    return;
+  }
+  const stackIndex = state.workbenchModalStack.findIndex((item) => item.modal === modal);
+  if (stackIndex >= 0) {
+    state.workbenchModalStack.splice(stackIndex, 1);
+  }
+  modal.remove();
+  setWorkbenchModalScrollLocked(false);
+  resolve(result);
+}
+
+function openWorkbenchFormModal({
+  kicker = "Workbench Dialog",
+  title = "确认操作",
+  message = "",
+  tone = "neutral",
+  panelClass = "",
+  formClass = "",
+  summaryKicker = "",
+  summaryTitle = "",
+  summaryDetail = "",
+  bodyHtml = "",
+  cancelLabel = "取消",
+  confirmLabel = "确认",
+  confirmClass = "primary-button",
+  closeLabel = "关闭",
+  defaultFocusSelector = "input, textarea, select, button",
+  validateSubmit = null,
+  transformSubmit = null,
+} = {}) {
+  const modal = document.createElement("div");
+  const modalId = `workbench-modal-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  modal.className = `browser-modal workbench-modal ${getWorkbenchModalToneClass(tone)}`;
+  modal.setAttribute("aria-hidden", "false");
+  modal.innerHTML = `
+    <div class="browser-backdrop" data-workbench-modal-cancel></div>
+    <section class="browser-panel detail-modal-panel workbench-modal-panel ${escapeHtml(panelClass)}" role="dialog" aria-modal="true" aria-labelledby="${modalId}-title">
+      <div class="panel-head">
+        <div>
+          <p class="section-kicker">${escapeHtml(kicker)}</p>
+          <h2 id="${modalId}-title">${escapeHtml(title)}</h2>
+          ${message ? `<p class="field-note">${escapeHtml(message)}</p>` : ""}
+        </div>
+        <button class="ghost-button" type="button" data-workbench-modal-cancel>${escapeHtml(closeLabel)}</button>
+      </div>
+      <form class="workbench-modal-form ${escapeHtml(formClass)}">
+        ${(summaryKicker || summaryTitle || summaryDetail) ? `
+          <div class="project-create-summary-shell workbench-modal-summary">
+            <div class="project-create-summary-copy">
+              ${summaryKicker ? `<span class="project-create-summary-kicker">${escapeHtml(summaryKicker)}</span>` : ""}
+              ${summaryTitle ? `<strong>${escapeHtml(summaryTitle)}</strong>` : ""}
+              ${summaryDetail ? `<p class="field-note">${escapeHtml(summaryDetail)}</p>` : ""}
+            </div>
+          </div>
+        ` : ""}
+        ${bodyHtml}
+        <div class="modal-form-actions">
+          <button class="ghost-button" type="button" data-workbench-modal-cancel>${escapeHtml(cancelLabel)}</button>
+          <button class="${escapeHtml(confirmClass)}" type="submit">${escapeHtml(confirmLabel)}</button>
+        </div>
+      </form>
+    </section>
+  `;
+  document.body.appendChild(modal);
+  setWorkbenchModalScrollLocked(true);
+  return new Promise((resolve) => {
+    const close = (result = null) => closeWorkbenchModal(modal, resolve, result);
+    state.workbenchModalStack.push({ modal, close: () => close(null) });
+    modal.querySelectorAll("[data-workbench-modal-cancel]").forEach((button) => {
+      button.addEventListener("click", () => close(null));
+    });
+    modal.querySelector("form")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      if (!(form instanceof HTMLFormElement)) return;
+      const validationResult = typeof validateSubmit === "function" ? validateSubmit(form) : true;
+      if (validationResult === false) return;
+      const result = typeof transformSubmit === "function" ? transformSubmit(form) : new FormData(form);
+      close(result);
+    });
+    const focusTarget = modal.querySelector(defaultFocusSelector);
+    focusTarget?.focus?.({ preventScroll: true });
+    focusTarget?.select?.();
+  });
+}
+
+function openWorkbenchConfirmModal({
+  title = "确认操作",
+  message = "请确认是否继续。",
+  tone = "warning",
+  kicker = "Confirm",
+  summaryKicker = "",
+  summaryTitle = "",
+  summaryDetail = "",
+  cancelLabel = "取消",
+  confirmLabel = "确认",
+  confirmClass = "",
+} = {}) {
+  const resolvedConfirmClass = confirmClass || (tone === "danger" ? "ghost-button danger" : tone === "warning" ? "ui-button ui-button--warning" : "primary-button");
+  return openWorkbenchFormModal({
+    kicker,
+    title,
+    message,
+    tone,
+    summaryKicker,
+    summaryTitle,
+    summaryDetail,
+    cancelLabel,
+    confirmLabel,
+    confirmClass: resolvedConfirmClass,
+    defaultFocusSelector: "[data-workbench-modal-cancel], button",
+    transformSubmit: () => true,
+  }).then(Boolean);
 }
 
 function setButtonEnabled(button, enabled) {
@@ -1960,14 +2308,43 @@ function renderMonitoringEmptyState(title, reason, action = "可以回到样本�
   });
 }
 
+function buildTaskResultPageHref(taskId, { returnTo = "queue", sampleKey = "" } = {}) {
+  const normalizedTaskId = String(taskId || "").trim();
+  const params = new URLSearchParams();
+  const normalizedReturnTo = String(returnTo || "queue").trim();
+  if (normalizedReturnTo) params.set("return_to", normalizedReturnTo);
+  if (normalizedReturnTo === "database") {
+    params.set("database_section", "database-samples-panel");
+    if (sampleKey) params.set("sample_key", String(sampleKey || ""));
+  } else if (normalizedTaskId) {
+    params.set("task", normalizedTaskId);
+  }
+  const query = params.toString();
+  return `/tasks/${encodeURIComponent(normalizedTaskId)}/result-page${query ? `?${query}` : ""}`;
+}
+
 function applyInitialTabFromUrl() {
   const params = new URLSearchParams(window.location.search);
   const tab = params.get("tab") || window.localStorage.getItem("bac-active-tab") || "";
+  const taskFocus = String(params.get("task") || "").trim();
+  const closureAction = String(params.get("closure_action") || "").trim();
+  const sampleFocus = String(params.get("sample_key") || "").trim();
   const databaseSection = params.get("database_section") || window.localStorage.getItem("bac-database-section") || "";
   const databaseExtraSection = params.get("database_extra_section") || window.localStorage.getItem("bac-database-extra-section") || "";
+  const adminSection = params.get("admin_section") || "";
   const referenceSection = params.get("reference_section") || window.localStorage.getItem("bac-reference-section") || "";
   const databaseSampleView = window.localStorage.getItem("bac-database-sample-view") || "";
-  if (tab === "queue") {
+  if (taskFocus && (tab === "queue" || !tab)) {
+    state.selectedTaskId = taskFocus;
+    state.pendingClosureActionFromUrl = closureAction;
+    state.queueControls.status = "ALL";
+    Object.keys(state.queueTable.filters || {}).forEach((key) => {
+      state.queueTable.filters[key] = "";
+    });
+    state.queueTable.filterMenuOpen = false;
+    state.queueTable.inspectorScrollTop = 0;
+  }
+  if (tab === "queue" || (taskFocus && !tab)) {
     setActiveTab("queue-tab");
     return;
   }
@@ -1979,10 +2356,11 @@ function applyInitialTabFromUrl() {
     return;
   }
   if (tab === "database") {
-    setActiveTab("database-tab");
-    if (databaseSection) {
-      setActiveDatabaseSection(databaseSection);
+    if (sampleFocus) {
+      state.pendingDatabaseSampleKeyFromUrl = sampleFocus;
     }
+    setActiveTab("database-tab");
+    setActiveDatabaseSection(sampleFocus ? "database-samples-panel" : databaseSection);
     if (databaseSampleView) {
       setActiveDatabaseSampleView(databaseSampleView);
     }
@@ -2010,6 +2388,9 @@ function applyInitialTabFromUrl() {
   }
   if (tab === "admin" && state.currentUser?.role === "admin") {
     setActiveTab("admin-tab");
+    if (adminSection) {
+      adminDomain.activate(adminSection);
+    }
     return;
   }
   if (tab === "audit" && state.currentUser?.role === "admin") {
@@ -2065,10 +2446,13 @@ function bindEvents() {
   elements.tabButtons.forEach((button) => {
     button.addEventListener("click", () => setActiveTab(button.dataset.tabTarget));
   });
-  document.getElementById("confirm-action-close")?.addEventListener("click", () => closeConfirmActionModal(false));
-  document.getElementById("confirm-action-cancel")?.addEventListener("click", () => closeConfirmActionModal(false));
-  document.getElementById("confirm-action-backdrop")?.addEventListener("click", () => closeConfirmActionModal(false));
-  document.getElementById("confirm-action-confirm")?.addEventListener("click", () => closeConfirmActionModal(true));
+  elements.modelingSectionTabs.forEach((button) => {
+    button.addEventListener("click", () => setActiveModelingSection(button.dataset.modelingSection || "modeling-samples-section"));
+  });
+  elements.modelingRefreshButton?.addEventListener("click", () => loadModelingPlatform({ force: true }));
+  elements.modelingContent?.addEventListener("submit", onModelingSubmit);
+  elements.modelingContent?.addEventListener("click", onModelingClick);
+  elements.modelingContent?.addEventListener("change", onModelingChange);
   elements.heroStartButton?.addEventListener("click", () => {
     setActiveTab("submission-tab");
     elements.chooseInputPathButton?.focus();
@@ -2252,6 +2636,10 @@ function bindEvents() {
   });
   elements.mergedExportFilteredButton?.addEventListener("click", () => exportMergedSamples("filtered"));
   elements.mergedExportSelectedButton?.addEventListener("click", () => exportMergedSamples("selected"));
+  elements.analysisExportBackdrop?.addEventListener("click", closeAnalysisExportModal);
+  elements.closeAnalysisExportModalButton?.addEventListener("click", closeAnalysisExportModal);
+  elements.cancelAnalysisExportButton?.addEventListener("click", closeAnalysisExportModal);
+  elements.confirmAnalysisExportButton?.addEventListener("click", confirmAnalysisExport);
   elements.refreshDatabaseButton?.addEventListener("click", () => {
     if (state.activeTab === "database-extra-tab" && state.databaseExtraSection === "database-knowledge-panel") {
       loadKnowledgeBaseSummary().catch((error) => {
@@ -2442,9 +2830,6 @@ function bindEvents() {
   elements.refreshServerButton?.addEventListener("click", loadServerStatus);
   elements.logoutButton?.addEventListener("click", logout);
   elements.toggleSidebarButton?.addEventListener("click", toggleSidebar);
-  elements.adminSectionTabs.forEach((button) => {
-    button.addEventListener("click", () => setActiveAdminSection(button.dataset.adminSection || "admin-settings-section"));
-  });
   elements.databaseSectionTabs.forEach((button) => {
     button.addEventListener("click", () => {
       setActiveDatabaseSection(button.dataset.databaseSection || "database-samples-panel");
@@ -2459,27 +2844,6 @@ function bindEvents() {
   elements.referenceSectionTabs.forEach((button) => {
     button.addEventListener("click", () => setActiveReferenceSection(button.dataset.referenceSection || "reference-host-panel"));
   });
-  elements.settingsForm?.addEventListener("submit", onSaveSettings);
-  elements.refreshAuditButton?.addEventListener("click", () => loadAuditLogs(true));
-  bindImeSafeInput(elements.auditSearch, commitAuditSearch);
-  elements.auditUserFilter?.addEventListener("change", () => {
-    state.auditTrail.filters.username = String(elements.auditUserFilter?.value || "");
-    renderAuditLogs();
-  });
-  elements.auditModuleFilter?.addEventListener("change", () => {
-    state.auditTrail.filters.module = String(elements.auditModuleFilter?.value || "");
-    renderAuditLogs();
-  });
-  elements.auditActionFilter?.addEventListener("change", () => {
-    state.auditTrail.filters.action = String(elements.auditActionFilter?.value || "");
-    renderAuditLogs();
-  });
-  elements.auditOutcomeFilter?.addEventListener("change", () => {
-    state.auditTrail.filters.outcome = String(elements.auditOutcomeFilter?.value || "");
-    renderAuditLogs();
-  });
-  elements.auditList?.addEventListener("click", handleAuditTableClick);
-  elements.auditList?.addEventListener("input", handleAuditTableInput);
   elements.auditList?.addEventListener("compositionstart", (event) => {
     const input = event.target.closest("[data-audit-filter]");
     if (input instanceof HTMLInputElement) {
@@ -2493,8 +2857,6 @@ function bindEvents() {
       commitAuditTableFilter(input);
     }
   });
-  elements.userForm?.addEventListener("submit", onCreateUser);
-  elements.editUserForm?.addEventListener("submit", onSaveUserEdit);
   elements.openCreateUserModalButton?.addEventListener("click", openCreateUserModal);
   elements.closeCreateUserModalButton?.addEventListener("click", closeCreateUserModal);
   elements.cancelCreateUserButton?.addEventListener("click", closeCreateUserModal);
@@ -2652,34 +3014,6 @@ function bindEvents() {
   elements.databaseAlertRuleBackdrop?.addEventListener("click", closeDatabaseAlertRuleModal);
   elements.resetDatabaseAlertRuleButton?.addEventListener("click", onResetDatabaseAlertRule);
   elements.databaseAlertRuleForm?.addEventListener("submit", onSubmitDatabaseAlertRule);
-  elements.closeProjectMilestoneModalButton?.addEventListener("click", closeProjectMilestoneModal);
-  elements.cancelProjectMilestoneButton?.addEventListener("click", closeProjectMilestoneModal);
-  elements.projectMilestoneBackdrop?.addEventListener("click", closeProjectMilestoneModal);
-  elements.projectMilestoneDeleteButton?.addEventListener("click", onDeleteProjectMilestone);
-  elements.projectMilestoneForm?.addEventListener("submit", onSubmitProjectMilestone);
-  elements.closeProjectOwnerModalButton?.addEventListener("click", closeProjectOwnerModal);
-  elements.cancelProjectOwnerButton?.addEventListener("click", closeProjectOwnerModal);
-  elements.projectOwnerBackdrop?.addEventListener("click", closeProjectOwnerModal);
-  elements.projectOwnerForm?.addEventListener("submit", onSubmitProjectOwner);
-  elements.closeProjectDeleteModalButton?.addEventListener("click", closeProjectDeleteModal);
-  elements.cancelProjectDeleteButton?.addEventListener("click", closeProjectDeleteModal);
-  elements.projectDeleteBackdrop?.addEventListener("click", closeProjectDeleteModal);
-  elements.projectDeleteForm?.addEventListener("submit", onSubmitProjectDelete);
-  elements.openProjectCreateModalButton?.addEventListener("click", handleOpenProjectCreateModal);
-  elements.closeProjectCreateModalButton?.addEventListener("click", closeProjectCreateModal);
-  elements.cancelProjectCreateButton?.addEventListener("click", closeProjectCreateModal);
-  elements.projectCreateBackdrop?.addEventListener("click", closeProjectCreateModal);
-  elements.projectCreateForm?.addEventListener("submit", onSubmitProjectCreate);
-  elements.addProjectMilestoneChildButton?.addEventListener("click", () => {
-    appendProjectMilestoneChildRow();
-  });
-  elements.projectMilestoneChildren?.addEventListener("click", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLElement)) return;
-    const removeButton = target.closest("[data-project-milestone-child-remove]");
-    if (!removeButton) return;
-    removeButton.closest(".project-milestone-child-row")?.remove();
-  });
   elements.applyDatabaseBatchTemplateButton?.addEventListener("click", () => {
     applyDatabaseArchiveTemplate(elements.databaseBatchArchiveTemplate?.value || "", elements.databaseBatchEditRows);
   });
@@ -2810,21 +3144,11 @@ function bindEvents() {
   elements.batchInputBackdrop?.addEventListener("click", closeBatchInputModal);
   elements.addBatchRowButton?.addEventListener("click", addBatchInputRow);
   elements.confirmBatchInputButton?.addEventListener("click", onConfirmBatchInput);
-  elements.chooseWorkspaceRootButton?.addEventListener("click", () => openPathBrowser("workspace_root"));
-  elements.choosePipelineScriptButton?.addEventListener("click", () => openPathBrowser("script_file"));
   elements.choosePipelinePythonButton?.addEventListener("click", () => refreshAdminCondaEnvsForRoot({ announce: true }));
-  elements.chooseCondaRootButton?.addEventListener("click", () => openPathBrowser("conda_root"));
-  elements.chooseDatabaseRootButton?.addEventListener("click", () => openPathBrowser("database_root"));
-  elements.chooseAdminMonitorInputDirButton?.addEventListener("click", () => openPathBrowser("admin_monitor_input_dir", { mode: "admin" }));
-  elements.chooseAdminMonitorOutputRootButton?.addEventListener("click", () => openPathBrowser("admin_monitor_output_root", { mode: "admin" }));
-  elements.chooseAdminMonitorInputDirBacteriaButton?.addEventListener("click", () => openPathBrowser("admin_monitor_input_dir_bacteria", { mode: "admin" }));
-  elements.chooseAdminMonitorInputDirVirusButton?.addEventListener("click", () => openPathBrowser("admin_monitor_input_dir_virus", { mode: "admin" }));
-  elements.chooseAdminMonitorInputDirMetagenomeButton?.addEventListener("click", () => openPathBrowser("admin_monitor_input_dir_metagenome", { mode: "admin" }));
-  elements.chooseAdminMonitorOutputRootBacteriaButton?.addEventListener("click", () => openPathBrowser("admin_monitor_output_root_bacteria", { mode: "admin" }));
-  elements.chooseAdminMonitorOutputRootVirusButton?.addEventListener("click", () => openPathBrowser("admin_monitor_output_root_virus", { mode: "admin" }));
-  elements.chooseAdminMonitorOutputRootMetagenomeButton?.addEventListener("click", () => openPathBrowser("admin_monitor_output_root_metagenome", { mode: "admin" }));
-  elements.adminMonitorForm?.addEventListener("submit", onSubmitAdminMonitor);
-  elements.adminPathosourceTriggerForm?.addEventListener("submit", onSaveAdminPathosourceTriggerRules);
+  elements.adminPathosourceTriggerForm?.querySelectorAll("input, textarea, select").forEach((input) => {
+    input.addEventListener("input", () => renderAdminPathosourceTriggerDraftState(true));
+    input.addEventListener("change", () => renderAdminPathosourceTriggerDraftState(true));
+  });
   elements.adminMonitorModuleInputs.forEach((input) => {
     input.addEventListener("change", syncAdminMonitorModuleState);
   });
@@ -2853,9 +3177,6 @@ function bindEvents() {
     syncAdminMonitorVirusGroupBySpecies();
   });
   syncAdminMonitorVirusGroupFilter("all");
-  elements.chooseOfflineUpdateSourceButton?.addEventListener("click", () => openPathBrowser("offline_update_source"));
-  elements.runOnlineUpdateButton?.addEventListener("click", onRunOnlineUpdate);
-  elements.runOfflineUpdateButton?.addEventListener("click", onRunOfflineUpdate);
   elements.closeTaskDetailButton?.addEventListener("click", closeTaskDetail);
   elements.closeResultViewerButton?.addEventListener("click", closeResultViewer);
   elements.resultViewerBackButton?.addEventListener("click", closeResultViewerToQueue);
@@ -3024,7 +3345,7 @@ async function onSubmitTask(event) {
         closeRebuildModal();
       }
       setActiveTab("queue-tab");
-      window.location.href = `/tasks/${encodeURIComponent(created.id)}/result-page`;
+      window.location.href = buildTaskResultPageHref(created.id, { returnTo: "queue" });
     },
   ).catch((error) => {
     showToast(error instanceof Error ? error.message : "任务提交失败", "error");
@@ -3169,7 +3490,7 @@ async function onCreateDemoTask(demoType = "fastq") {
     state.taskDetailView = "result";
     await loadTasks();
     setActiveTab("queue-tab");
-    window.location.href = `/tasks/${encodeURIComponent(created.id)}/result-page`;
+    window.location.href = buildTaskResultPageHref(created.id, { returnTo: "queue" });
   } finally {
     if (elements.demoButton) {
       elements.demoButton.removeAttribute("aria-disabled");
@@ -4485,16 +4806,14 @@ function openBatchInputModal() {
     state.batchInput.rows = [createEmptyBatchRow()];
   }
   state.batchInput.open = true;
-  elements.batchInputModal?.classList.remove("hidden");
-  elements.batchInputModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.batchInputModal);
   renderBatchInputRows();
 }
 
 function closeBatchInputModal() {
   state.batchInput.open = false;
   state.batchInput.target = null;
-  elements.batchInputModal?.classList.add("hidden");
-  elements.batchInputModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.batchInputModal);
   syncMetagenomeInputSourceState();
   syncPairedSingleInputState();
   syncSubmissionStepState();
@@ -4624,6 +4943,8 @@ async function onConfirmBatchInput() {
 async function loadTasks() {
   const data = await requestJson("/api/tasks");
   state.tasks = data.items || [];
+  const visibleTaskIds = new Set(state.tasks.map((task) => String(task?.id || "")).filter(Boolean));
+  state.queueSelectedTaskIds = (state.queueSelectedTaskIds || []).filter((taskId) => visibleTaskIds.has(String(taskId)));
   state.tasks.forEach((task) => {
     const taskId = String(task?.id || "");
     const snapshot = task?.analytics_snapshot;
@@ -4633,6 +4954,7 @@ async function loadTasks() {
   renderCommunityMergeTaskOptions();
   renderTaskList();
   renderAdminMonitorTaskList();
+  renderReviewerReadinessPanel();
 }
 
 async function loadServerStatus() {
@@ -4643,6 +4965,16 @@ async function loadServerStatus() {
 }
 
 async function loadDatabaseRecords() {
+  if (state.databaseLoadPromise) return state.databaseLoadPromise;
+  state.databaseLoadPromise = loadDatabaseRecordsFresh();
+  try {
+    return await state.databaseLoadPromise;
+  } finally {
+    state.databaseLoadPromise = null;
+  }
+}
+
+async function loadDatabaseRecordsFresh() {
   const [data, submissionData, versionLogData, releaseData, batchRunData, hostData, pathogenData, hostJobData, pathogenJobData, pathogenCgmlstData, _metadataTemplateData, nextstrainBuildData, auspiceUploadData] = await Promise.all([
     requestJson(`/api/database/samples?scope=${encodeURIComponent(state.databaseLibraryScope)}`),
     requestJson("/api/database/submissions"),
@@ -4675,18 +5007,31 @@ async function loadDatabaseRecords() {
     Object.entries(state.pathogenReferenceSelection || {}).filter(([key, selected]) => validKeys.has(key) && selected),
   );
   state.pendingReferenceJobs = [...(hostJobData.items || []), ...(pathogenJobData.items || [])];
+  state.databaseLoadedAt = Date.now();
   renderRmhostOptions();
   renderRefOptions();
   renderDatabaseSubmissions();
-  renderHostDatabaseRecords();
-  renderPathogenDatabaseRecords();
-  renderPathogenCgmlstPanels();
+  if (state.activeTab === "host-tab") {
+    renderHostDatabaseRecords();
+    renderPathogenDatabaseRecords();
+    renderPathogenCgmlstPanels();
+  }
   renderBatchImportRunsPanel();
+  preparePendingDatabaseSampleFocus();
   renderDatabaseRecords();
-  renderDatabaseMonitoring();
-  renderDatabaseReport();
-  renderAuspiceBuildPanel();
-  renderProjectManagement();
+  focusPendingDatabaseSampleFromUrl();
+  if (state.activeTab === "database-tab" && state.databaseSection === "database-monitor-panel") {
+    renderDatabaseMonitoring();
+  }
+  if (state.activeTab === "database-tab" && state.databaseSection === "database-report-panel") {
+    renderDatabaseReport();
+  }
+  if (state.activeTab === "database-tab" && state.databaseSection === "database-auspice-panel") {
+    renderAuspiceBuildPanel();
+  }
+  if (state.activeTab === "project-tab") {
+    projectDomain.refresh();
+  }
 }
 
 async function loadKnowledgeBaseSummary() {
@@ -4761,12 +5106,13 @@ function setActiveDatabaseSection(sectionId) {
   }
 }
 
-function setActiveDatabaseExtraSection(sectionId) {
-  if (state.databaseExtraSection === "database-report-template-panel" && sectionId !== "database-report-template-panel" && !confirmDiscardVirusTemplateChanges()) {
+async function setActiveDatabaseExtraSection(sectionId) {
+  const requestedSectionId = sectionId === "database-modeling-panel" ? "database-alert-rules-panel" : sectionId;
+  if (state.databaseExtraSection === "database-report-template-panel" && requestedSectionId !== "database-report-template-panel" && !(await confirmDiscardVirusTemplateChanges())) {
     return;
   }
-  const resolvedSectionId = elements.databaseExtraSectionPanels.some((panel) => panel.id === sectionId)
-    ? sectionId
+  const resolvedSectionId = elements.databaseExtraSectionPanels.some((panel) => panel.id === requestedSectionId)
+    ? requestedSectionId
     : "database-alert-rules-panel";
   state.databaseExtraSection = resolvedSectionId;
   window.localStorage.setItem("bac-database-extra-section", resolvedSectionId);
@@ -4779,9 +5125,6 @@ function setActiveDatabaseExtraSection(sectionId) {
   });
   if (resolvedSectionId === "database-alert-rules-panel") {
     renderDatabaseAlertRulesPanel();
-  }
-  if (resolvedSectionId === "database-modeling-panel") {
-    renderDatabaseModelingPanel();
   }
   if (resolvedSectionId === "database-report-template-panel") {
     if (state.virusReportTemplates.length) {
@@ -4860,13 +5203,11 @@ function openDatabaseAlertRuleModal(topicKey = "general") {
   if (elements.databaseAlertRuleReviewOnAlertAndDominant) elements.databaseAlertRuleReviewOnAlertAndDominant.checked = Boolean(profile.reviewOnAlertAndDominant);
   if (elements.databaseAlertRuleReviewOnLeadAreaRepeat) elements.databaseAlertRuleReviewOnLeadAreaRepeat.checked = Boolean(profile.reviewOnLeadAreaRepeat);
   if (elements.databaseAlertRuleFocusOnMultipleAreas) elements.databaseAlertRuleFocusOnMultipleAreas.checked = Boolean(profile.focusOnMultipleAreas);
-  elements.databaseAlertRuleModal?.classList.remove("hidden");
-  elements.databaseAlertRuleModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.databaseAlertRuleModal);
 }
 
 function closeDatabaseAlertRuleModal() {
-  elements.databaseAlertRuleModal?.classList.add("hidden");
-  elements.databaseAlertRuleModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.databaseAlertRuleModal);
 }
 
 function persistDatabaseAlertRuleTopic(topicKey, payload) {
@@ -5049,7 +5390,7 @@ function renderDatabaseAlertRulesPanel() {
       <div class="panel-head compact">
         <div>
           <h3>四级判定框架</h3>
-          <p class="field-note">所有专题最终收敛到同一套四级输出，便于样本数据库、结果统计和报告统计共用口径。</p>
+          <p class="field-note">各专题统一输出四级预警结果，便于统计、检索与报告引用。</p>
         </div>
       </div>
       <div class="database-alert-level-grid">
@@ -5090,7 +5431,7 @@ function renderDatabaseAlertRulesPanel() {
       <div class="panel-head compact">
         <div>
           <h3>专题预警口径</h3>
-          <p class="field-note">不同专题使用不同阈值与升级说明，避免“一套阈值打天下”。</p>
+          <p class="field-note">按专题维护阈值、分级说明和升级条件。</p>
         </div>
         <div class="database-alert-topic-actions">
           <button class="ghost-button database-alert-rule-button is-commit" type="button" data-alert-rule-publish ${draftEntries.length ? "" : "disabled"}>提交规则版本</button>
@@ -5187,106 +5528,74 @@ function renderDatabaseAlertRulesPanel() {
   });
 }
 
-function renderDatabaseModelingPanel() {
+async function renderDatabaseModelingPanel() {
   if (!elements.databaseModelingSummary || !elements.databaseModelingContent) return;
-  const rows = [
-    {
-      model: "SIAMCAT",
-      goal: "疾病/状态分类、风险分层",
-      features: "物种丰度、通路、基因家族、临床标签",
-      type: "传统机器学习框架，常配 LASSO / Elastic Net / RF",
-      data: "多批次宏基因组样本、明确标签、外部验证集",
-      module: "报告统计、专题预警、医院版/疾控版报告",
-      fit: "最适合作为可解释专题预警模型底座",
-      source: "Genome Biology 2021",
-    },
-    {
-      model: "DeepMicro",
-      goal: "疾病预测",
-      features: "物种/功能丰度矩阵",
-      type: "自编码器 + 分类器",
-      data: "中等规模标注样本、高维稀疏特征",
-      module: "专题预警模型、科研版分析",
-      fit: "适合后续做高维特征压缩和专题模型",
-      source: "Scientific Reports",
-    },
-    {
-      model: "PopPhy-CNN",
-      goal: "宿主表型/疾病分类",
-      features: "带系统发育关系的 taxonomy 特征",
-      type: "CNN",
-      data: "taxonomy 树、丰度矩阵、标签",
-      module: "知识库+taxonomy 联动建模、科研版",
-      fit: "适合利用现有 taxonomy 与知识库层级",
-      source: "IEEE JBHI",
-    },
-    {
-      model: "MicroPro",
-      goal: "疾病关联/预测",
-      features: "已知物种 + 未比对 reads 派生特征",
-      type: "组合式机器学习",
-      data: "原始 reads、未比对序列特征、标签",
-      module: "宏基因组模块、未知病原信号探索",
-      fit: "适合中期扩展未知组分参与预警",
-      source: "Genome Biology 2019",
-    },
-    {
-      model: "MGS2AMR",
-      goal: "病原与耐药谱预测",
-      features: "reads、ARG 丰度、物种背景",
-      type: "gene-centric pipeline / ML 辅助",
-      data: "宏基因组 reads、ARG 库、物种注释",
-      module: "耐药解读、报告统计、医院版报告",
-      fit: "最适合强化病原+耐药联合风险",
-      source: "Microbiome 2023",
-    },
-    {
-      model: "LRTI-AMR",
-      goal: "临床样本耐药预测",
-      features: "呼吸道 mNGS、病原 reads、ARG 线索",
-      type: "临床预测模型",
-      data: "临床样本、耐药表型或参考标准",
-      module: "医院感染专题、单菌/宏基因组耐药风险",
-      fit: "贴近临床 mNGS 应用场景",
-      source: "Genome Medicine 2022",
-    },
-    {
-      model: "MetaDR",
-      goal: "人类疾病预测",
-      features: "已知微生物 + 未知微生物 + taxonomy",
-      type: "深度学习",
-      data: "较大样本量、整合特征",
-      module: "科研版、中长期算法储备",
-      fit: "适合后续多特征融合增强",
-      source: "iScience 2022",
-    },
-    {
-      model: "MEGMA",
-      goal: "表型/疾病预测",
-      features: "metagenomic 特征的 2D 表示",
-      type: "深度学习",
-      data: "较大规模训练集",
-      module: "科研版、中长期算法储备",
-      fit: "适合储备复杂深度模型路线",
-      source: "Patterns 2022",
-    },
-  ];
-
+  const config = state.databaseModelingConfig || {};
+  const selectedSampleKeys = Array.isArray(state.databaseSelectedSamples) ? state.databaseSelectedSamples : [];
+  const buildModelingPayload = () => ({
+    sample_filter: state.databaseModelingConfig?.sampleFilter || "all",
+    label_field: state.databaseModelingConfig?.labelField || "modeling_review_label",
+    algorithm: state.databaseModelingConfig?.algorithm || "auto_baseline",
+    sample_keys: Array.isArray(state.databaseSelectedSamples) ? state.databaseSelectedSamples : [],
+  });
   elements.databaseModelingSummary.innerHTML = `
     <article class="knowledge-base-card">
-      <span>模型条目</span>
-      <strong>${rows.length} 个</strong>
-      <p>覆盖疾病预测、耐药预测、未知组分利用和多特征融合等方向。</p>
+      <span>读取样本库</span>
+      <strong>加载中</strong>
+      <p>正在评估现有样本、标签和最近评分。</p>
+    </article>
+  `;
+  elements.databaseModelingContent.innerHTML = '<section class="database-alert-rule-block"><p class="field-note">正在加载样本库建模闭环。</p></section>';
+  let payload;
+  try {
+    payload = await requestJson(`/api/database/modeling/readiness?scope=${encodeURIComponent(state.databaseLibraryScope || "main")}`, {
+      method: "POST",
+      body: JSON.stringify(buildModelingPayload()),
+    });
+  } catch (error) {
+    elements.databaseModelingContent.innerHTML = `<section class="database-alert-rule-block"><p class="field-note">${escapeHtml(error.message || "建模评估加载失败。")}</p></section>`;
+    return;
+  }
+  const dataset = payload.dataset || {};
+  const missing = dataset.missing || {};
+  const latestRun = Array.isArray(payload.runs) ? payload.runs[0] : null;
+  const runs = Array.isArray(payload.runs) ? payload.runs : [];
+  const scores = Array.isArray(payload.scores) ? payload.scores : [];
+  const preview = Array.isArray(dataset.preview) ? dataset.preview : [];
+  const quality = dataset.quality || {};
+  const gate = dataset.supervised_gate || {};
+  const readinessScore = Number(payload.readiness_score || 0);
+  const formatPercent = (value) => `${Number(value || 0).toFixed(1).replace(/\.0$/, "")}%`;
+  const distributionMarkup = (distribution = {}, limit = 5) => {
+    const entries = Object.entries(distribution || {}).slice(0, limit);
+    if (!entries.length) return '<span class="field-note">暂无分布数据</span>';
+    return entries.map(([label, count]) => `<span class="database-modeling-dist-item"><strong>${escapeHtml(label)}</strong><em>${escapeHtml(count)}</em></span>`).join("");
+  };
+  const runMetrics = latestRun?.metrics && typeof latestRun.metrics === "object" ? latestRun.metrics : {};
+  const labelFields = Array.isArray(payload.label_fields) ? payload.label_fields : [];
+  const algorithmOptions = Array.isArray(payload.algorithm_options) ? payload.algorithm_options : [];
+  const sampleFilterOptions = Array.isArray(payload.sample_filter_options) ? payload.sample_filter_options : [];
+  const activeConfig = payload.config || {};
+  state.databaseModelingConfig = {
+    sampleFilter: activeConfig.sample_filter || config.sampleFilter || "all",
+    labelField: activeConfig.label_field || config.labelField || "modeling_review_label",
+    algorithm: activeConfig.algorithm || config.algorithm || "auto_baseline",
+  };
+  elements.databaseModelingSummary.innerHTML = `
+    <article class="knowledge-base-card">
+      <span>样本规模</span>
+      <strong>${escapeHtml(dataset.sample_count ?? 0)} 份</strong>
+      <p>来自当前可见样本库，可直接生成建模训练集。</p>
     </article>
     <article class="knowledge-base-card">
-      <span>近期优先</span>
-      <strong>SIAMCAT / MGS2AMR</strong>
-      <p>最贴近当前软件已有的知识库、样本库和专题预警基础。</p>
+      <span>人工标签</span>
+      <strong>${escapeHtml(dataset.labeled_count ?? 0)} 份</strong>
+      <p>${dataset.can_train_supervised ? "已满足监督基线的最低条件。" : `未达到 ${escapeHtml(gate.min_labeled_samples || 30)} 条有效标签门槛，训练会使用规则基线。`}</p>
     </article>
     <article class="knowledge-base-card">
-      <span>适配方向</span>
-      <strong>专题预警 + 耐药风险</strong>
-      <p>优先做规则增强型评分模型，再逐步引入深度学习增强。</p>
+      <span>建模准备度</span>
+      <strong>${escapeHtml(readinessScore)}%</strong>
+      <p>${escapeHtml(payload.recommended_next_step || "先补元数据与人工复核标签。")}</p>
     </article>
   `;
 
@@ -5294,41 +5603,160 @@ function renderDatabaseModelingPanel() {
     <section class="database-alert-rule-block">
       <div class="panel-head compact">
         <div>
-          <h3>可落地建模对照表</h3>
-          <p class="field-note">按预测目标、输入特征、模型类型、所需数据和适配模块整理，方便后续选型和路线规划。</p>
+          <h3>训练配置</h3>
+          <p class="field-note">先选择训练样本、标签字段和建模方法，再预览训练集并训练。这里的选择会写入模型版本记录。</p>
+        </div>
+        <div class="database-alert-topic-actions">
+          <button class="database-alert-rule-button is-secondary" type="button" data-modeling-ensure-labels>补充标签字段</button>
+          <button class="database-alert-rule-button is-secondary" type="button" data-modeling-preview>预览训练集</button>
+          <button class="database-alert-rule-button is-primary" type="button" data-modeling-train-baseline>按当前配置训练</button>
+        </div>
+      </div>
+      <div class="database-modeling-config-grid">
+        <label>
+          <span>训练样本</span>
+          <select data-modeling-config="sampleFilter">
+            ${sampleFilterOptions.map((option) => `<option value="${escapeHtml(option.key)}" ${state.databaseModelingConfig.sampleFilter === option.key ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+          </select>
+        </label>
+        <label>
+          <span>标签字段</span>
+          <select data-modeling-config="labelField">
+            ${labelFields.map((field) => `<option value="${escapeHtml(field.key)}" ${state.databaseModelingConfig.labelField === field.key ? "selected" : ""}>${escapeHtml(field.label || field.key)}</option>`).join("")}
+          </select>
+        </label>
+        <label>
+          <span>建模方法</span>
+          <select data-modeling-config="algorithm">
+            ${algorithmOptions.map((option) => `<option value="${escapeHtml(option.key)}" ${state.databaseModelingConfig.algorithm === option.key ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+          </select>
+        </label>
+        <div class="database-modeling-config-summary">
+          <span>已勾选样本</span>
+          <strong>${escapeHtml(selectedSampleKeys.length)} 份</strong>
+          <p class="field-note">${state.databaseModelingConfig.sampleFilter === "selected" ? "当前训练集只使用样本列表里勾选的样本。" : "选择“样本列表已勾选”时才会使用这些样本。"}</p>
+        </div>
+      </div>
+      <div class="database-modeling-flow">
+        ${["样本入库", "元数据补全", "人工复核标签", "生成训练集", "训练基线模型", "评分回写", "报告解释"]
+          .map((item, index) => `<article><span>${index + 1}</span><strong>${escapeHtml(item)}</strong></article>`)
+          .join("")}
+      </div>
+    </section>
+    <section class="database-alert-rule-block">
+      <div class="panel-head compact">
+        <div>
+          <h3>训练集质量面板</h3>
+          <p class="field-note">当前配置：${escapeHtml((sampleFilterOptions.find((item) => item.key === state.databaseModelingConfig.sampleFilter) || {}).label || state.databaseModelingConfig.sampleFilter)} · 标签 ${escapeHtml((labelFields.find((item) => item.key === state.databaseModelingConfig.labelField) || {}).label || state.databaseModelingConfig.labelField)} · 方法 ${escapeHtml((algorithmOptions.find((item) => item.key === state.databaseModelingConfig.algorithm) || {}).label || state.databaseModelingConfig.algorithm)}。监督基线至少需要 ${escapeHtml(gate.min_labeled_samples || 30)} 条有效人工标签，建议达到 ${escapeHtml(gate.recommended_labeled_samples || 50)} 条后再作为稳定模型使用。</p>
+        </div>
+      </div>
+      <div class="database-alert-score-grid">
+        <article class="database-alert-score-card">
+          <h4>标签分布</h4>
+          <p>${escapeHtml(dataset.labeled_count ?? 0)} / ${escapeHtml(dataset.sample_count ?? 0)} 份已标注，完整率 ${escapeHtml(formatPercent(quality.label_completeness))}。</p>
+          <div class="database-modeling-dist">${distributionMarkup(quality.label_distribution)}</div>
+        </article>
+        <article class="database-alert-score-card">
+          <h4>缺失率</h4>
+          <p>采样日期缺失 ${escapeHtml(formatPercent(quality.missing_rates?.collection_date))}，样本来源缺失 ${escapeHtml(formatPercent(quality.missing_rates?.sample_source))}，复核标签缺失 ${escapeHtml(formatPercent(quality.missing_rates?.label))}。</p>
+        </article>
+        <article class="database-alert-score-card">
+          <h4>样本来源完整性</h4>
+          <p>${escapeHtml(missing.sample_source ?? 0)} 份缺少来源，完整率 ${escapeHtml(formatPercent(quality.sample_source_completeness))}。</p>
+          <div class="database-modeling-dist">${distributionMarkup(quality.sample_source_distribution)}</div>
+        </article>
+        <article class="database-alert-score-card">
+          <h4>病原类型结构</h4>
+          <p>当前类别数 ${escapeHtml(quality.label_class_count || 0)}；重复样本名 ${escapeHtml((quality.duplicate_sample_names || []).length)} 个。</p>
+          <div class="database-modeling-dist">${distributionMarkup(quality.pathogen_distribution)}</div>
+        </article>
+        <article class="database-alert-score-card">
+          <h4>监督基线闸门</h4>
+          <p>${escapeHtml(gate.message || "当前未达到监督模型启用条件。")}</p>
+        </article>
+        <article class="database-alert-score-card">
+          <h4>采样日期完整性</h4>
+          <p>${escapeHtml(missing.collection_date ?? 0)} 份缺少采样日期，完整率 ${escapeHtml(formatPercent(quality.collection_date_completeness))}。</p>
+        </article>
+      </div>
+    </section>
+    <section class="database-alert-rule-block">
+      <div class="panel-head compact">
+        <div>
+          <h3>模型版本详情</h3>
+          <p class="field-note">${latestRun ? `当前报告默认读取最近评分版本 ${escapeHtml(latestRun.model_version || latestRun.run_id || "-")}。` : "暂无模型版本。首次训练后会记录版本、样本数、标签数、算法和特征列。"}</p>
+        </div>
+      </div>
+      ${latestRun ? `
+        <div class="database-modeling-version-grid">
+          <article><span>版本号</span><strong>${escapeHtml(latestRun.model_version || "-")}</strong></article>
+          <article><span>算法</span><strong>${escapeHtml(latestRun.algorithm || "-")}</strong></article>
+          <article><span>模式</span><strong>${escapeHtml(runMetrics.mode || "-")}</strong></article>
+          <article><span>训练样本</span><strong>${escapeHtml(latestRun.sample_count || 0)} 份</strong></article>
+          <article><span>人工标签</span><strong>${escapeHtml(latestRun.labeled_count || 0)} 份</strong></article>
+          <article><span>创建人</span><strong>${escapeHtml(latestRun.created_by || "-")}</strong></article>
+        </div>
+        <div class="database-modeling-table-wrap">
+          <table class="database-modeling-table">
+            <thead>
+              <tr>
+                <th>版本</th>
+                <th>算法</th>
+                <th>样本/标签</th>
+                <th>监督状态</th>
+                <th>创建时间</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${runs.map((run) => {
+                const metrics = run?.metrics && typeof run.metrics === "object" ? run.metrics : {};
+                return `
+                  <tr>
+                    <td><strong>${escapeHtml(run.model_version || run.run_id || "-")}</strong></td>
+                    <td>${escapeHtml(run.algorithm || "-")}</td>
+                    <td>${escapeHtml(run.sample_count || 0)} / ${escapeHtml(run.labeled_count || 0)}</td>
+                    <td>${escapeHtml(metrics.supervised ? "已启用监督基线" : "规则基线")}</td>
+                    <td>${escapeHtml(formatDate(run.created_at || "") || "-")}</td>
+                    <td>${escapeHtml(`${run.message || metrics.warning || "-"}${metrics.training_config ? `；样本=${metrics.training_config.sample_filter || "-"}；标签=${metrics.training_config.label_field || "-"}；方法=${metrics.training_config.algorithm || "-"}` : ""}`)}</td>
+                  </tr>
+                `;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+      ` : '<p class="field-note">暂无模型运行记录。</p>'}
+    </section>
+    <section class="database-alert-rule-block">
+      <div class="panel-head compact">
+        <div>
+          <h3>训练集预览</h3>
+          <p class="field-note">系统从样本库抽取质控、物种、分型、耐药/毒力和元数据完整性特征。</p>
         </div>
       </div>
       <div class="database-modeling-table-wrap">
         <table class="database-modeling-table">
           <thead>
             <tr>
-              <th>模型/方法</th>
-              <th>预测目标</th>
-              <th>输入特征</th>
-              <th>模型类型</th>
-              <th>所需数据</th>
-              <th>适合你们的模块</th>
-              <th>当前价值判断</th>
-              <th>来源</th>
+              <th>样本</th>
+              <th>物种</th>
+              <th>类型</th>
+              <th>人工标签</th>
+              <th>规则分值</th>
+              <th>当前解释</th>
             </tr>
           </thead>
           <tbody>
-            ${rows
-              .map(
-                (row) => `
-                  <tr>
-                    <td><strong>${escapeHtml(row.model)}</strong></td>
-                    <td>${escapeHtml(row.goal)}</td>
-                    <td>${escapeHtml(row.features)}</td>
-                    <td>${escapeHtml(row.type)}</td>
-                    <td>${escapeHtml(row.data)}</td>
-                    <td>${escapeHtml(row.module)}</td>
-                    <td>${escapeHtml(row.fit)}</td>
-                    <td>${escapeHtml(row.source)}</td>
-                  </tr>
-                `
-              )
-              .join("")}
+            ${preview.length ? preview.map((row) => `
+              <tr>
+                <td><strong>${escapeHtml(row.sample_name || row.sample_key || "-")}</strong></td>
+                <td>${escapeHtml(row.species_name || "-")}</td>
+                <td>${escapeHtml(row.pathogen_type || "-")}</td>
+                <td>${escapeHtml(row.label || "未标注")}</td>
+                <td>${escapeHtml(row.rule_score ?? "-")}</td>
+                <td>${escapeHtml((row.rule_explanations || []).join("；") || "-")}</td>
+              </tr>
+            `).join("") : '<tr><td colspan="6">当前样本库没有可生成训练集的数据。</td></tr>'}
           </tbody>
         </table>
       </div>
@@ -5336,26 +5764,76 @@ function renderDatabaseModelingPanel() {
     <section class="database-alert-rule-block">
       <div class="panel-head compact">
         <div>
-          <h3>建议的落地顺序</h3>
-          <p class="field-note">先做可解释评分模型，再逐步扩展到专题模型和深度学习增强。</p>
+          <h3>最近一次评分回写</h3>
+          <p class="field-note">${latestRun ? `运行 ${escapeHtml(latestRun.run_id)}，算法 ${escapeHtml(latestRun.algorithm || "-")}。` : "还没有训练运行。点击上方按钮后会写入样本评分并进入报告解释。"}</p>
         </div>
       </div>
-      <div class="database-alert-score-grid">
-        <article class="database-alert-score-card">
-          <h4>第一步：规则增强型评分模型</h4>
-          <p>利用样本量偏离、主导病原偏离、MGE 偏离、区域集中、聚集状态、MLST 和血清型，输出常规变化/重点关注/异常信号/需复核事件。</p>
-        </article>
-        <article class="database-alert-score-card">
-          <h4>第二步：专题模型</h4>
-          <p>按医院感染、腹泻病、脑膜炎/脑炎、环境监测等专题分别建模，不再尝试一套模型打所有场景。</p>
-        </article>
-        <article class="database-alert-score-card">
-          <h4>第三步：深度学习增强</h4>
-          <p>在稳定标签和足够历史样本基础上，再引入 DeepMicro、PopPhy-CNN、MetaDR 这类更复杂模型做性能增强。</p>
-        </article>
+      <div class="database-modeling-score-list">
+        ${scores.length ? scores.map((score) => {
+          let explanations = [];
+          try {
+            explanations = JSON.parse(score.explanation_json || "[]");
+          } catch (error) {
+            explanations = [];
+          }
+          return `
+            <article class="database-review-card database-modeling-score-card">
+              <div>
+                <strong>${escapeHtml(score.sample_name || score.sample_key || "-")}</strong>
+                <p>${escapeHtml((explanations || []).join("；") || "暂无解释因素。")}</p>
+              </div>
+              <div class="database-version-meta">
+                <span class="mini-chip ${score.risk_level === "review" || score.risk_level === "abnormal" ? "failed" : score.risk_level === "focus" ? "running" : "done"}">${escapeHtml(score.risk_label || score.risk_level || "-")}</span>
+                <span class="field-note">${escapeHtml(score.risk_score ?? "-")} 分</span>
+              </div>
+            </article>
+          `;
+        }).join("") : '<p class="field-note">暂无评分结果。</p>'}
       </div>
     </section>
   `;
+  elements.databaseModelingContent.querySelectorAll("[data-modeling-config]").forEach((control) => {
+    control.addEventListener("change", () => {
+      const key = control.dataset.modelingConfig;
+      if (!key) return;
+      const value = String(control.value || "");
+      if (key === "sampleFilter") state.databaseModelingConfig.sampleFilter = value;
+      if (key === "labelField") state.databaseModelingConfig.labelField = value;
+      if (key === "algorithm") state.databaseModelingConfig.algorithm = value;
+    });
+  });
+  elements.databaseModelingContent.querySelector("[data-modeling-preview]")?.addEventListener("click", () => {
+    renderDatabaseModelingPanel();
+  });
+  elements.databaseModelingContent.querySelector("[data-modeling-ensure-labels]")?.addEventListener("click", async () => {
+    const button = elements.databaseModelingContent.querySelector("[data-modeling-ensure-labels]");
+    if (button) button.disabled = true;
+    try {
+      await requestJson("/api/database/modeling/label-templates", { method: "POST", body: JSON.stringify({}) });
+      await loadMetadataTemplates();
+      await renderDatabaseModelingPanel();
+    } catch (error) {
+      showToast(error.message || "标签字段补充失败", "error");
+    } finally {
+      if (button) button.disabled = false;
+    }
+  });
+  elements.databaseModelingContent.querySelector("[data-modeling-train-baseline]")?.addEventListener("click", async () => {
+    const button = elements.databaseModelingContent.querySelector("[data-modeling-train-baseline]");
+    if (button) button.disabled = true;
+    try {
+      const result = await requestJson(`/api/database/modeling/train-baseline?scope=${encodeURIComponent(state.databaseLibraryScope || "main")}`, {
+        method: "POST",
+        body: JSON.stringify(buildModelingPayload()),
+      });
+      showToast(result?.run?.message || "基线模型已训练并回写评分", "success");
+      await renderDatabaseModelingPanel();
+    } catch (error) {
+      showToast(error.message || "基线模型训练失败", "error");
+    } finally {
+      if (button) button.disabled = false;
+    }
+  });
 }
 
 function syncWorkstationUrlState() {
@@ -5495,9 +5973,19 @@ function syncVirusReportTemplateDirtyState(form) {
   setVirusReportTemplateDirty(JSON.stringify(current) !== JSON.stringify(baseline));
 }
 
-function confirmDiscardVirusTemplateChanges() {
+async function confirmDiscardVirusTemplateChanges() {
   if (!state.virusReportTemplateDirty) return true;
-  return window.confirm("当前报告模板有未保存修改，离开会丢失这些改动。确定继续吗？");
+  return openWorkbenchConfirmModal({
+    kicker: "Unsaved Changes",
+    title: "放弃未保存修改",
+    message: "当前报告模板有未保存修改，继续操作会丢失这些改动。",
+    tone: "warning",
+    summaryKicker: "需要确认",
+    summaryTitle: "未保存的模板修改不会自动保留",
+    summaryDetail: "如需保留，请先保存当前模板；如确认不需要保留，可继续离开。",
+    cancelLabel: "返回编辑",
+    confirmLabel: "放弃修改",
+  });
 }
 
 function renderVirusTemplatePaperPreview(template = {}) {
@@ -5763,8 +6251,8 @@ function renderVirusReportTemplateEditor(error = null) {
     </div>
   `;
   elements.virusReportTemplateEditor.querySelectorAll("[data-virus-report-template-id]").forEach((button) => {
-    button.addEventListener("click", () => {
-      if (!confirmDiscardVirusTemplateChanges()) return;
+    button.addEventListener("click", async () => {
+      if (!(await confirmDiscardVirusTemplateChanges())) return;
       state.activeVirusReportTemplateId = String(button.getAttribute("data-virus-report-template-id") || "");
       renderVirusReportTemplateEditor();
     });
@@ -5813,7 +6301,7 @@ async function submitVirusReportTemplateForm(event) {
 async function resetActiveVirusReportTemplate() {
   const active = getActiveVirusReportTemplate();
   if (!active) return;
-  if (!confirmDiscardVirusTemplateChanges()) return;
+  if (!(await confirmDiscardVirusTemplateChanges())) return;
   const data = await requestJson(`/api/report-templates/virus/${encodeURIComponent(String(active.id || ""))}`, {
     method: "DELETE",
   });
@@ -5825,7 +6313,7 @@ async function resetActiveVirusReportTemplate() {
 async function rollbackActiveVirusReportTemplate(eventId = "") {
   const active = getActiveVirusReportTemplate();
   if (!active || !eventId) return;
-  if (!confirmDiscardVirusTemplateChanges()) return;
+  if (!(await confirmDiscardVirusTemplateChanges())) return;
   const data = await requestJson(`/api/report-templates/virus/${encodeURIComponent(String(active.id || ""))}/rollback`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -5909,7 +6397,7 @@ function renderKnowledgeBasePanel(error = null) {
       <div class="panel-head compact">
         <div>
           <h3>当前骨架概况</h3>
-          <p class="field-note">现在不只看数量，也能直接翻看病原体画像与规则条目，检查它到底写了什么。</p>
+          <p class="field-note">查看知识库版本、维护角色和内容结构。</p>
         </div>
       </div>
       <div class="knowledge-base-meta-grid">
@@ -5923,7 +6411,7 @@ function renderKnowledgeBasePanel(error = null) {
       <div class="panel-head compact">
         <div>
           <h3>内容浏览器</h3>
-          <p class="field-note">按分类浏览、搜索具体条目，直接检查前端现在能看到的知识库内容。</p>
+          <p class="field-note">按分类浏览和检索知识库条目。</p>
         </div>
       </div>
       <div class="knowledge-base-browser-toolbar">
@@ -6833,86 +7321,6 @@ async function refreshQueueAndModal() {
   if (state.selectedTaskId && state.taskDetailOpen) {
     await loadTaskDetail(state.selectedTaskId);
   }
-}
-
-async function loadAdminSettings(force = false) {
-  if (!force && isAdminSettingsDirty()) {
-    return;
-  }
-  const data = await requestJson("/api/admin/settings");
-  elements.adminWorkspaceRoot.value = data.workspace_root || "";
-  elements.adminPipelineScript.value = data.pipeline_script || "";
-  if (elements.adminCondaRoot) {
-    elements.adminCondaRoot.value = data.conda_root || "";
-  }
-  if (elements.adminDatabaseRoot) {
-    elements.adminDatabaseRoot.value = data.database_root || "";
-  }
-  if (elements.adminMaxConcurrentTasks) {
-    elements.adminMaxConcurrentTasks.value = String(data.max_concurrent_tasks || 2);
-  }
-  state.detectedCondaEnvs = Array.isArray(data.detected_conda_envs) ? data.detected_conda_envs : [];
-  rebuildAdminPipelineEnvSelectOptions(data.pipeline_python || "");
-  applyAdminCondaEnvValues(data.conda_envs || {});
-  renderAdminDetectedCondaEnvs();
-  state.adminSettingsSnapshot = getAdminSettingsDraft();
-  if (elements.adminMonitorOutputRoot && !elements.adminMonitorOutputRoot.value.trim()) {
-    elements.adminMonitorOutputRoot.value = data.workspace_root || "";
-  }
-  applyAdminPathosourceTriggerRules(data.pathosource_trigger_rules || ADMIN_PATHOSOURCE_TRIGGER_DEFAULTS);
-  syncAdminMonitorModuleState();
-  renderAdminMonitorTaskList();
-}
-
-async function loadUsers() {
-  const data = await requestJson("/api/admin/users");
-  renderUserList(data.items || []);
-}
-
-async function loadAuditLogs(force = false) {
-  if (state.currentUser?.role !== "admin") return;
-  const data = await requestJson("/api/admin/audit-logs");
-  state.auditTrail.items = Array.isArray(data.items) ? data.items : [];
-  state.auditTrail.summary = data.summary || null;
-  state.auditTrail.facets = data.facets || { users: [], modules: [], actions: [] };
-  renderAuditFilters(force);
-  renderAuditSummary();
-  renderAuditLogs();
-}
-
-function renderAuditFilters(force = false) {
-  const facets = state.auditTrail.facets || {};
-  const renderOptions = (items, value, emptyLabel) => [
-    `<option value="">${escapeHtml(emptyLabel)}</option>`,
-    ...(Array.isArray(items) ? items : []).map((item) => `<option value="${escapeHtml(item)}" ${item === value ? "selected" : ""}>${escapeHtml(item)}</option>`),
-  ].join("");
-  if (elements.auditUserFilter && (force || !elements.auditUserFilter.options.length || elements.auditUserFilter.options.length <= 1)) {
-    elements.auditUserFilter.innerHTML = renderOptions(facets.users, state.auditTrail.filters.username, "全部用户");
-  }
-  if (elements.auditModuleFilter && (force || !elements.auditModuleFilter.options.length || elements.auditModuleFilter.options.length <= 1)) {
-    elements.auditModuleFilter.innerHTML = renderOptions(facets.modules, state.auditTrail.filters.module, "全部模块");
-  }
-  if (elements.auditActionFilter && (force || !elements.auditActionFilter.options.length || elements.auditActionFilter.options.length <= 1)) {
-    elements.auditActionFilter.innerHTML = renderOptions(facets.actions, state.auditTrail.filters.action, "全部动作");
-  }
-}
-
-function renderAuditSummary() {
-  const summary = state.auditTrail.summary || { total: 0, failed: 0, today: 0, users: 0 };
-  if (!elements.auditSummary) return;
-  const cards = [
-    { label: "最近事件", value: summary.total, note: "当前加载到的审计记录数" },
-    { label: "今日事件", value: summary.today, note: "当天产生的非查看行为" },
-    { label: "失败事件", value: summary.failed, note: "返回 4xx / 5xx 的操作" },
-    { label: "活跃用户", value: summary.users, note: "产生审计事件的用户数" },
-  ];
-  elements.auditSummary.innerHTML = cards.map((card) => `
-    <article class="server-metric-card audit-summary-card">
-      <span>${escapeHtml(card.label)}</span>
-      <strong>${escapeHtml(String(card.value))}</strong>
-      <small>${escapeHtml(card.note)}</small>
-    </article>
-  `).join("");
 }
 
 async function loadAsmOptions() {
@@ -8085,15 +8493,19 @@ function isVisibleModal(modal) {
 }
 
 function closeTopmostModalOnEscape() {
-  const confirmModal = document.getElementById("confirm-action-modal");
+  const activeWorkbenchModal = state.workbenchModalStack[state.workbenchModalStack.length - 1];
+  if (activeWorkbenchModal) {
+    activeWorkbenchModal.close();
+    return true;
+  }
   const modalStack = [
-    { isOpen: () => isVisibleModal(confirmModal), close: () => closeConfirmActionModal(false) },
     { isOpen: () => state.pathBrowser.open, close: closePathBrowser },
     { isOpen: () => state.rebuildModalOpen, close: closeRebuildModal },
     { isOpen: () => isVisibleModal(elements.taskDeleteModal), close: closeTaskDeleteModal },
     { isOpen: () => isVisibleModal(elements.referenceDeleteModal), close: closeReferenceDeleteModal },
     { isOpen: () => isVisibleModal(elements.databaseDeleteModal), close: closeDatabaseDeleteModal },
     { isOpen: () => isVisibleModal(elements.projectDeleteModal), close: closeProjectDeleteModal },
+    { isOpen: () => state.analysisExport.open, close: closeAnalysisExportModal },
     { isOpen: () => state.mergedExportOpen, close: closeMergedExportModal },
     { isOpen: () => state.resultViewerOpen, close: closeResultViewerToQueue },
     { isOpen: () => state.taskDetailOpen, close: closeTaskDetail },
@@ -8191,8 +8603,48 @@ const MERGED_SAMPLE_COLUMNS = [
   { key: "note", label: "关注说明", sortable: false, text: true },
 ];
 
+const ANALYSIS_EXPORT_TYPES = [
+  { key: "fasta", label: "FASTA", description: "样本 final.fasta 序列文件" },
+  { key: "qc", label: "质控结果", description: "fastp json 与运行日志" },
+  { key: "assembly", label: "组装结果", description: "组装摘要、contig 信息与 CheckM 指标" },
+  { key: "resistance_virulence", label: "耐药毒力结果", description: "CARD 与 VFDB 注释结果" },
+  { key: "mge", label: "MGE 结果", description: "移动遗传元件预测相关文件" },
+  { key: "serotype", label: "血清型鉴定结果", description: "血清型、Kleborate 与 PathoNet 结果" },
+];
+
 function isTaskMergeExportable(task) {
   return String(task?.status || "").toUpperCase() === "SUCCEEDED";
+}
+
+function isTaskBatchImportable(task) {
+  return isTaskMergeExportable(task)
+    && String(task?.params?.method || "").trim().toLowerCase() !== "meta";
+}
+
+function getQueueSelectedTasks() {
+  return (state.queueSelectedTaskIds || [])
+    .map((taskId) => state.tasks.find((task) => String(task.id || "") === String(taskId)))
+    .filter(Boolean);
+}
+
+function getTaskConfirmableActionIds(task) {
+  const closure = getTaskClosureStatus(task);
+  const actions = Array.isArray(closure.confirmable_actions) ? closure.confirmable_actions : [];
+  return actions.map((action) => String(action?.id || "").trim()).filter(Boolean);
+}
+
+function canBatchConfirmClosureAction(task, actionId) {
+  const normalized = String(actionId || "").trim();
+  if (!canSignClosureAction(task, normalized)) return false;
+  return getTaskConfirmableActionIds(task).includes(normalized);
+}
+
+function getBatchArchiveActionId(task) {
+  const closureState = String(getTaskClosureStatus(task).state || "").trim();
+  if (closureState === "needs_archive_export") return "archive_export";
+  if (canBatchConfirmClosureAction(task, "accept_failure")) return "accept_failure";
+  if (canBatchConfirmClosureAction(task, "accept_stop")) return "accept_stop";
+  return "";
 }
 
 function toggleMergeTaskSelection(taskId, checked) {
@@ -8216,17 +8668,67 @@ function toggleVisibleMergeTaskSelection(taskIds, checked) {
 }
 
 function closeMergedExportModal() {
+  closeAnalysisExportModal();
   state.mergedExportOpen = false;
-  elements.mergedExportModal?.classList.add("hidden");
-  elements.mergedExportModal?.setAttribute("aria-hidden", "true");
-  document.documentElement.classList.remove("modal-scroll-locked");
-  document.body.classList.remove("modal-scroll-locked");
+  hideModalElement(elements.mergedExportModal);
+}
+
+function closeAnalysisExportModal() {
+  state.analysisExport.open = false;
+  state.analysisExport.downloading = false;
+  hideModalElement(elements.analysisExportModal);
+}
+
+function openAnalysisExportModal(mode, samples) {
+  const rows = Array.isArray(samples) ? samples : [];
+  if (!rows.length) {
+    showToast(mode === "selected" ? "请先勾选样本，或选择“导出当前筛选结果”。" : "当前筛选范围内没有可导出的样本。", "warning");
+    return;
+  }
+  state.analysisExport.open = true;
+  state.analysisExport.downloading = false;
+  state.analysisExport.mode = mode;
+  state.analysisExport.samples = rows;
+  if (!Array.isArray(state.analysisExport.selectedTypes) || !state.analysisExport.selectedTypes.length) {
+    state.analysisExport.selectedTypes = ANALYSIS_EXPORT_TYPES.map((item) => item.key);
+  }
+  renderAnalysisExportModal();
+  showModalElement(elements.analysisExportModal);
+}
+
+function renderAnalysisExportModal() {
+  const selectedTypes = new Set(state.analysisExport.selectedTypes || []);
+  const sampleCount = state.analysisExport.samples.length;
+  if (elements.analysisExportDescription) {
+    const modeLabel = state.analysisExport.mode === "selected" ? "已勾选样本" : "当前筛选结果";
+    elements.analysisExportDescription.textContent = `将${modeLabel}中的 ${sampleCount} 个样本分析产物打包为 zip 文件；缺失文件会写入 missing_files.tsv。`;
+  }
+  if (elements.analysisExportOptions) {
+    elements.analysisExportOptions.innerHTML = ANALYSIS_EXPORT_TYPES.map((item) => `
+      <label class="analysis-export-option">
+        <input type="checkbox" value="${escapeHtml(item.key)}" data-analysis-export-type ${selectedTypes.has(item.key) ? "checked" : ""}>
+        <span>
+          <strong>${escapeHtml(item.label)}</strong>
+          <small>${escapeHtml(item.description)}</small>
+        </span>
+      </label>
+    `).join("");
+    elements.analysisExportOptions.querySelectorAll("[data-analysis-export-type]").forEach((input) => {
+      input.addEventListener("change", () => {
+        state.analysisExport.selectedTypes = Array.from(elements.analysisExportOptions.querySelectorAll("[data-analysis-export-type]:checked"))
+          .map((item) => item.value);
+        renderAnalysisExportModal();
+      });
+    });
+  }
+  if (elements.confirmAnalysisExportButton) {
+    elements.confirmAnalysisExportButton.disabled = state.analysisExport.downloading || !selectedTypes.size;
+    elements.confirmAnalysisExportButton.textContent = state.analysisExport.downloading ? "正在打包分析结果" : "下载压缩包";
+  }
 }
 
 async function openMergedExportPreview() {
-  const selectedTasks = (state.queueSelectedTaskIds || [])
-    .map((taskId) => state.tasks.find((task) => String(task.id || "") === String(taskId)))
-    .filter(Boolean);
+  const selectedTasks = getQueueSelectedTasks();
   const invalidCount = selectedTasks.filter((task) => !isTaskMergeExportable(task)).length;
   const exportableTasks = selectedTasks.filter(isTaskMergeExportable);
   if (invalidCount) {
@@ -8242,10 +8744,7 @@ async function openMergedExportPreview() {
   state.mergedExport.samples = [];
   state.mergedExport.selectedSampleIds = [];
   renderMergedExportModal();
-  elements.mergedExportModal?.classList.remove("hidden");
-  elements.mergedExportModal?.setAttribute("aria-hidden", "false");
-  document.documentElement.classList.add("modal-scroll-locked");
-  document.body.classList.add("modal-scroll-locked");
+  showModalElement(elements.mergedExportModal);
 
   const results = await Promise.all(exportableTasks.map(async (task) => {
     try {
@@ -8714,6 +9213,10 @@ async function exportMergedSamples(mode) {
   const filtered = getMergedFilteredSortedSamples();
   const selectedIds = new Set(state.mergedExport.selectedSampleIds || []);
   const rows = mode === "selected" ? filtered.filter((sample) => selectedIds.has(sample.sample_id)) : filtered;
+  if (state.mergedExport.exportFormat === "analysis_results") {
+    openAnalysisExportModal(mode, rows);
+    return;
+  }
   if (mode === "selected" && !rows.length) {
     showToast("请先勾选样本，或选择“导出当前筛选结果”。", "warning");
     return;
@@ -8752,6 +9255,37 @@ async function exportMergedSamples(mode) {
   }
   await downloadExportTable(payload);
   showToast(`已导出 ${rows.length} 个样本。`);
+}
+
+async function confirmAnalysisExport() {
+  const artifactTypes = Array.from(new Set(state.analysisExport.selectedTypes || []))
+    .filter((key) => ANALYSIS_EXPORT_TYPES.some((item) => item.key === key));
+  if (!artifactTypes.length) {
+    showToast("请至少选择一种分析结果。", "warning");
+    return;
+  }
+  const samples = (state.analysisExport.samples || []).map((sample) => ({
+    task_id: sample.task_id,
+    sample_name: sample.sample_name,
+  })).filter((sample) => sample.task_id && sample.sample_name);
+  if (!samples.length) {
+    showToast("当前范围内没有可导出的样本。", "warning");
+    return;
+  }
+  state.analysisExport.downloading = true;
+  renderAnalysisExportModal();
+  try {
+    await downloadAnalysisResultsZip({ samples, artifact_types: artifactTypes });
+    showToast(`已开始下载 ${samples.length} 个样本的分析结果。`);
+    closeAnalysisExportModal();
+  } catch (error) {
+    console.error(error);
+  } finally {
+    if (state.analysisExport.open) {
+      state.analysisExport.downloading = false;
+      renderAnalysisExportModal();
+    }
+  }
 }
 
 function buildMergedExportInfoRows(mode, sampleCount) {
@@ -8798,12 +9332,319 @@ async function downloadExportTable(payload) {
   URL.revokeObjectURL(url);
 }
 
+async function downloadAnalysisResultsZip(payload) {
+  const response = await fetch("/api/tasks/batch-analysis-export", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    let message = "分析结果打包失败";
+    try {
+      const data = await response.json();
+      message = data.error || message;
+    } catch (_error) {}
+    showToast(message, "error");
+    throw new Error(message);
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const filenameMatch = disposition.match(/filename\*=UTF-8''([^;]+)/);
+  const filename = filenameMatch ? decodeURIComponent(filenameMatch[1]) : "analysis_results.zip";
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+function getTaskClosureStatus(task) {
+  const closure = task?.closure_status;
+  return closure && typeof closure === "object" ? closure : {};
+}
+
+function queueClosureClassName(stateValue) {
+  const normalized = String(stateValue || "").trim().toLowerCase();
+  if (normalized === "closed") return "closure-linked";
+  if (["needs_report_review", "needs_database_import", "needs_history_compare", "needs_archive_export"].includes(normalized)) return "closure-attention";
+  if (normalized === "report_missing" || normalized === "reviewer_unavailable" || normalized === "analysis_failed" || normalized === "analysis_stopped") return "closure-blocked";
+  if (normalized === "failure_archived") return "closure-neutral";
+  if (normalized === "stopped_archived") return "closure-neutral";
+  if (normalized === "analysis_active") return "closure-active";
+  return "closure-neutral";
+}
+
+function renderTaskClosurePill(task) {
+  const closure = getTaskClosureStatus(task);
+  const label = String(closure.label || "").trim();
+  if (!label) return "";
+  const count = Number(closure.imported_sample_count || 0);
+  const countLabel = count > 0 ? ` · ${count} 入库` : "";
+  return `<span class="queue-closure-pill ${queueClosureClassName(closure.state)}">${escapeHtml(label + countLabel)}</span>`;
+}
+
+function renderClosureNextAction(task, nextAction) {
+  const label = String(nextAction?.label || "继续处理").trim();
+  const actionId = String(nextAction?.id || "").trim();
+  const taskActionMap = {
+    review_log: "log",
+    decide_rebuild: "rebuild",
+    open_output: "browse_output",
+    import_sample: "import_database",
+  };
+  const taskAction = taskActionMap[actionId];
+  if (taskAction) {
+    return `<button class="task-utility-button task-result-button" type="button" data-task-action="${escapeHtml(taskAction)}" data-task-id="${escapeHtml(String(task.id || ""))}">${escapeHtml(label)}</button>`;
+  }
+  const href = String(nextAction?.href || "").trim();
+  if (actionId === "review_report" && href) {
+    return `<a class="task-utility-button task-result-button" href="${escapeHtml(href)}">查看报告</a>`;
+  }
+  if (href) {
+    return `<a class="task-utility-button task-result-button" href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
+  }
+  const anchorMap = { watch_progress: "progress", review_trace: "closure" };
+  const anchor = anchorMap[actionId];
+  if (anchor) {
+    return `<button class="task-utility-button task-result-button" type="button" data-queue-inspector-anchor="${escapeHtml(anchor)}">${escapeHtml(label)}</button>`;
+  }
+  return `<strong>${escapeHtml(label)}</strong>`;
+}
+
+function renderTaskClosureBlock(task) {
+  const closure = getTaskClosureStatus(task);
+  const steps = Array.isArray(closure.steps) ? closure.steps : [];
+  const recentEvents = Array.isArray(closure.recent_events) ? closure.recent_events : [];
+  const deliveryEvidence = Array.isArray(closure.delivery_evidence) ? closure.delivery_evidence : [];
+  const rawConfirmableActions = Array.isArray(closure.confirmable_actions) ? closure.confirmable_actions : [];
+  const responsibility = closure.responsibility && typeof closure.responsibility === "object" ? closure.responsibility : {};
+  const isTaskCreator = String(state.currentUser?.username || "") === String(responsibility.analyst || task.owner || "");
+  const confirmableActions = rawConfirmableActions.filter((action) => canSignClosureAction(task, String(action?.id || "")));
+  const signerNotice = rawConfirmableActions.length && !confirmableActions.length
+    ? (isTaskCreator ? "当前账号是分析执行人，报告复核须由另一名管理员或组管理员签核。" : "当前账号无闭环签核权限，请联系管理员或组管理员处理。")
+    : "";
+  if (!String(closure.label || "").trim() && !steps.length) return "";
+  const nextAction = closure.next_action && typeof closure.next_action === "object" ? closure.next_action : {};
+  return `
+    <div class="queue-stream-card queue-closure-card queue-inspector-section" data-queue-inspector-section="closure">
+      <div class="queue-stream-head">
+        <strong>疾控处置闭环</strong>
+        <span class="${queueClosureClassName(closure.state)}">${escapeHtml(String(closure.label || "待确认"))}</span>
+      </div>
+      <p class="queue-closure-summary">${escapeHtml(String(closure.summary || "当前任务尚未形成可判断的处置状态。"))}</p>
+      ${(responsibility.analyst || responsibility.reviewer) ? `
+        <dl class="queue-closure-responsibility">
+          <div><dt>分析执行人</dt><dd>${escapeHtml(String(responsibility.analyst || "未记录"))}</dd></div>
+          <div><dt>报告复核人</dt><dd>${escapeHtml(String(responsibility.reviewer || "待签核"))}</dd></div>
+          <div><dt>候选复核人</dt><dd>${escapeHtml(Array.isArray(responsibility.eligible_reviewers) && responsibility.eligible_reviewers.length ? responsibility.eligible_reviewers.join("、") : "暂无")}</dd></div>
+          <div class="${responsibility.separation_verified ? "verified" : "pending"}"><dt>责任分离</dt><dd>${responsibility.separation_verified ? "已验证" : "待验证"}</dd></div>
+        </dl>
+      ` : ""}
+      ${steps.length ? `
+        <ol class="queue-closure-steps">
+          ${steps.map((step) => `
+            <li class="queue-closure-step queue-closure-step-${escapeHtml(String(step.state || "pending"))}">
+              <span>${escapeHtml(String(step.label || step.id || "-"))}</span>
+            </li>
+          `).join("")}
+        </ol>
+      ` : ""}
+      ${deliveryEvidence.length ? `
+        <div class="queue-delivery-evidence">
+          <span>交付证据包</span>
+          <div class="queue-delivery-evidence-grid">
+            ${deliveryEvidence.map((item) => `
+              <article>
+                <span>${escapeHtml(String(item.label || "-"))}</span>
+                <strong>${escapeHtml(String(item.value || "已确认"))}</strong>
+                <em>${escapeHtml(String(item.detail || ""))}</em>
+              </article>
+            `).join("")}
+          </div>
+        </div>
+      ` : ""}
+      ${recentEvents.length ? `
+        <div class="queue-closure-events">
+          <span>最近留痕</span>
+          <ul>
+            ${recentEvents.map((event) => `
+              <li>
+                <strong>${escapeHtml(String(event.action || "闭环动作"))}</strong>
+                <em>${escapeHtml([event.operator || "", event.created_at ? formatDate(event.created_at) : ""].filter(Boolean).join(" · ") || "未记录时间")}</em>
+                ${event.detail ? `<p>${escapeHtml(String(event.detail))}</p>` : ""}
+              </li>
+            `).join("")}
+          </ul>
+        </div>
+      ` : ""}
+      ${confirmableActions.length ? `
+        <div class="queue-closure-confirm-actions">
+          ${confirmableActions.map((action) => `
+            <button class="primary-button" type="button" data-task-closure-confirm="${escapeHtml(String(action.id || ""))}" data-task-id="${escapeHtml(String(task.id || ""))}">
+              ${escapeHtml(String(action.label || "确认完成"))}
+            </button>
+            <span>${escapeHtml(String(action.detail || ""))}</span>
+          `).join("")}
+        </div>
+      ` : ""}
+      ${signerNotice ? `<p class="queue-closure-signer-notice">${escapeHtml(signerNotice)}</p>` : ""}
+      ${String(nextAction.label || "").trim() ? `
+        <div class="queue-closure-action">
+          <span>下一步</span>
+          ${renderClosureNextAction(task, nextAction)}
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function buildQueueClosureSummary(tasks = []) {
+  const items = Array.isArray(tasks) ? tasks : [];
+  let escalationCount = 0;
+  const groups = {
+    needs_report_review: { label: "待复核", count: 0, tone: "attention", nextLabel: "确认复核" },
+    reviewer_unavailable: { label: "缺复核人", count: 0, tone: "blocked", nextLabel: "配置复核人" },
+    needs_database_import: { label: "待入库", count: 0, tone: "attention", nextLabel: "导入数据库" },
+    needs_history_compare: { label: "待历史对照", count: 0, tone: "attention", nextLabel: "确认对照" },
+    needs_archive_export: { label: "待归档", count: 0, tone: "attention", nextLabel: "正式导出" },
+    closed: { label: "已闭环", count: 0, tone: "linked", nextLabel: "查看留痕" },
+    report_missing: { label: "待生成报告", count: 0, tone: "blocked", nextLabel: "检查输出" },
+    analysis_failed: { label: "失败待复核", count: 0, tone: "blocked", nextLabel: "查看日志" },
+    failure_archived: { label: "失败已归档", count: 0, tone: "neutral", nextLabel: "查看留痕" },
+    stopped_archived: { label: "停止已归档", count: 0, tone: "neutral", nextLabel: "查看留痕" },
+    analysis_stopped: { label: "已停止", count: 0, tone: "blocked", nextLabel: "确认重建" },
+    analysis_active: { label: "分析中", count: 0, tone: "active", nextLabel: "观察进度" },
+  };
+  items.forEach((task) => {
+    const closure = getTaskClosureStatus(task);
+    const stateValue = String(closure.state || "").trim();
+    if (!stateValue) return;
+    if (!groups[stateValue]) {
+      groups[stateValue] = { label: closure.label || stateValue, count: 0, tone: "neutral", nextLabel: "继续处理" };
+    }
+    if (stateValue === "needs_history_compare" && String(closure.label || "").includes("升级")) {
+      escalationCount += 1;
+      groups[stateValue].label = "待历史/升级";
+      groups[stateValue].nextLabel = "确认处置";
+    }
+    groups[stateValue].count += 1;
+  });
+  const todoStates = ["reviewer_unavailable", "needs_report_review", "needs_database_import", "needs_history_compare", "needs_archive_export", "report_missing", "analysis_failed", "analysis_stopped"];
+  const todoCount = todoStates.reduce((total, key) => total + (groups[key]?.count || 0), 0);
+  const linkedCount = groups.closed?.count || 0;
+  const activeCount = groups.analysis_active?.count || 0;
+  const deliveredCount = linkedCount + (groups.failure_archived?.count || 0) + (groups.stopped_archived?.count || 0);
+  const signatureCount = (groups.reviewer_unavailable?.count || 0) + (groups.needs_report_review?.count || 0);
+  const businessCount = (groups.needs_database_import?.count || 0) + (groups.needs_history_compare?.count || 0) + (groups.needs_archive_export?.count || 0);
+  const blockedCount = (groups.report_missing?.count || 0) + (groups.analysis_failed?.count || 0) + (groups.analysis_stopped?.count || 0);
+  const denominator = Math.max(0, items.length - activeCount);
+  const deliveryRate = denominator ? Math.round((deliveredCount / denominator) * 100) : 0;
+  const ordered = ["reviewer_unavailable", "needs_report_review", "needs_database_import", "needs_history_compare", "needs_archive_export", "closed", "failure_archived", "stopped_archived", "report_missing", "analysis_failed", "analysis_stopped", "analysis_active"]
+    .map((key) => ({ key, ...groups[key] }))
+    .filter((item) => item.count > 0);
+  return {
+    total: items.length,
+    todoCount,
+    linkedCount,
+    activeCount,
+    deliveredCount,
+    deliveryRate,
+    signatureCount,
+    businessCount,
+    blockedCount,
+    escalationCount,
+    ordered,
+    headline: todoCount
+      ? `还有 ${todoCount} 个任务未闭环`
+      : (items.length ? "当前任务闭环状态平稳" : "暂无任务闭环数据"),
+  };
+}
+
+function renderQueueClosureDeliveryStrip(summary) {
+  const cards = [
+    { label: "交付闭环率", value: `${summary.deliveryRate}%`, note: `${summary.deliveredCount} 个已交付 / 异常归档`, tone: summary.todoCount ? "attention" : "linked" },
+    { label: "待签核", value: summary.signatureCount, note: "缺复核人或待报告复核", tone: summary.signatureCount ? "blocked" : "linked" },
+    { label: "待业务处置", value: summary.businessCount, note: "入库、历史对照或正式归档", tone: summary.businessCount ? "attention" : "linked" },
+    { label: "异常阻塞", value: summary.blockedCount, note: "报告缺失、失败或停止", tone: summary.blockedCount ? "blocked" : "linked" },
+    { label: "升级处置", value: summary.escalationCount, note: "历史对照发现需升级事项", tone: summary.escalationCount ? "blocked" : "linked" },
+  ];
+  return `
+    <div class="queue-closure-delivery-strip" aria-label="闭环交付摘要">
+      ${cards.map((card) => `
+        <article class="queue-closure-delivery-card tone-${escapeHtml(card.tone)}">
+          <span>${escapeHtml(card.label)}</span>
+          <strong>${escapeHtml(String(card.value))}</strong>
+          <em>${escapeHtml(card.note)}</em>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+function setQueueClosureFilter(stateKey) {
+  const target = String(stateKey || "").trim();
+  state.queueTable.filters.closure = target
+    ? String((buildQueueClosureSummary(state.tasks).ordered || []).find((item) => item.key === target)?.label || target)
+    : "";
+  state.queueTable.filterMenuOpen = Boolean(target);
+  renderTaskList();
+}
+
+function setQueueClosureOverviewCollapsed(collapsed) {
+  state.queueClosureOverviewCollapsed = Boolean(collapsed);
+  window.localStorage.setItem("bac-queue-closure-overview-collapsed", collapsed ? "1" : "0");
+  renderTaskList();
+}
+
+function renderQueueClosureOverview(tasks = [], options = {}) {
+  const summary = buildQueueClosureSummary(tasks);
+  if (!summary.total && !options.showEmpty) return "";
+  const collapsed = Boolean(state.queueClosureOverviewCollapsed);
+  const criticalCount = Number(summary.signatureCount || 0) + Number(summary.blockedCount || 0);
+  return `
+    <section class="queue-closure-overview ${collapsed ? "is-collapsed" : ""}">
+      <div class="queue-closure-overview-head">
+        <div>
+          <span class="section-kicker">Closure Workbench</span>
+          <strong>${escapeHtml(summary.headline)}</strong>
+        </div>
+        <div class="queue-closure-overview-metrics">
+          <span class="${criticalCount ? "is-critical" : ""}">${escapeHtml(`${criticalCount} 需关注`)}</span>
+          <span>${escapeHtml(`${summary.linkedCount} 已闭环`)}</span>
+          <span>${escapeHtml(`${summary.activeCount} 分析中`)}</span>
+          <button class="queue-closure-overview-toggle" type="button" data-toggle-closure-overview aria-expanded="${collapsed ? "false" : "true"}">
+            ${collapsed ? "展开整理" : "收起整理"}
+          </button>
+        </div>
+      </div>
+      <div class="queue-closure-overview-body">
+        ${renderQueueClosureDeliveryStrip(summary)}
+        <div class="queue-closure-overview-list">
+          ${summary.ordered.length ? summary.ordered.map((item) => `
+            <button class="queue-closure-overview-item tone-${escapeHtml(item.tone)}" type="button" data-queue-closure-filter="${escapeHtml(item.key)}">
+              <span>${escapeHtml(item.label)}</span>
+              <strong>${escapeHtml(String(item.count))}</strong>
+              <em>${escapeHtml(item.nextLabel)}</em>
+            </button>
+          `).join("") : `
+            <div class="queue-closure-overview-empty">当前没有可汇总的闭环状态。</div>
+          `}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderQueueWorkbench(tasks) {
   const columns = [
     { key: "name", label: "任务名称", filterable: true, sortable: true },
     { key: "owner", label: "归属用户", filterable: true, sortable: true },
     { key: "asmType", label: "组装方式", filterable: true, sortable: true },
     { key: "method", label: "组装软件", filterable: true, sortable: true },
+    { key: "closure", label: "闭环状态", filterable: true, sortable: true },
     { key: "runtime", label: "运行时间", filterable: true, sortable: true },
   ];
   const rows = tasks.map((task) => ({
@@ -8813,6 +9654,7 @@ function renderQueueWorkbench(tasks) {
       owner: String(task.owner || "-"),
       asmType: String(getAsmTypeLabel(task.params?.asm_type)),
       method: String(task.params?.method || "-"),
+      closure: String(getTaskClosureStatus(task).label || "-"),
       runtime: String(getTaskRunTimeLabel(task)),
       actions: "",
       status: String(task.status || "未知"),
@@ -8847,13 +9689,16 @@ function renderQueueWorkbench(tasks) {
     }));
 
     const sortedRows = filteredRows.slice().sort((left, right) => compareQueueTableRows(left, right, state.queueTable.sortKey, state.queueTable.sortDirection));
-    const exportableRows = sortedRows.filter((row) => isTaskMergeExportable(row.task));
     const selectedTaskIds = new Set(state.queueSelectedTaskIds || []);
-    const selectedExportableCount = state.queueSelectedTaskIds
-      .map((taskId) => state.tasks.find((task) => String(task.id || "") === String(taskId)))
-      .filter((task) => task && isTaskMergeExportable(task)).length;
-    const allVisibleExportableSelected = Boolean(exportableRows.length) && exportableRows.every((row) => selectedTaskIds.has(String(row.task.id || "")));
-    const partialVisibleExportableSelected = exportableRows.some((row) => selectedTaskIds.has(String(row.task.id || ""))) && !allVisibleExportableSelected;
+    const selectedTasks = getQueueSelectedTasks();
+    const selectedCount = selectedTasks.length;
+    const selectedExportableCount = selectedTasks.filter(isTaskMergeExportable).length;
+    const selectedImportableCount = selectedTasks.filter(isTaskBatchImportable).length;
+    const selectedReviewableCount = selectedTasks.filter((task) => canBatchConfirmClosureAction(task, "review_report")).length;
+    const selectedHistoryCount = selectedTasks.filter((task) => canBatchConfirmClosureAction(task, "compare_history")).length;
+    const selectedArchiveCount = selectedTasks.filter((task) => getBatchArchiveActionId(task)).length;
+    const allVisibleSelected = Boolean(sortedRows.length) && sortedRows.every((row) => selectedTaskIds.has(String(row.task.id || "")));
+    const partialVisibleSelected = sortedRows.some((row) => selectedTaskIds.has(String(row.task.id || ""))) && !allVisibleSelected;
     if (!sortedRows.some((row) => row.task.id === state.selectedTaskId)) {
       state.selectedTaskId = sortedRows[0]?.task.id || "";
       state.currentTaskDetail = null;
@@ -8876,49 +9721,58 @@ function renderQueueWorkbench(tasks) {
         { key: column.key, direction: "asc", label: `${column.label} · 升序` },
         { key: column.key, direction: "desc", label: `${column.label} · 降序` },
       ]));
+    const batchActionButtons = `
+      <button class="primary-button queue-merge-export-button" type="button" data-open-merge-export ${selectedExportableCount ? "" : "disabled"}>合并导出 <small>${selectedExportableCount}</small></button>
+      <button class="ghost-button queue-batch-action-button" type="button" data-batch-import-tasks ${selectedImportableCount ? "" : "disabled"}>批量导入数据库 <small>${selectedImportableCount}</small></button>
+      ${canDeleteTask() ? `
+        <button class="ghost-button queue-batch-action-button" type="button" data-batch-review-tasks ${selectedReviewableCount ? "" : "disabled"}>批量报告复核 <small>${selectedReviewableCount}</small></button>
+        <button class="ghost-button queue-batch-action-button" type="button" data-batch-history-tasks ${selectedHistoryCount ? "" : "disabled"}>批量历史对照 <small>${selectedHistoryCount}</small></button>
+        <button class="ghost-button queue-batch-action-button" type="button" data-batch-archive-tasks ${selectedArchiveCount ? "" : "disabled"}>批量归档 <small>${selectedArchiveCount}</small></button>
+      ` : ""}
+      ${canDeleteTask() ? `<button class="ghost-button danger queue-batch-action-button" type="button" data-batch-delete-tasks ${selectedCount ? "" : "disabled"}>批量删除 <small>${selectedCount}</small></button>` : ""}
+    `;
 
     elements.taskList.innerHTML = `
       <section class="queue-workbench">
         <div class="queue-command-panel">
           <div class="queue-dispatch-band queue-dispatch-band-unified">
-            <div class="queue-command-copy queue-command-copy-inline">
-              <strong>当前显示 ${sortedRows.length} / ${rows.length} 个任务</strong>
-              <span>默认排序：${buildQueueSortLabel(columns)}</span>
-              <label class="queue-merge-select-all">
-                <input type="checkbox" data-merge-select-visible ${allVisibleExportableSelected ? "checked" : ""} ${exportableRows.length ? "" : "disabled"} ${partialVisibleExportableSelected ? "data-indeterminate=\"true\"" : ""}>
-                <span>选择当前筛选结果中的已完成任务</span>
-              </label>
-            </div>
-            <div class="queue-command-tools">
-              <button class="primary-button queue-merge-export-button" type="button" data-open-merge-export ${selectedExportableCount ? "" : "disabled"}>合并导出</button>
-              <span class="queue-merge-selected-count">已选择 ${selectedExportableCount} 个任务</span>
-              <details class="queue-control-menu" ${state.queueTable.sortMenuOpen ? "open" : ""} data-queue-sort-menu>
-                <summary class="queue-control-trigger">
-                  <span>排序</span>
-                  <strong>${escapeHtml(buildQueueSortLabel(columns))}</strong>
-                </summary>
-                <div class="queue-control-popover">
-                  <div class="queue-control-popover-head">
-                    <strong>排序方式</strong>
-                    <span>选择列与顺序</span>
+            <div class="queue-command-head">
+              <div class="queue-command-copy queue-command-copy-inline">
+                <strong>当前显示 ${sortedRows.length} / ${rows.length} 个任务</strong>
+                <span>默认排序：${buildQueueSortLabel(columns)}</span>
+                <label class="queue-merge-select-all">
+                  <input type="checkbox" data-merge-select-visible ${allVisibleSelected ? "checked" : ""} ${sortedRows.length ? "" : "disabled"} ${partialVisibleSelected ? "data-indeterminate=\"true\"" : ""}>
+                  <span>选择当前筛选结果中的任务</span>
+                </label>
+              </div>
+              <div class="queue-command-controls">
+                <details class="queue-control-menu" ${state.queueTable.sortMenuOpen ? "open" : ""} data-queue-sort-menu>
+                  <summary class="queue-control-trigger">
+                    <span>排序</span>
+                    <strong>${escapeHtml(buildQueueSortLabel(columns))}</strong>
+                  </summary>
+                  <div class="queue-control-popover">
+                    <div class="queue-control-popover-head">
+                      <strong>排序方式</strong>
+                      <span>选择列与顺序</span>
+                    </div>
+                    <div class="queue-option-list">
+                      ${sortOptions.map((option) => `
+                        <button
+                          class="queue-option-button ${(state.queueTable.sortKey === option.key && state.queueTable.sortDirection === option.direction) ? "active" : ""}"
+                          type="button"
+                          data-queue-sort-option="${escapeHtml(`${option.key}:${option.direction}`)}"
+                        >${escapeHtml(option.label)}</button>
+                      `).join("")}
+                    </div>
                   </div>
-                  <div class="queue-option-list">
-                    ${sortOptions.map((option) => `
-                      <button
-                        class="queue-option-button ${(state.queueTable.sortKey === option.key && state.queueTable.sortDirection === option.direction) ? "active" : ""}"
-                        type="button"
-                        data-queue-sort-option="${escapeHtml(`${option.key}:${option.direction}`)}"
-                      >${escapeHtml(option.label)}</button>
-                    `).join("")}
-                  </div>
-                </div>
-              </details>
-              <details class="queue-control-menu queue-filter-menu" ${state.queueTable.filterMenuOpen ? "open" : ""} data-queue-filter-menu>
-                <summary class="queue-control-trigger">
-                  <span>筛选</span>
-                  <strong>${activeFilters.length || state.queueControls.status !== "ALL" ? `已启用 ${activeFilters.length + (state.queueControls.status !== "ALL" ? 1 : 0)} 项` : "未启用"}</strong>
-                </summary>
-                <div class="queue-control-popover queue-control-popover-wide">
+                </details>
+                <details class="queue-control-menu queue-filter-menu" ${state.queueTable.filterMenuOpen ? "open" : ""} data-queue-filter-menu>
+                  <summary class="queue-control-trigger">
+                    <span>筛选</span>
+                    <strong>${activeFilters.length || state.queueControls.status !== "ALL" ? `已启用 ${activeFilters.length + (state.queueControls.status !== "ALL" ? 1 : 0)} 项` : "未启用"}</strong>
+                  </summary>
+                  <div class="queue-control-popover queue-control-popover-wide">
                   <div class="queue-control-popover-head">
                     <strong>筛选条件</strong>
                     <span>状态和列筛选统一在这里调整</span>
@@ -8944,13 +9798,30 @@ function renderQueueWorkbench(tasks) {
 	                            clearDataName: "data-clear-queue-filter",
 	                          })}
 	                        </label>
-	                      `).join("")}
+                      `).join("")}
                     </div>
                   </div>
+                  </div>
+                </details>
+              </div>
+            </div>
+            <div class="queue-command-tools">
+              <span class="queue-merge-selected-count">已选择 ${selectedCount} 个任务</span>
+              <div class="queue-batch-actions-desktop">
+                ${batchActionButtons}
+              </div>
+              <details class="queue-batch-actions-mobile">
+                <summary class="queue-batch-actions-summary">
+                  <span>批量操作</span>
+                  <strong>${selectedCount} 已选</strong>
+                </summary>
+                <div class="queue-batch-action-grid">
+                  ${batchActionButtons}
                 </div>
               </details>
             </div>
           </div>
+          ${renderQueueClosureOverview(sortedRows.map((row) => row.task), { showEmpty: true })}
         </div>
         <div class="queue-console-grid">
 	          <div class="queue-rail">
@@ -8968,6 +9839,9 @@ function renderQueueWorkbench(tasks) {
 	              action: "放宽筛选条件，或先提交新任务后再查看详情。",
 	              className: "queue-empty queue-inspector-empty",
 	            })}
+	          </aside>
+	          <aside class="queue-closure-dock" aria-label="闭环整理">
+	            ${renderQueueClosureOverview(sortedRows.map((row) => row.task), { showEmpty: true })}
 	          </aside>
         </div>
       </section>
@@ -9002,7 +9876,7 @@ function renderQueueWorkbench(tasks) {
     elements.taskList.querySelectorAll("[data-merge-select-visible]").forEach((input) => {
       input.indeterminate = input.dataset.indeterminate === "true";
       input.addEventListener("change", () => {
-        toggleVisibleMergeTaskSelection(exportableRows.map((row) => row.task.id), input.checked);
+        toggleVisibleMergeTaskSelection(sortedRows.map((row) => row.task.id), input.checked);
         applyState();
       });
     });
@@ -9011,17 +9885,44 @@ function renderQueueWorkbench(tasks) {
       button.addEventListener("click", () => openMergedExportPreview());
     });
 
+    elements.taskList.querySelectorAll("[data-batch-import-tasks]").forEach((button) => {
+      button.addEventListener("click", () => batchImportSelectedTasks());
+    });
+
+    elements.taskList.querySelectorAll("[data-batch-delete-tasks]").forEach((button) => {
+      button.addEventListener("click", () => batchDeleteSelectedTasks());
+    });
+
+    elements.taskList.querySelectorAll("[data-batch-review-tasks]").forEach((button) => {
+      button.addEventListener("click", () => batchConfirmSelectedClosureAction("review_report"));
+    });
+
+    elements.taskList.querySelectorAll("[data-batch-history-tasks]").forEach((button) => {
+      button.addEventListener("click", () => batchConfirmSelectedClosureAction("compare_history"));
+    });
+
+    elements.taskList.querySelectorAll("[data-batch-archive-tasks]").forEach((button) => {
+      button.addEventListener("click", () => batchArchiveSelectedTasks());
+    });
+
+    elements.taskList.querySelectorAll("[data-queue-closure-filter]").forEach((button) => {
+      button.addEventListener("click", () => {
+        setQueueClosureFilter(button.dataset.queueClosureFilter || "");
+      });
+    });
+
+    elements.taskList.querySelectorAll("[data-toggle-closure-overview]").forEach((button) => {
+      button.addEventListener("click", () => {
+        setQueueClosureOverviewCollapsed(!state.queueClosureOverviewCollapsed);
+      });
+    });
+
     elements.taskList.querySelectorAll("[data-queue-task-checkbox]").forEach((input) => {
       input.addEventListener("click", (event) => event.stopPropagation());
       input.addEventListener("change", () => {
         const taskId = String(input.dataset.queueTaskCheckbox || "");
         const task = state.tasks.find((item) => String(item.id || "") === taskId);
         if (!task) return;
-        if (!isTaskMergeExportable(task)) {
-          showToast("仅已完成任务支持合并导出。", "warning");
-          input.checked = false;
-          return;
-        }
         toggleMergeTaskSelection(taskId, input.checked);
         applyState();
       });
@@ -9112,7 +10013,6 @@ function renderQueueWorkbench(tasks) {
 function renderQueueRailItem(row, index) {
   const task = row.task;
   const isActive = task.id === state.selectedTaskId ? " active" : "";
-  const isExportable = isTaskMergeExportable(task);
   const isMergeSelected = state.queueSelectedTaskIds.includes(String(task.id || ""));
   const selectedClass = isMergeSelected ? " merge-selected" : "";
   const subtitle = [task.owner || "-", getAsmTypeLabel(task.params?.asm_type), task.params?.method || "-"].join(" · ");
@@ -9121,13 +10021,12 @@ function renderQueueRailItem(row, index) {
   return `
     <article class="queue-rail-item${isActive}${selectedClass}" data-task-row="${escapeHtml(task.id)}">
       <div class="queue-rail-rowline">
-        <label class="queue-task-checkbox-wrap" title="${isExportable ? "选择该任务用于合并导出" : "仅已完成任务支持合并导出。"}">
+        <label class="queue-task-checkbox-wrap" title="选择该任务用于批量操作">
           <input
             type="checkbox"
             data-queue-task-checkbox="${escapeHtml(task.id)}"
             ${isMergeSelected ? "checked" : ""}
-            ${isExportable ? "" : "disabled"}
-            aria-label="选择 ${escapeHtml(task.name || task.id)} 用于合并导出"
+            aria-label="选择 ${escapeHtml(task.name || task.id)} 用于批量操作"
           >
         </label>
         <button class="queue-rail-select" type="button" data-queue-select="${escapeHtml(task.id)}" aria-label="查看 ${escapeHtml(task.name || task.id)}">
@@ -9142,6 +10041,7 @@ function renderQueueRailItem(row, index) {
               <span>${escapeHtml(getTaskRunTimeLabel(task))}</span>
               <span>${escapeHtml(task.id || "-")}</span>
             </span>
+            ${renderTaskClosurePill(task)}
             ${showProgressBlock ? renderQueueProgressBlock(progress, "rail") : ""}
           </span>
         </button>
@@ -9180,7 +10080,7 @@ function bindQueueRowActions() {
     rowNode.addEventListener("dblclick", () => {
       const taskId = rowNode.dataset.taskRow || "";
       if (taskId) {
-        window.location.href = `/tasks/${encodeURIComponent(taskId)}/result-page`;
+        window.location.href = buildTaskResultPageHref(taskId, { returnTo: "queue" });
       }
     });
   });
@@ -9190,7 +10090,7 @@ function bindQueueRowActions() {
       event.stopPropagation();
       const taskId = button.dataset.taskOpen || "";
       if (taskId) {
-        window.location.href = `/tasks/${encodeURIComponent(taskId)}/result-page`;
+        window.location.href = buildTaskResultPageHref(taskId, { returnTo: "queue" });
       }
     });
   });
@@ -9201,18 +10101,18 @@ function bindQueueRowActions() {
       event.stopPropagation();
       const sectionKey = String(button.dataset.queueInspectorAnchor || "").trim();
       const inspector = button.closest(".queue-inspector-shell");
-      const scrollFrame = inspector?.querySelector(".queue-inspector-scroll");
-      const target = inspector?.querySelector(`[data-queue-inspector-section="${CSS.escape(sectionKey)}"]`);
-      if (!(scrollFrame instanceof HTMLElement) || !(target instanceof HTMLElement)) return;
-      const offset = target.offsetTop - scrollFrame.offsetTop;
-      scrollFrame.scrollTo({ top: Math.max(0, offset - 10), behavior: "smooth" });
-      inspector.querySelectorAll("[data-queue-inspector-anchor]").forEach((anchor) => {
-        anchor.classList.toggle("active", anchor === button);
-      });
-      target.classList.remove("queue-inspector-section-pulse");
-      window.requestAnimationFrame(() => {
-        target.classList.add("queue-inspector-section-pulse");
-      });
+      focusQueueInspectorSection(inspector, sectionKey);
+    });
+  });
+
+  elements.taskList.querySelectorAll("[data-task-closure-confirm]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const taskId = String(button.dataset.taskId || "").trim();
+      const actionId = String(button.dataset.taskClosureConfirm || "").trim();
+      if (!taskId || !actionId) return;
+      await confirmTaskClosureAction(taskId, actionId);
     });
   });
 
@@ -9266,10 +10166,213 @@ function bindQueueRowActions() {
   });
 }
 
+function getClosureInputOptions(actionId) {
+  if (actionId === "review_report") {
+    return [
+      { name: "review_outcome", value: "approved", label: "复核通过", detail: "报告关键结果、质控与解释均已人工复核。" },
+      { name: "review_outcome", value: "approved_with_notes", label: "通过但需关注", detail: "允许推进闭环，但保留需要持续关注的问题。" },
+      { name: "review_outcome", value: "needs_reanalysis", label: "需重分析或补充复核", detail: "阻塞后续入库、历史对照与正式归档。" },
+    ];
+  }
+  if (actionId === "compare_history") {
+    return [
+      { name: "comparison_outcome", value: "no_signal", label: "未发现线索", detail: "未发现聚集、传播或关联线索。" },
+      { name: "comparison_outcome", value: "signal_found", label: "发现线索", detail: "记录发现聚集、传播或关联线索，仍可进入归档。" },
+      { name: "comparison_outcome", value: "needs_escalation", label: "需升级复核或处置", detail: "正式归档保持阻塞，待升级复核后再确认。" },
+    ];
+  }
+  return [];
+}
+
+function openClosureInputModal({
+  title = "闭环确认",
+  message = "请确认本次闭环操作。",
+  actionId = "",
+  defaultNote = "",
+  impact = "",
+  detail = "",
+  confirmLabel = "确认提交",
+  tone = "warning",
+  includeFormat = false,
+} = {}) {
+  const options = getClosureInputOptions(actionId);
+  const selectedOption = options[0]?.value || "";
+  return openWorkbenchFormModal({
+    kicker: tone === "danger" ? "Danger Zone" : "Closure Review",
+    title,
+    message,
+    tone,
+    panelClass: `closure-input-panel ${tone === "danger" ? "is-danger" : "is-warning"}`,
+    formClass: "closure-input-form",
+    summaryKicker: (impact || detail) ? (tone === "danger" ? "高风险操作" : "批量确认") : "",
+    summaryTitle: impact,
+    summaryDetail: detail,
+    confirmLabel,
+    confirmClass: `ghost-button ${tone === "danger" ? "danger" : ""}`.trim(),
+    defaultFocusSelector: "textarea, input, select, button",
+    bodyHtml: `
+        ${options.length ? `
+          <div class="closure-input-options" role="radiogroup" aria-label="闭环结论">
+            ${options.map((option, index) => `
+              <label class="closure-input-option">
+                <input type="radio" name="${escapeHtml(option.name)}" value="${escapeHtml(option.value)}" ${index === 0 ? "checked" : ""}>
+                <span>
+                  <strong>${escapeHtml(option.label)}</strong>
+                  <em>${escapeHtml(option.detail)}</em>
+                </span>
+              </label>
+            `).join("")}
+          </div>
+        ` : ""}
+        ${includeFormat ? `
+          <label class="closure-input-field">
+            <span>正式导出格式</span>
+            <select name="format">
+              <option value="pdf">PDF</option>
+              <option value="word">Word</option>
+              <option value="html">HTML</option>
+            </select>
+            <em>失败或停止任务会忽略格式，只记录异常归档依据。</em>
+          </label>
+        ` : ""}
+        <label class="closure-input-field">
+          <span>审计备注</span>
+          <textarea name="note" rows="5" placeholder="请写明本次确认依据。">${escapeHtml(defaultNote)}</textarea>
+        </label>
+    `,
+    validateSubmit: (form) => {
+      const note = String(form.elements.note?.value || "").trim();
+      if (!note) {
+        showToast("请填写审计备注。", "warning");
+        form.elements.note?.focus();
+        return false;
+      }
+      return true;
+    },
+    transformSubmit: (form) => {
+      const note = String(form.elements.note?.value || "").trim();
+      const payload = { note };
+      if (options.length) {
+        const optionName = options[0].name;
+        const optionValue = String(form.elements[optionName]?.value || selectedOption).trim();
+        payload[optionName] = optionValue;
+      }
+      if (includeFormat) {
+        payload.format = String(form.elements.format?.value || "pdf").trim().toLowerCase();
+      }
+      return payload;
+    },
+  });
+}
+
+function openTextInputModal({
+  title = "输入内容",
+  message = "",
+  label = "名称",
+  defaultValue = "",
+  placeholder = "",
+  confirmLabel = "确认",
+} = {}) {
+  return openWorkbenchFormModal({
+    kicker: "Input",
+    title,
+    message,
+    panelClass: "closure-input-panel",
+    formClass: "closure-input-form",
+    confirmLabel,
+    bodyHtml: `
+        <label class="closure-input-field">
+          <span>${escapeHtml(label)}</span>
+          <input name="value" type="text" value="${escapeHtml(defaultValue)}" placeholder="${escapeHtml(placeholder)}">
+        </label>
+    `,
+    validateSubmit: (form) => {
+      const value = String(form.elements.value?.value || "").trim();
+      if (!value) {
+        showToast("请输入名称。", "warning");
+        form.elements.value?.focus();
+        return false;
+      }
+      return true;
+    },
+    transformSubmit: (form) => String(form.elements.value?.value || "").trim(),
+  });
+}
+
+async function confirmTaskClosureAction(taskId, actionId) {
+  const task = (state.tasks || []).find((item) => String(item.id || "") === String(taskId || "")) || {};
+  const diagnosis = task.failure_diagnosis && typeof task.failure_diagnosis === "object" ? task.failure_diagnosis : {};
+  const promptText = actionId === "review_report"
+    ? "请填写报告复核结论，包括关键结果与需要关注的问题。"
+    : (["accept_failure", "accept_stop"].includes(actionId)
+      ? (actionId === "accept_failure"
+        ? "请填写失败原因、影响判断，以及确认不再重跑的处置依据。"
+        : "请填写停止原因、影响判断，以及确认不再继续运行的终止依据。")
+      : "请填写历史对照结论，包括是否发现聚集、传播或关联线索。");
+  const diagnosisDraft = actionId === "accept_failure" && diagnosis.label
+    ? `系统初判：${diagnosis.label}。${diagnosis.impact || diagnosis.summary || ""} 处置依据：`
+    : "";
+  const input = await openClosureInputModal({
+    title: getClosureActionInstruction(actionId),
+    message: promptText,
+    actionId,
+    defaultNote: diagnosisDraft,
+    tone: ["accept_failure", "accept_stop"].includes(actionId) ? "danger" : "warning",
+    impact: ["accept_failure", "accept_stop"].includes(actionId)
+      ? (actionId === "accept_failure"
+        ? (diagnosis.rerun_recommended ? "系统建议修复后重跑；若继续归档，请写明不再重跑依据。" : "归档后仍保留失败状态和审计记录。")
+        : "归档后仍保留停止状态和审计记录。")
+      : "本次确认会写入任务闭环审计留痕。",
+  });
+  if (!input) return;
+  const endpoint = ["accept_failure", "accept_stop"].includes(actionId)
+    ? `/api/tasks/${encodeURIComponent(taskId)}/failure-disposition`
+    : `/api/tasks/${encodeURIComponent(taskId)}/closure-actions/${encodeURIComponent(actionId)}`;
+  const data = await requestJson(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      note: String(input.note || "").trim(),
+      ...(input.review_outcome ? { review_outcome: input.review_outcome } : {}),
+      ...(input.comparison_outcome ? { comparison_outcome: input.comparison_outcome } : {}),
+      ...(["accept_failure", "accept_stop"].includes(actionId) ? {
+        decision: actionId,
+        diagnosis_category: String(diagnosis.category || ""),
+        diagnosis_label: String(diagnosis.label || ""),
+      } : {}),
+    }),
+  });
+  const nextActionLabel = String(data.next_action?.label || "").trim();
+  showToast(`${data.message || data.label || "闭环动作已确认"}${nextActionLabel ? ` 下一步：${nextActionLabel}` : ""}`);
+  await Promise.all([loadTasks(), loadDatabaseRecords()]);
+}
+
+function renderFailureDiagnosisBlock(task) {
+  const diagnosis = task?.failure_diagnosis && typeof task.failure_diagnosis === "object" ? task.failure_diagnosis : {};
+  if (!String(diagnosis.label || "").trim()) return "";
+  const evidence = Array.isArray(diagnosis.evidence) ? diagnosis.evidence.filter(Boolean) : [];
+  const confidenceLabels = { high: "高可信", medium: "需复核", low: "待确认", confirmed: "已确认" };
+  return `
+    <div class="failure-diagnosis-card">
+      <div class="failure-diagnosis-head">
+        <div><span>异常诊断</span><strong>${escapeHtml(String(diagnosis.label || "原因待确认"))}</strong></div>
+        <span class="mini-chip ${diagnosis.confidence === "high" || diagnosis.confidence === "confirmed" ? "running" : "queued"}">${escapeHtml(confidenceLabels[diagnosis.confidence] || "待确认")}</span>
+      </div>
+      <p>${escapeHtml(String(diagnosis.summary || ""))}</p>
+      <dl>
+        <div><dt>疾控影响</dt><dd>${escapeHtml(String(diagnosis.impact || "当前任务未形成完整可判读结果。"))}</dd></div>
+        <div><dt>建议处置</dt><dd>${escapeHtml(String(diagnosis.recommendation || "请人工复核日志并记录最终判断。"))}</dd></div>
+      </dl>
+      ${evidence.length ? `<div class="failure-diagnosis-evidence"><span>诊断证据</span>${evidence.map((line) => `<code>${escapeHtml(String(line))}</code>`).join("")}</div>` : ""}
+      <small>系统诊断用于辅助定位，异常归档仍需人工确认最终原因与处置依据。</small>
+    </div>
+  `;
+}
+
 function renderQueueInspector(task, summary) {
   const detail = state.currentTaskDetail && state.currentTaskDetail.id === task.id ? state.currentTaskDetail : null;
   const report = state.currentQueueReport && state.currentQueueReport.task?.id === task.id ? state.currentQueueReport : null;
-  const latestLog = detail?.log ? String(detail.log).trim().split("\n").slice(-8).join("\n") : "点击“日志”可查看完整运行日志。";
+  const latestLog = detail?.log_tail ? String(detail.log_tail).trim().split("\n").slice(-8).join("\n") : "点击“日志”可查看完整运行日志。";
   const progress = buildTaskProgressView(task);
   const workstationKey = String(task?.params?.workstation_key || "").trim().toLowerCase();
   const isMetaTask = String(task?.params?.method || "").trim().toLowerCase() === "meta";
@@ -9326,6 +10429,7 @@ function renderQueueInspector(task, summary) {
         </div>
         <nav class="queue-inspector-anchors" aria-label="任务详情快速定位">
           <button type="button" data-queue-inspector-anchor="overview">概览</button>
+          <button type="button" data-queue-inspector-anchor="closure">闭环</button>
           <button type="button" data-queue-inspector-anchor="progress">进度</button>
           <button type="button" data-queue-inspector-anchor="result">结果</button>
           <button type="button" data-queue-inspector-anchor="log">日志</button>
@@ -9338,9 +10442,11 @@ function renderQueueInspector(task, summary) {
           <article><span>${isPathoSourceTask || isMetaTask || isCommunityTask || isVirusTask ? "核心流程" : "组装软件"}</span><strong>${escapeHtml(coreFlowLabel)}</strong></article>
           <article><span>运行时间</span><strong>${escapeHtml(getTaskRunTimeLabel(task))}</strong></article>
         </div>
+        ${renderTaskClosureBlock(task)}
         <div class="queue-inspector-section" data-queue-inspector-section="progress">
           ${renderQueueProgressBlock(progress, "inspector")}
         </div>
+        ${renderFailureDiagnosisBlock(task)}
         ${renderReviewGateBlock(task)}
         <div class="queue-stream-card queue-inspector-section" data-queue-inspector-section="result">
           <div class="queue-stream-head">
@@ -9367,6 +10473,14 @@ function buildQueueInspectorSummary(task) {
     return {
       copy: String(reviewGate.summary || "物种鉴定结果触发了人工复核条件，任务已自动暂停。"),
       emphasis: "待人工确认",
+      points: [],
+    };
+  }
+  const closure = getTaskClosureStatus(task);
+  if (String(closure.summary || "").trim() && ["SUCCEEDED", "FAILED", "STOPPED"].includes(String(task.status || "").toUpperCase())) {
+    return {
+      copy: String(closure.summary || ""),
+      emphasis: String(closure.label || "闭环状态"),
       points: [],
     };
   }
@@ -9423,15 +10537,254 @@ async function importTaskIntoDatabase(task) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
   });
-  const imported = Number(data.imported_count || 0);
-  const skipped = Number(data.skipped_count || 0);
+  showTaskDatabaseImportToast(data, { itemLabel: "样本" });
+  await Promise.all([loadDatabaseRecords(), loadTasks()]);
+}
+
+function summarizeImportSkippedItems(data, limit = 2) {
+  const skipped = Array.isArray(data?.skipped) ? data.skipped : [];
+  return skipped.slice(0, limit).map((item) => {
+    const name = String(item?.sample_name || item?.bin_name || "-").trim() || "-";
+    const reason = String(item?.reason || "").trim();
+    return reason ? `${name}：${reason}` : name;
+  }).filter(Boolean);
+}
+
+function formatTaskDatabaseImportMessage(data, { itemLabel = "样本" } = {}) {
+  const imported = Number(data?.imported_count || 0);
+  const skipped = Number(data?.skipped_count || 0);
+  const nextActionLabel = String(data?.next_action?.label || "").trim();
+  const skippedDetails = summarizeImportSkippedItems(data);
+  const failedItemLabel = itemLabel === "bin" ? " bin" : itemLabel;
+  const base = imported > 0
+    ? `已导入 ${imported} 个${itemLabel}${skipped ? `，跳过 ${skipped} 个` : ""}`
+    : `没有成功导入${failedItemLabel}${skipped ? `，跳过 ${skipped} 个` : ""}`;
+  const detail = skippedDetails.length ? `；${skippedDetails.join("；")}${skipped > skippedDetails.length ? "；其余请查看输出文件" : ""}` : "";
+  return `${base}${detail}${nextActionLabel ? `；下一步：${nextActionLabel}` : ""}`;
+}
+
+function showTaskDatabaseImportToast(data, { itemLabel = "样本" } = {}) {
+  const imported = Number(data?.imported_count || 0);
+  const skipped = Number(data?.skipped_count || 0);
+  showToast(formatTaskDatabaseImportMessage(data, { itemLabel }), imported <= 0 || skipped > 0 ? "warning" : false);
+}
+
+async function batchImportSelectedTasks() {
+  const selectedTasks = getQueueSelectedTasks();
+  const importableTasks = selectedTasks.filter(isTaskBatchImportable);
+  const ignoredCount = selectedTasks.length - importableTasks.length;
+  if (!importableTasks.length) {
+    showToast("所选任务中没有可直接批量入库的已完成任务。Meta 任务需单独选择 bin。", "warning");
+    return;
+  }
+  const confirmed = await confirmDangerAction({
+    title: "批量导入数据库",
+    message: `将依次处理 ${importableTasks.length} 个已完成任务。`,
+    impact: `预计导入 ${importableTasks.length} 个任务${ignoredCount ? `，忽略 ${ignoredCount} 个不符合条件的任务` : ""}`,
+    detail: "已入库样本会由现有导入规则自动跳过；Meta 任务需单独进入任务并选择 bin。",
+    confirmLabel: "确认批量导入",
+    tone: "warning",
+  });
+  if (!confirmed) return;
+
+  let importedCount = 0;
+  let skippedCount = 0;
+  const skippedDetails = [];
+  const failures = [];
+  for (const task of importableTasks) {
+    try {
+      const data = await requestJson(`/api/tasks/${encodeURIComponent(task.id)}/database-import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        silentError: true,
+      });
+      importedCount += Number(data.imported_count || 0);
+      skippedCount += Number(data.skipped_count || 0);
+      summarizeImportSkippedItems(data, 1).forEach((detail) => {
+        skippedDetails.push(`${task.name || task.id} / ${detail}`);
+      });
+    } catch (error) {
+      failures.push(task.name || task.id);
+    }
+  }
+  await Promise.all([loadDatabaseRecords(), loadTasks()]);
+  const warningDetails = [
+    skippedDetails.length ? `跳过示例：${skippedDetails.slice(0, 2).join("；")}${skippedDetails.length > 2 ? "；其余请查看输出文件" : ""}` : "",
+    failures.length ? `失败任务：${failures.slice(0, 3).join("、")}${failures.length > 3 ? " 等" : ""}` : "",
+  ].filter(Boolean).join("；");
   showToast(
-    imported > 0
-      ? `已导入 ${imported} 个样本${skipped ? `，跳过 ${skipped} 个` : ""}`
-      : `没有可导入样本${skipped ? `，跳过 ${skipped} 个` : ""}`,
-    imported <= 0,
+    failures.length
+      ? `批量入库完成：成功导入 ${importedCount} 个样本，跳过 ${skippedCount} 个，失败 ${failures.length} 个任务。${warningDetails ? ` ${warningDetails}` : ""}`
+      : `批量入库完成：成功导入 ${importedCount} 个样本，跳过 ${skippedCount} 个。${warningDetails ? ` ${warningDetails}` : ""}`,
+    failures.length || skippedCount ? "warning" : false,
   );
-  await loadDatabaseRecords();
+}
+
+async function batchDeleteSelectedTasks() {
+  if (!canDeleteTask()) {
+    showToast("当前账号没有删除任务的权限。", "warning");
+    return;
+  }
+  const selectedTasks = getQueueSelectedTasks();
+  if (!selectedTasks.length) {
+    showToast("请先勾选需要删除的任务。", "warning");
+    return;
+  }
+  const demoCount = selectedTasks.filter(isDemoTask).length;
+  const confirmed = await confirmDangerAction({
+    title: "批量删除任务",
+    message: `确认删除已选择的 ${selectedTasks.length} 个任务吗？`,
+    impact: `将删除 ${selectedTasks.length - demoCount} 个任务目录与日志${demoCount ? `，并移除 ${demoCount} 个 Demo 任务入口` : ""}`,
+    detail: "此操作不可撤销。请先确认这些任务结果不再需要从任务队列进入。",
+    confirmLabel: `确认删除 ${selectedTasks.length} 个任务`,
+  });
+  if (!confirmed) return;
+
+  const deletedIds = [];
+  const failures = [];
+  for (const task of selectedTasks) {
+    try {
+      await requestJson(`/api/tasks/${encodeURIComponent(task.id)}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        silentError: true,
+      });
+      deletedIds.push(String(task.id || ""));
+    } catch (error) {
+      failures.push(task.name || task.id);
+    }
+  }
+  state.queueSelectedTaskIds = (state.queueSelectedTaskIds || []).filter((taskId) => !deletedIds.includes(String(taskId)));
+  if (deletedIds.includes(String(state.selectedTaskId || ""))) {
+    state.selectedTaskId = "";
+    state.currentTaskDetail = null;
+  }
+  await loadTasks();
+  showToast(
+    failures.length
+      ? `已删除 ${deletedIds.length} 个任务，${failures.length} 个任务删除失败。`
+      : `已删除 ${deletedIds.length} 个任务。`,
+    failures.length ? "warning" : false,
+  );
+}
+
+async function batchConfirmSelectedClosureAction(actionId) {
+  const actionLabelMap = {
+    review_report: "报告复核",
+    compare_history: "历史对照",
+  };
+  const actionLabel = actionLabelMap[actionId] || "闭环确认";
+  const selectedTasks = getQueueSelectedTasks();
+  const eligibleTasks = selectedTasks.filter((task) => canBatchConfirmClosureAction(task, actionId));
+  const ignoredCount = selectedTasks.length - eligibleTasks.length;
+  if (!eligibleTasks.length) {
+    showToast(`所选任务中没有可批量${actionLabel}的任务。`, "warning");
+    return;
+  }
+  const input = await openClosureInputModal({
+    title: `批量${actionLabel}`,
+    message: `将为 ${eligibleTasks.length} 个任务记录${actionLabel}。`,
+    actionId,
+    defaultNote: `批量${actionLabel}通过。`,
+    impact: `执行 ${eligibleTasks.length} 个任务${ignoredCount ? `，忽略 ${ignoredCount} 个不符合条件的任务` : ""}`,
+    detail: "每个任务都会写入独立审计留痕；不满足责任分离或前置条件的任务不会被强制处理。",
+    confirmLabel: `确认批量${actionLabel}`,
+    tone: "warning",
+  });
+  if (!input) return;
+
+  let successCount = 0;
+  const failures = [];
+  for (const task of eligibleTasks) {
+    try {
+      await requestJson(`/api/tasks/${encodeURIComponent(task.id)}/closure-actions/${encodeURIComponent(actionId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          note: String(input.note || "").trim(),
+          ...(input.review_outcome ? { review_outcome: input.review_outcome } : {}),
+          ...(input.comparison_outcome ? { comparison_outcome: input.comparison_outcome } : {}),
+        }),
+        silentError: true,
+      });
+      successCount += 1;
+    } catch (error) {
+      failures.push(task.name || task.id);
+    }
+  }
+  await Promise.all([loadTasks(), loadDatabaseRecords()]);
+  showToast(
+    failures.length
+      ? `批量${actionLabel}完成：成功 ${successCount} 个，失败 ${failures.length} 个。`
+      : `批量${actionLabel}完成：成功 ${successCount} 个。`,
+    failures.length ? "warning" : false,
+  );
+}
+
+async function batchArchiveSelectedTasks() {
+  const selectedTasks = getQueueSelectedTasks();
+  const archiveItems = selectedTasks
+    .map((task) => ({ task, actionId: getBatchArchiveActionId(task) }))
+    .filter((item) => item.actionId);
+  const ignoredCount = selectedTasks.length - archiveItems.length;
+  if (!archiveItems.length) {
+    showToast("所选任务中没有可批量归档的任务。", "warning");
+    return;
+  }
+  const normalCount = archiveItems.filter((item) => item.actionId === "archive_export").length;
+  const abnormalCount = archiveItems.length - normalCount;
+  const input = await openClosureInputModal({
+    title: "批量归档",
+    message: `将处理 ${archiveItems.length} 个任务归档。`,
+    actionId: "archive_export",
+    defaultNote: "批量归档确认。",
+    includeFormat: true,
+    impact: `正式导出 ${normalCount} 个，异常归档 ${abnormalCount} 个${ignoredCount ? `，忽略 ${ignoredCount} 个不符合条件的任务` : ""}`,
+    detail: "正常任务会记录报告导出归档；失败或停止任务会记录异常处置依据。",
+    confirmLabel: "确认批量归档",
+    tone: abnormalCount ? "danger" : "warning",
+  });
+  if (!input) return;
+  const format = String(input.format || "pdf").trim().toLowerCase();
+
+  let successCount = 0;
+  const failures = [];
+  for (const item of archiveItems) {
+    const { task, actionId } = item;
+    const diagnosis = task.failure_diagnosis && typeof task.failure_diagnosis === "object" ? task.failure_diagnosis : {};
+    try {
+      if (actionId === "archive_export") {
+        await requestJson(`/api/tasks/${encodeURIComponent(task.id)}/report-exports`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ format, note: String(input.note || "").trim() }),
+          silentError: true,
+        });
+      } else {
+        await requestJson(`/api/tasks/${encodeURIComponent(task.id)}/failure-disposition`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            decision: actionId,
+            note: String(input.note || "").trim(),
+            diagnosis_category: String(diagnosis.category || ""),
+            diagnosis_label: String(diagnosis.label || ""),
+          }),
+          silentError: true,
+        });
+      }
+      successCount += 1;
+    } catch (error) {
+      failures.push(task.name || task.id);
+    }
+  }
+  await Promise.all([loadTasks(), loadDatabaseRecords()]);
+  showToast(
+    failures.length
+      ? `批量归档完成：成功 ${successCount} 个，失败 ${failures.length} 个。`
+      : `批量归档完成：成功 ${successCount} 个。`,
+    failures.length ? "warning" : false,
+  );
 }
 
 function openMetaDatabaseImportModal(task, preview) {
@@ -9458,8 +10811,7 @@ function openMetaDatabaseImportModal(task, preview) {
     elements.metaDatabaseImportNote.textContent = `${state.metaDatabaseImport.taskName || "当前任务"} 共识别 ${items.length} 个 bin，勾选后会提取对应 fasta 导入样本数据库。`;
   }
   renderMetaDatabaseImportTable();
-  elements.metaDatabaseImportModal?.classList.remove("hidden");
-  elements.metaDatabaseImportModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.metaDatabaseImportModal);
 }
 
 function closeMetaDatabaseImportModal() {
@@ -9493,8 +10845,7 @@ function closeMetaDatabaseImportModal() {
     elements.metaDatabaseImportSelectAll.indeterminate = false;
   }
   if (elements.metaDatabaseImportSummary) elements.metaDatabaseImportSummary.textContent = "已选 0 / 0";
-  elements.metaDatabaseImportModal?.classList.add("hidden");
-  elements.metaDatabaseImportModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.metaDatabaseImportModal);
 }
 
 function renderMetaDatabaseImportTable() {
@@ -9731,16 +11082,9 @@ async function submitMetaDatabaseImport() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ selected_bins: selectedBins }),
   });
-  const imported = Number(data.imported_count || 0);
-  const skipped = Number(data.skipped_count || 0);
-  showToast(
-    imported > 0
-      ? `已导入 ${imported} 个 bin${skipped ? `，跳过 ${skipped} 个` : ""}`
-      : `没有成功导入 bin${skipped ? `，跳过 ${skipped} 个` : ""}`,
-    imported <= 0,
-  );
+  showTaskDatabaseImportToast(data, { itemLabel: "bin" });
   closeMetaDatabaseImportModal();
-  await loadDatabaseRecords();
+  await Promise.all([loadDatabaseRecords(), loadTasks()]);
 }
 
 function buildTaskProgressView(task) {
@@ -10300,7 +11644,7 @@ function buildQueueExecutiveSummary(report) {
   const priorityRows = countQueuePriorityHits(sections?.priority_serotype || {});
   let focusState = "neutral";
   let focusTitle = "按模块顺序阅读";
-  let focusBody = "当前未见需要优先跳读的高风险结果。";
+  let focusBody = "当前未见需要优先查看的高风险结果。";
   if (priorityRows > 0) {
     focusState = "danger";
     focusTitle = "优先关注毒力血清型";
@@ -10365,7 +11709,7 @@ function buildMetaQueueExecutiveSummary(report) {
       title: dominantSpecies !== "--" ? dominantSpecies : "尚未形成稳定优势物种",
       body: viralRetained > 0
         ? `病毒组装已保留 ${viralRetained} 条候选 contig，建议优先复核病毒筛选结果。`
-        : "当前未见需要优先跳读的病毒保留结果。",
+        : "当前未见需要优先查看的病毒保留结果。",
       state: viralState,
     },
     {
@@ -10569,6 +11913,85 @@ function renderQueueConsoleBanner(tasks) {
   elements.queueConsoleBanner.innerHTML = "";
 }
 
+function pulseQueueElement(target) {
+  if (!(target instanceof HTMLElement)) return;
+  target.classList.remove("queue-inspector-section-pulse");
+  window.requestAnimationFrame(() => {
+    target.classList.add("queue-inspector-section-pulse");
+  });
+}
+
+function focusQueueInspectorSection(inspector, sectionKey) {
+  const normalizedKey = String(sectionKey || "").trim();
+  const scrollFrame = inspector?.querySelector(".queue-inspector-scroll");
+  const target = inspector?.querySelector(`[data-queue-inspector-section="${CSS.escape(normalizedKey)}"]`);
+  if (!(scrollFrame instanceof HTMLElement) || !(target instanceof HTMLElement)) return false;
+  const offset = target.offsetTop - scrollFrame.offsetTop;
+  scrollFrame.scrollTo({ top: Math.max(0, offset - 10), behavior: "smooth" });
+  inspector.querySelectorAll("[data-queue-inspector-anchor]").forEach((anchor) => {
+    anchor.classList.toggle("active", String(anchor.dataset.queueInspectorAnchor || "") === normalizedKey);
+  });
+  pulseQueueElement(target);
+  return true;
+}
+
+function getClosureActionTargetSelector(actionId, taskId) {
+  const normalizedAction = String(actionId || "").trim();
+  const safeTaskId = CSS.escape(String(taskId || "").trim());
+  if (!normalizedAction || !safeTaskId) return "";
+  if (["review_report", "compare_history", "accept_failure", "accept_stop"].includes(normalizedAction)) {
+    return `[data-task-closure-confirm="${CSS.escape(normalizedAction)}"][data-task-id="${safeTaskId}"]`;
+  }
+  const taskActionMap = {
+    import_sample: "import_database",
+    review_log: "log",
+    decide_rebuild: "rebuild",
+    open_output: "browse_output",
+  };
+  const taskAction = taskActionMap[normalizedAction] || "";
+  if (taskAction) {
+    return `[data-task-action="${CSS.escape(taskAction)}"][data-task-id="${safeTaskId}"]`;
+  }
+  if (normalizedAction === "archive_export") {
+    return `[data-task-open="${safeTaskId}"]`;
+  }
+  return "";
+}
+
+function getClosureActionInstruction(actionId) {
+  const labels = {
+    review_report: "报告复核",
+    import_sample: "样本入库",
+    compare_history: "历史对照",
+    archive_export: "导出归档",
+    review_log: "查看日志",
+    decide_rebuild: "确认是否重建",
+    open_output: "检查输出",
+  };
+  return labels[String(actionId || "").trim()] || "闭环动作";
+}
+
+async function consumePendingClosureActionFromUrl() {
+  const actionId = String(state.pendingClosureActionFromUrl || "").trim();
+  const taskId = String(state.selectedTaskId || "").trim();
+  if (!actionId || !taskId || state.activeTab !== "queue-tab") return;
+  state.pendingClosureActionFromUrl = "";
+  await preloadQueueInspector(taskId);
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  const inspector = elements.taskList?.querySelector(".queue-inspector-shell");
+  focusQueueInspectorSection(inspector, "closure");
+  const selector = getClosureActionTargetSelector(actionId, taskId);
+  const actionTarget = selector ? (inspector?.querySelector(selector) || elements.taskList?.querySelector(selector)) : null;
+  if (actionTarget instanceof HTMLElement) {
+    actionTarget.scrollIntoView({ block: "center", behavior: "smooth" });
+    pulseQueueElement(actionTarget);
+    actionTarget.focus({ preventScroll: true });
+    showToast(`已定位到${getClosureActionInstruction(actionId)}，请确认后执行`);
+    return;
+  }
+  showToast("已定位到任务闭环区，请按当前状态继续处理");
+}
+
 async function preloadQueueInspector(taskId) {
   if (!taskId) return;
   if (state.currentTaskDetail?.id === taskId && state.currentQueueReport?.task?.id === taskId) return;
@@ -10621,6 +12044,21 @@ function getTaskRunTimeLabel(task) {
 
 function canDeleteTask(_task) {
   return state.currentUser?.role === "admin" || state.currentUser?.role === "group_admin";
+}
+
+function canSignClosureAction(task, actionId = "") {
+  const role = String(state.currentUser?.role || "").trim();
+  const username = String(state.currentUser?.username || "").trim();
+  const groupName = String(state.currentUser?.group_name || "").trim();
+  const taskOwner = String(task?.owner || "").trim();
+  const taskGroup = String(task?.owner_group || "").trim();
+  if (role !== "admin" && !(role === "group_admin" && groupName && taskGroup === groupName)) {
+    return false;
+  }
+  if (String(actionId || "").trim() === "review_report" && username && taskOwner && username === taskOwner) {
+    return false;
+  }
+  return true;
 }
 
 function canControlTask(task) {
@@ -10687,17 +12125,11 @@ function openTaskDeleteModal(task) {
       ? "这是 Demo 任务。确认后只会移除任务队列中的 Demo 入口与日志，不会删除 Demo 结果目录，后续仍可重新载入该示例数据。"
       : "删除后将移除该任务的入口、日志与任务目录，请确认结果已不再需要继续从任务队列进入。";
   }
-  document.documentElement.classList.add("modal-scroll-locked");
-  document.body.classList.add("modal-scroll-locked");
-  elements.taskDeleteModal?.classList.remove("hidden");
-  elements.taskDeleteModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.taskDeleteModal);
 }
 
 function closeTaskDeleteModal() {
-  elements.taskDeleteModal?.classList.add("hidden");
-  elements.taskDeleteModal?.setAttribute("aria-hidden", "true");
-  document.documentElement.classList.remove("modal-scroll-locked");
-  document.body.classList.remove("modal-scroll-locked");
+  hideModalElement(elements.taskDeleteModal);
   state.currentTaskDeleteId = "";
 }
 
@@ -10793,14 +12225,12 @@ function openResultViewer(task) {
     elements.resultViewerSubtitle.textContent = `当前任务：${label}`;
   }
   renderResultViewer(task);
-  elements.resultViewerModal?.classList.remove("hidden");
-  elements.resultViewerModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.resultViewerModal);
 }
 
 function closeResultViewer() {
   state.resultViewerOpen = false;
-  elements.resultViewerModal?.classList.add("hidden");
-  elements.resultViewerModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.resultViewerModal);
 }
 
 function closeResultViewerToQueue() {
@@ -10877,6 +12307,7 @@ function renderTaskDetail(task) {
 
   const logHtml = `
     <div class="task-detail-scroll">
+      ${renderFailureDiagnosisBlock(task)}
       <div class="detail-block">
         <h3>日志尾部</h3>
         <p class="field-note">显示最近日志输出，适合快速确认当前进展和报错位置。</p>
@@ -10954,8 +12385,7 @@ function renderTaskDetail(task) {
 
 function openTaskDetail() {
   state.taskDetailOpen = true;
-  elements.taskDetailModal.classList.remove("hidden");
-  elements.taskDetailModal.setAttribute("aria-hidden", "false");
+  showModalElement(elements.taskDetailModal);
 }
 
 function closeTaskDetail() {
@@ -10964,8 +12394,7 @@ function closeTaskDetail() {
     state.taskDetailScrollTop[state.taskDetailView] = currentScrollNode.scrollTop;
   }
   state.taskDetailOpen = false;
-  elements.taskDetailModal.classList.add("hidden");
-  elements.taskDetailModal.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.taskDetailModal);
 }
 
 function setTaskDetailView(view) {
@@ -10977,7 +12406,7 @@ function setTaskDetailView(view) {
   syncTaskDetailViewButtons();
   if (view === "result") {
     if (state.currentTaskDetail?.id) {
-      window.location.href = `/tasks/${encodeURIComponent(state.currentTaskDetail.id)}/result-page`;
+      window.location.href = buildTaskResultPageHref(state.currentTaskDetail.id, { returnTo: "queue" });
     }
     return;
   }
@@ -11044,8 +12473,7 @@ async function openRebuildModal(task, options = {}) {
   state.rebuildMode = mode;
   state.rebuildTaskId = mode === "rerun" ? String(task.id || "") : "";
   state.rebuildModalOpen = true;
-  elements.rebuildModal?.classList.remove("hidden");
-  elements.rebuildModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.rebuildModal);
   elements.submitButton.textContent = mode === "rerun" ? "继续运行当前任务" : "启动任务";
   showToast(mode === "rerun" ? "已回填原任务参数，可补充节点后继续运行当前任务。" : "已回填任务参数，可继续修改后再提交。");
 }
@@ -11055,8 +12483,7 @@ function closeRebuildModal() {
   state.rebuildMode = "rebuild";
   state.rebuildTaskId = "";
   restoreSubmissionPanelHome();
-  elements.rebuildModal?.classList.add("hidden");
-  elements.rebuildModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.rebuildModal);
 }
 
 function ensureSubmissionPanelHome() {
@@ -11203,6 +12630,69 @@ function populateFormFromTask(task) {
   syncSubmissionStepState();
 }
 
+function getReviewerReadinessGaps() {
+  const blocked = (state.tasks || []).filter((task) => String(getTaskClosureStatus(task).state || "") === "reviewer_unavailable");
+  const groups = new Map();
+  blocked.forEach((task) => {
+    const groupName = String(task.owner_group || "").trim();
+    const key = groupName || "__unscoped__";
+    groups.set(key, (groups.get(key) || 0) + 1);
+  });
+  return {
+    blocked,
+    groups: Array.from(groups.entries())
+      .map(([key, count]) => ({ groupName: key === "__unscoped__" ? "" : key, count }))
+      .sort((left, right) => right.count - left.count),
+  };
+}
+
+function renderReviewerReadinessPanel() {
+  if (!elements.reviewerReadinessPanel) return;
+  const { blocked, groups } = getReviewerReadinessGaps();
+  if (!blocked.length) {
+    elements.reviewerReadinessPanel.innerHTML = `
+      <div class="reviewer-readiness-head">
+        <div><span>复核能力预检</span><strong>当前没有因缺少复核人而阻塞的任务</strong></div>
+        <span class="mini-chip running">配置正常</span>
+      </div>
+      <p>系统会持续校验分析执行人与报告复核人不是同一账号。</p>
+    `;
+    return;
+  }
+  const groupRows = groups.map(({ groupName, count }) => {
+    const role = groupName ? "group_admin" : "admin";
+    const requirement = groupName
+      ? `新增同组 group_admin，用户组必须为“${groupName}”；或新增另一名 admin。`
+      : "任务未归属用户组，只能新增另一名 admin。";
+    return `
+      <li>
+        <div>
+          <strong>${escapeHtml(groupName || "未分组任务")} · ${count} 个</strong>
+          <span>${escapeHtml(requirement)}</span>
+        </div>
+        <button class="ghost-button" type="button" data-create-reviewer-role="${escapeHtml(role)}" data-create-reviewer-group="${escapeHtml(groupName)}">新增复核人</button>
+      </li>
+    `;
+  }).join("");
+  elements.reviewerReadinessPanel.innerHTML = `
+    <div class="reviewer-readiness-head">
+      <div><span>复核能力预检</span><strong>${blocked.length} 个任务缺少合资格复核人</strong></div>
+      <span class="mini-chip failed">需要配置</span>
+    </div>
+    <p>任务创建人不能复核自己的任务。合资格账号必须未过期，且角色为另一名 admin，或与任务用户组匹配的 group_admin。</p>
+    <ul>${groupRows}</ul>
+  `;
+  elements.reviewerReadinessPanel.querySelectorAll("[data-create-reviewer-role]").forEach((button) => {
+    button.addEventListener("click", () => {
+      openCreateUserModal();
+      if (elements.newRole) elements.newRole.value = button.dataset.createReviewerRole || "group_admin";
+      if (elements.newGroupName) elements.newGroupName.value = button.dataset.createReviewerGroup || "";
+      syncPermissionUi("create");
+      document.getElementById("new_username")?.focus();
+    });
+  });
+}
+
 function renderUserList(items) {
   elements.userList.replaceChildren();
   if (!items.length) {
@@ -11284,7 +12774,7 @@ function renderUserList(items) {
         headers: { "Content-Type": "application/json" },
       });
       showToast(`已删除用户：${user.username}`);
-      await loadUsers();
+      await Promise.all([adminDomain.refreshUsers(), loadTasks()]);
     });
     elements.userList.appendChild(row);
   });
@@ -11452,14 +12942,12 @@ function openEditUserModal(user) {
   setScopedAllowedViruses("edit", user.granted_viruses || user.allowed_viruses || VIRUS_PERMISSION_OPTIONS.map((item) => item.key));
   setScopedModuleExpirations("edit", user.module_expirations || {});
   syncPermissionUi("edit");
-  elements.editUserModal.classList.remove("hidden");
-  elements.editUserModal.setAttribute("aria-hidden", "false");
+  showModalElement(elements.editUserModal);
   elements.editUsername.focus();
 }
 
 function closeEditUserModal() {
-  elements.editUserModal?.classList.add("hidden");
-  elements.editUserModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.editUserModal);
   elements.editUserForm?.reset();
   setScopedAllowedModules("edit", ["bacteria"]);
   setScopedAllowedViruses("edit", VIRUS_PERMISSION_OPTIONS.map((item) => item.key));
@@ -11467,157 +12955,8 @@ function closeEditUserModal() {
   syncPermissionUi("edit");
 }
 
-function getFilteredAuditRows() {
-  const filters = state.auditTrail.filters || {};
-  return (state.auditTrail.items || []).filter((item) => {
-    const username = String(item.username || "");
-    const module = String(item.module || "");
-    const action = String(item.action || "");
-    const outcome = String(item.outcome || "");
-    const searchTarget = [
-      item.path,
-      item.target_id,
-      item.request_summary,
-      item.response_summary,
-      item.username,
-      item.module,
-      item.action,
-    ].join(" ").toLowerCase();
-    if (filters.username && username !== filters.username) return false;
-    if (filters.module && module !== filters.module) return false;
-    if (filters.action && action !== filters.action) return false;
-    if (filters.outcome && outcome !== filters.outcome) return false;
-    if (filters.path && !String(item.path || "").toLowerCase().includes(String(filters.path || "").toLowerCase())) return false;
-    if (filters.target_id && !String(item.target_id || "").toLowerCase().includes(String(filters.target_id || "").toLowerCase())) return false;
-    if (filters.search && !searchTarget.includes(String(filters.search || "").toLowerCase())) return false;
-    return true;
-  });
-}
-
-function getSortedAuditRows(rows) {
-  const key = state.auditTrail.sortKey || "created_at";
-  const direction = state.auditTrail.sortDirection === "asc" ? 1 : -1;
-  return [...rows].sort((left, right) => String(left?.[key] || "").localeCompare(String(right?.[key] || ""), "zh-CN") * direction);
-}
-
-function renderAuditLogs(focusKey = "", caretPosition = null) {
-  if (!elements.auditList) return;
-  const columns = [
-    { key: "created_at", label: "时间" },
-    { key: "username", label: "用户" },
-    { key: "module", label: "模块" },
-    { key: "action", label: "动作" },
-    { key: "target_id", label: "对象编号" },
-    { key: "path", label: "路径" },
-    { key: "outcome", label: "结果" },
-  ];
-  const rows = getSortedAuditRows(getFilteredAuditRows());
-  elements.auditList.innerHTML = `
-    <div class="database-table-frame">
-      <table class="database-table report-table table-tone-assembly">
-        <thead>
-          <tr>
-            ${columns.map((column) => `
-              <th>
-                <div class="table-head-stack queue-table-head-stack">
-                  <button class="database-sort-button table-sort-button ${state.auditTrail.sortKey === column.key ? "active" : ""}" type="button" data-audit-sort="${escapeHtml(column.key)}">
-                    <span class="queue-table-head-label">${escapeHtml(column.label)}</span>
-                    <span>${state.auditTrail.sortKey === column.key ? (state.auditTrail.sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
-                  </button>
-	                  ${renderTableFilterInput({
-	                    value: state.auditTrail.filters[column.key] || "",
-	                    dataName: "data-audit-filter",
-	                    dataValue: column.key,
-	                    clearDataName: "data-clear-audit-filter",
-	                  })}
-                </div>
-              </th>
-            `).join("")}
-            <th><span class="queue-table-head-label">请求摘要</span></th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.length ? rows.map((row) => `
-            <tr>
-              <td${renderMobileCellAttributes("时间")}>${escapeHtml(formatDate(row.created_at) || row.created_at || "-")}</td>
-              <td${renderMobileCellAttributes("用户")}><strong>${escapeHtml(row.username || "-")}</strong></td>
-              <td${renderMobileCellAttributes("模块")}>${escapeHtml(row.module || "-")}</td>
-              <td${renderMobileCellAttributes("动作")}>${escapeHtml(row.action || "-")}</td>
-              <td title="${escapeHtml(row.target_id || "-")}"${renderMobileCellAttributes("对象编号")}>${escapeHtml(truncateText(row.target_id || "-", 20))}</td>
-              <td title="${escapeHtml(row.path || "-")}"${renderMobileCellAttributes("路径")}>${escapeHtml(truncateText(row.path || "-", 36))}</td>
-              <td${renderMobileCellAttributes("结果")}><span class="status-chip ${row.outcome === "failed" ? "failed" : "running"}">${row.outcome === "failed" ? "失败" : "成功"}</span></td>
-              <td title="${escapeHtml(row.request_summary || row.response_summary || "-")}"${renderMobileCellAttributes("请求摘要")}>${escapeHtml(truncateText(row.request_summary || row.response_summary || "-", 54))}</td>
-            </tr>
-	          `).join("") : `
-	            <tr>
-	              <td colspan="8" class="database-empty-cell">
-	                ${renderEmptyState({
-	                  title: "当前没有符合条件的审计事件",
-	                  reason: state.auditTrail.items.length ? "审计记录存在，但当前搜索、用户、模块、动作或结果筛选没有命中。" : "系统暂时还没有记录到可展示的操作事件。",
-	                  action: state.auditTrail.items.length ? "放宽上方筛选条件，或清空表头列筛选后再查看。" : "完成一次登录、提交、导入或管理操作后，这里会自动出现审计轨迹。",
-	                  className: "queue-empty database-empty-state",
-	                })}
-	              </td>
-	            </tr>
-	          `}
-        </tbody>
-      </table>
-    </div>
-  `;
-  if (focusKey) {
-    const target = elements.auditList.querySelector(`[data-audit-filter="${CSS.escape(focusKey)}"]`);
-    if (target instanceof HTMLInputElement) {
-      target.focus();
-      const caret = caretPosition ?? target.value.length;
-      target.setSelectionRange(caret, caret);
-    }
-  }
-}
-
-function handleAuditTableClick(event) {
-  const clearButton = event.target.closest("[data-clear-audit-filter]");
-  if (clearButton) {
-    const key = String(clearButton.dataset.clearAuditFilter || "").trim();
-    if (!key) return;
-    state.auditTrail.filters[key] = "";
-    renderAuditLogs(key, 0);
-    return;
-  }
-  const button = event.target.closest("[data-audit-sort]");
-  if (!button) return;
-  const key = String(button.dataset.auditSort || "").trim();
-  if (!key) return;
-  if (state.auditTrail.sortKey === key) {
-    state.auditTrail.sortDirection = state.auditTrail.sortDirection === "asc" ? "desc" : "asc";
-  } else {
-    state.auditTrail.sortKey = key;
-    state.auditTrail.sortDirection = key === "created_at" ? "desc" : "asc";
-  }
-  renderAuditLogs();
-}
-
-function handleAuditTableInput(event) {
-  const input = event.target.closest("[data-audit-filter]");
-  if (!(input instanceof HTMLInputElement)) return;
-  if (event.isComposing || input.dataset.imeComposing === "1") return;
-  commitAuditTableFilter(input);
-}
-
-function commitAuditTableFilter(input) {
-  if (!(input instanceof HTMLInputElement)) return;
-  const key = String(input.dataset.auditFilter || "").trim();
-  if (!key) return;
-  state.auditTrail.filters[key] = input.value;
-  renderAuditLogs(key, input.selectionStart ?? input.value.length);
-}
-
-function commitAuditSearch(input = elements.auditSearch) {
-  state.auditTrail.filters.search = String(input?.value || "");
-  renderAuditLogs();
-}
-
-function setActiveTab(tabId) {
-  if (state.activeTab === "database-extra-tab" && state.databaseExtraSection === "database-report-template-panel" && tabId !== "database-extra-tab" && !confirmDiscardVirusTemplateChanges()) {
+async function setActiveTab(tabId) {
+  if (state.activeTab === "database-extra-tab" && state.databaseExtraSection === "database-report-template-panel" && tabId !== "database-extra-tab" && !(await confirmDiscardVirusTemplateChanges())) {
     return;
   }
   state.activeTab = tabId;
@@ -11634,26 +12973,23 @@ function setActiveTab(tabId) {
     loadServerStatus().catch((error) => console.error(error));
   }
   if (tabId === "database-tab") {
-    loadDatabaseRecords().catch((error) => console.error(error));
+    const databaseCacheAge = Date.now() - Number(state.databaseLoadedAt || 0);
+    if (!state.databaseLoadedAt || databaseCacheAge > 60000) {
+      window.setTimeout(() => loadDatabaseRecords().catch((error) => console.error(error)), state.databaseLoadedAt ? 120 : 0);
+    }
   }
   if (tabId === "database-extra-tab") {
     loadDatabaseRecords().catch((error) => console.error(error));
     const remembered = window.localStorage.getItem("bac-database-extra-section") || "database-alert-rules-panel";
     setActiveDatabaseExtraSection(remembered);
   }
-  if (tabId === "project-tab") {
-    renderProjectManagement();
-  }
   if (tabId === "host-tab") {
     loadDatabaseRecords().catch((error) => console.error(error));
   }
-  if (tabId === "admin-tab") {
-    const remembered = window.localStorage.getItem("bac-admin-section") || "admin-settings-section";
-    setActiveAdminSection(remembered);
+  if (tabId === "modeling-tab") {
+    loadModelingPlatform().catch((error) => console.error(error));
   }
-  if (tabId === "audit-tab") {
-    loadAuditLogs().catch((error) => console.error(error));
-  }
+  await navigation.activate(tabId);
 }
 
 function ensureAuspiceMounted(forceReload = false, datasetPath = "") {
@@ -11903,17 +13239,11 @@ function openNextstrainBuildModal() {
     const dateToken = new Date().toISOString().slice(0, 10).replace(/-/g, "");
     elements.nextstrainBuildNameInput.value = `${species}_${dateToken}`;
   }
-  document.documentElement.classList.add("modal-scroll-locked");
-  document.body.classList.add("modal-scroll-locked");
-  elements.nextstrainBuildModal?.classList.remove("hidden");
-  elements.nextstrainBuildModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.nextstrainBuildModal);
 }
 
 function closeNextstrainBuildModal() {
-  elements.nextstrainBuildModal?.classList.add("hidden");
-  elements.nextstrainBuildModal?.setAttribute("aria-hidden", "true");
-  document.documentElement.classList.remove("modal-scroll-locked");
-  document.body.classList.remove("modal-scroll-locked");
+  hideModalElement(elements.nextstrainBuildModal);
 }
 
 async function onSubmitNextstrainBuild(event) {
@@ -11957,19 +13287,6 @@ async function onSubmitNextstrainBuild(event) {
     setActiveDatabaseSection("database-auspice-panel");
     await Promise.all([loadDatabaseRecords(), loadTasks()]);
   });
-}
-
-function setActiveAdminSection(sectionId) {
-  elements.adminSectionTabs.forEach((button) => {
-    const active = button.dataset.adminSection === sectionId;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-selected", active ? "true" : "false");
-  });
-  elements.adminSectionPanels.forEach((panel) => {
-    panel.classList.toggle("active", panel.id === sectionId);
-  });
-  window.localStorage.setItem("bac-admin-section", sectionId);
-  scheduleSegmentedControlsSync(document.querySelector(".admin-section-tabs") || document);
 }
 
 function applySidebarPreference() {
@@ -12016,8 +13333,7 @@ async function openPathBrowser(selector, options = {}) {
   state.pathBrowser.relativePath = "";
   state.pathBrowser.selectedItem = null;
   resetPathBrowserPosition();
-  elements.pathBrowserModal.classList.remove("hidden");
-  elements.pathBrowserModal.setAttribute("aria-hidden", "false");
+  showModalElement(elements.pathBrowserModal);
   elements.browserSubtitle.textContent = describeBrowserSelector(selector);
   const adminBrowse = state.pathBrowser.mode === "admin";
   elements.browserNewFolderButton.disabled = adminBrowse ? state.pathBrowser.readOnly : false;
@@ -12035,8 +13351,7 @@ function closePathBrowser() {
   state.pathBrowser.open = false;
   state.pathBrowser.drag = null;
   elements.pathBrowserPanel?.classList.remove("is-dragging");
-  elements.pathBrowserModal.classList.add("hidden");
-  elements.pathBrowserModal.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.pathBrowserModal);
 }
 
 async function loadBrowserDirectory(relativePath) {
@@ -12204,80 +13519,10 @@ async function onOpenBrowserItem(item) {
     closePathBrowser();
     return;
   }
-  if (state.pathBrowser.selector === "script_file") {
-    setAdminScriptPath(item.path);
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "pipeline_python") {
-    setAdminPipelinePython(item.path);
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_input_dir" && item.type === "directory") {
-    if (elements.adminMonitorInputDir) {
-      elements.adminMonitorInputDir.value = item.path;
-    }
-    rememberPathBrowserLocation("admin_monitor_input_dir", item.path || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_input_dir_bacteria" && item.type === "directory") {
-    if (elements.adminMonitorModuleInputBacteria) {
-      elements.adminMonitorModuleInputBacteria.value = item.path;
-    }
-    rememberPathBrowserLocation("admin_monitor_input_dir_bacteria", item.path || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_input_dir_virus" && item.type === "directory") {
-    if (elements.adminMonitorModuleInputVirus) {
-      elements.adminMonitorModuleInputVirus.value = item.path;
-    }
-    rememberPathBrowserLocation("admin_monitor_input_dir_virus", item.path || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_input_dir_metagenome" && item.type === "directory") {
-    if (elements.adminMonitorModuleInputMetagenome) {
-      elements.adminMonitorModuleInputMetagenome.value = item.path;
-    }
-    rememberPathBrowserLocation("admin_monitor_input_dir_metagenome", item.path || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_output_root" && item.type === "directory") {
-    if (elements.adminMonitorOutputRoot) {
-      elements.adminMonitorOutputRoot.value = item.path;
-    }
-    rememberPathBrowserLocation("admin_monitor_output_root", item.path || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_output_root_bacteria" && item.type === "directory") {
-    if (elements.adminMonitorModuleOutputBacteria) {
-      elements.adminMonitorModuleOutputBacteria.value = item.path;
-    }
-    rememberPathBrowserLocation("admin_monitor_output_root_bacteria", item.path || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_output_root_virus" && item.type === "directory") {
-    if (elements.adminMonitorModuleOutputVirus) {
-      elements.adminMonitorModuleOutputVirus.value = item.path;
-    }
-    rememberPathBrowserLocation("admin_monitor_output_root_virus", item.path || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_output_root_metagenome" && item.type === "directory") {
-    if (elements.adminMonitorModuleOutputMetagenome) {
-      elements.adminMonitorModuleOutputMetagenome.value = item.path;
-    }
-    rememberPathBrowserLocation("admin_monitor_output_root_metagenome", item.path || "");
-    closePathBrowser();
-    return;
-  }
+  if (await pathBrowser.handleSelection(state.pathBrowser.selector, {
+    currentPath: item.path || "",
+    selectedItem: item,
+  })) return;
   if (state.pathBrowser.selector === "database_local_fasta") {
     if (elements.databaseLocalFinalFasta) {
       elements.databaseLocalFinalFasta.value = item.path;
@@ -12443,104 +13688,10 @@ async function onSelectCurrentDirectory() {
     showToast("当前位置需要选择文件，不支持直接选择目录。", "warning");
     return;
   }
-  if (state.pathBrowser.selector === "workspace_root") {
-    elements.adminWorkspaceRoot.value = state.pathBrowser.currentPath || "";
-    elements.adminPipelineScript.value = "";
-    rememberPathBrowserLocation("workspace_root", state.pathBrowser.currentPath || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "database_root") {
-    if (elements.adminDatabaseRoot) {
-      elements.adminDatabaseRoot.value = state.pathBrowser.currentPath || "";
-    }
-    rememberPathBrowserLocation("database_root", state.pathBrowser.currentPath || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "conda_root") {
-    if (elements.adminCondaRoot) {
-      elements.adminCondaRoot.value = state.pathBrowser.currentPath || "";
-    }
-    rememberPathBrowserLocation("conda_root", state.pathBrowser.currentPath || "");
-    closePathBrowser();
-    await refreshAdminCondaEnvsForRoot({ announce: true });
-    return;
-  }
-  if (state.pathBrowser.selector === "script_file" && state.pathBrowser.selectedItem?.type === "file") {
-    setAdminScriptPath(state.pathBrowser.selectedItem.path);
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "pipeline_python" && state.pathBrowser.selectedItem?.type === "file") {
-    setAdminPipelinePython(state.pathBrowser.selectedItem.path);
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_input_dir") {
-    if (elements.adminMonitorInputDir) {
-      elements.adminMonitorInputDir.value = state.pathBrowser.currentPath || "";
-    }
-    rememberPathBrowserLocation("admin_monitor_input_dir", state.pathBrowser.currentPath || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_input_dir_bacteria") {
-    if (elements.adminMonitorModuleInputBacteria) {
-      elements.adminMonitorModuleInputBacteria.value = state.pathBrowser.currentPath || "";
-    }
-    rememberPathBrowserLocation("admin_monitor_input_dir_bacteria", state.pathBrowser.currentPath || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_input_dir_virus") {
-    if (elements.adminMonitorModuleInputVirus) {
-      elements.adminMonitorModuleInputVirus.value = state.pathBrowser.currentPath || "";
-    }
-    rememberPathBrowserLocation("admin_monitor_input_dir_virus", state.pathBrowser.currentPath || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_input_dir_metagenome") {
-    if (elements.adminMonitorModuleInputMetagenome) {
-      elements.adminMonitorModuleInputMetagenome.value = state.pathBrowser.currentPath || "";
-    }
-    rememberPathBrowserLocation("admin_monitor_input_dir_metagenome", state.pathBrowser.currentPath || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_output_root") {
-    if (elements.adminMonitorOutputRoot) {
-      elements.adminMonitorOutputRoot.value = state.pathBrowser.currentPath || "";
-    }
-    rememberPathBrowserLocation("admin_monitor_output_root", state.pathBrowser.currentPath || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_output_root_bacteria") {
-    if (elements.adminMonitorModuleOutputBacteria) {
-      elements.adminMonitorModuleOutputBacteria.value = state.pathBrowser.currentPath || "";
-    }
-    rememberPathBrowserLocation("admin_monitor_output_root_bacteria", state.pathBrowser.currentPath || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_output_root_virus") {
-    if (elements.adminMonitorModuleOutputVirus) {
-      elements.adminMonitorModuleOutputVirus.value = state.pathBrowser.currentPath || "";
-    }
-    rememberPathBrowserLocation("admin_monitor_output_root_virus", state.pathBrowser.currentPath || "");
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "admin_monitor_output_root_metagenome") {
-    if (elements.adminMonitorModuleOutputMetagenome) {
-      elements.adminMonitorModuleOutputMetagenome.value = state.pathBrowser.currentPath || "";
-    }
-    rememberPathBrowserLocation("admin_monitor_output_root_metagenome", state.pathBrowser.currentPath || "");
-    closePathBrowser();
-    return;
-  }
+  if (await pathBrowser.handleSelection(state.pathBrowser.selector, {
+    currentPath: state.pathBrowser.currentPath || "",
+    selectedItem: state.pathBrowser.selectedItem,
+  })) return;
   if (state.pathBrowser.selector === "database_local_fasta" && state.pathBrowser.selectedItem?.type === "file") {
     if (elements.databaseLocalFinalFasta) {
       elements.databaseLocalFinalFasta.value = state.pathBrowser.selectedItem.path;
@@ -12622,14 +13773,6 @@ async function onSelectCurrentDirectory() {
     }
     rememberPathBrowserLocation("task_ref_index", state.pathBrowser.selectedItem.path || "");
     syncRefValue();
-    closePathBrowser();
-    return;
-  }
-  if (state.pathBrowser.selector === "offline_update_source") {
-    if (elements.offlineUpdateSource) {
-      elements.offlineUpdateSource.value = state.pathBrowser.currentPath || "";
-    }
-    rememberPathBrowserLocation("offline_update_source", state.pathBrowser.currentPath || "");
     closePathBrowser();
     return;
   }
@@ -12754,7 +13897,13 @@ function syncBrowserSelection() {
 }
 
 async function onBrowserNewFolder() {
-  const name = window.prompt("输入新文件夹名称");
+  const name = await openTextInputModal({
+    title: "新建文件夹",
+    message: "在当前目录下创建一个新的结果或输入文件夹。",
+    label: "文件夹名称",
+    placeholder: "例如：new_batch_inputs",
+    confirmLabel: "创建文件夹",
+  });
   if (!name) return;
   const endpoint = state.pathBrowser.mode === "admin" ? "/api/admin/filesystem/mkdir" : "/api/filesystem/mkdir";
   const currentPath = state.pathBrowser.mode === "admin"
@@ -12784,7 +13933,13 @@ async function onBrowserRename() {
     showToast("请先选择一个文件或目录。", "warning");
     return;
   }
-  const name = window.prompt("输入新名称", selected.name);
+  const name = await openTextInputModal({
+    title: "重命名",
+    message: `当前对象：${selected.name}`,
+    label: "新名称",
+    defaultValue: selected.name,
+    confirmLabel: "确认重命名",
+  });
   if (!name || name.trim() === selected.name) return;
   await requestJson("/api/filesystem/rename", {
     method: "POST",
@@ -13003,7 +14158,7 @@ async function onCreateUser(event) {
     syncPermissionUi("create");
     closeCreateUserModal();
     showToast("用户已创建");
-    await loadUsers();
+    await Promise.all([adminDomain.refreshUsers(), loadTasks()]);
   });
 }
 
@@ -13034,13 +14189,12 @@ async function onSaveUserEdit(event) {
     });
     closeEditUserModal();
     showToast(`已更新用户：${nextUsername}`);
-    await loadUsers();
+    await Promise.all([adminDomain.refreshUsers(), loadTasks()]);
   });
 }
 
 function openCreateUserModal() {
-  elements.createUserModal?.classList.remove("hidden");
-  elements.createUserModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.createUserModal);
   setScopedAllowedModules("create", ["bacteria"]);
   setScopedAllowedViruses("create", VIRUS_PERMISSION_OPTIONS.map((item) => item.key));
   setScopedModuleExpirations("create", {});
@@ -13052,8 +14206,7 @@ function openCreateUserModal() {
 }
 
 function closeCreateUserModal() {
-  elements.createUserModal?.classList.add("hidden");
-  elements.createUserModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.createUserModal);
   elements.userForm?.reset();
   setScopedAllowedModules("create", ["bacteria"]);
   setScopedAllowedViruses("create", VIRUS_PERMISSION_OPTIONS.map((item) => item.key));
@@ -13076,19 +14229,6 @@ function startPolling() {
       console.error(error);
     }
   }, 5000);
-}
-
-async function requestJson(url, options = {}) {
-  const { silentError = false, ...fetchOptions } = options;
-  const response = await fetch(url, fetchOptions);
-  const data = await response.json();
-  if (!response.ok) {
-    if (!silentError) {
-      showToast(data.error || "请求失败", "error");
-    }
-    throw new Error(data.error || "请求失败");
-  }
-  return data;
 }
 
 function formatDate(value) {
@@ -13116,6 +14256,7 @@ function renderQueueSummary(items = state.tasks) {
   const running = items.filter((task) => String(task.status || "").toUpperCase() === "RUNNING").length;
   const queued = items.filter((task) => ["QUEUED", "PAUSED"].includes(String(task.status || "").toUpperCase())).length;
   const failed = items.filter((task) => String(task.status || "").toUpperCase() === "FAILED").length;
+  const closureSummary = buildQueueClosureSummary(items);
   const completionRate = total ? Math.round((completed.length / total) * 100) : 0;
   const reportSnapshots = completed
     .map((task) => state.queueAnalytics.reportCache[String(task.id || "")])
@@ -13220,7 +14361,13 @@ function renderQueueSummary(items = state.tasks) {
           <strong>${escapeHtml(state.queueAnalytics.detailRequested ? `${reportSnapshots.length} / ${completed.length}` : "按需加载")}</strong>
           <small>${state.queueAnalytics.detailRequested ? (state.queueAnalytics.loading ? "读取中" : "已读取") : "结果统计"}</small>
         </article>
+        <article class="queue-analytics-kpi ${closureSummary.todoCount > 0 ? "queue-analytics-kpi-warning" : ""}">
+          <span>闭环待办</span>
+          <strong>${escapeHtml(formatNumber(closureSummary.todoCount))}</strong>
+          <small>${escapeHtml(`${closureSummary.linkedCount} 已闭环 / ${closureSummary.activeCount} 分析中`)}</small>
+        </article>
       </div>
+      ${renderQueueClosureOverview(items)}
       <div class="queue-analytics-grid">
         <article class="queue-analytics-card queue-analytics-card-focus queue-analytics-card-workstation">
           <div data-queue-chart="workstation"></div>
@@ -13367,6 +14514,17 @@ function renderQueueSummary(items = state.tasks) {
   });
   elements.queueSummary.querySelectorAll("[data-queue-analytics-load-details]").forEach((button) => {
     button.addEventListener("click", requestQueueAnalyticsDetails);
+  });
+  elements.queueSummary.querySelectorAll("[data-queue-closure-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.queueView = "workbench";
+      setQueueClosureFilter(button.dataset.queueClosureFilter || "");
+    });
+  });
+  elements.queueSummary.querySelectorAll("[data-toggle-closure-overview]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setQueueClosureOverviewCollapsed(!state.queueClosureOverviewCollapsed);
+    });
   });
   elements.queueSummary.querySelectorAll("[data-bacteria-scatter-task]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -14608,6 +15766,11 @@ function normalizeDatabaseSortValue(row, key) {
     const orderMap = { complete: 3, missing_recommended: 2, missing_required: 1 };
     return orderMap[String(row?.metadata_completion_status || "").trim()] || 0;
   }
+  if (key === "closure_trace") {
+    const trace = getSampleClosureTrace(row);
+    const orderMap = { traceable: 2, incomplete: 1 };
+    return orderMap[String(trace.state || "").trim()] || 0;
+  }
   const value = row?.[key];
   if (key === "imported_at") {
     return value ? new Date(value).getTime() : 0;
@@ -14652,6 +15815,7 @@ function getDatabaseColumns() {
   return [
     { key: "sample_name", label: "样本名称", sortable: true, always: true },
     { key: "task_name", label: "任务", sortable: true, always: true },
+    { key: "closure_trace", label: "证据链", sortable: true, always: true },
     { key: "owner", label: "归属用户", sortable: true, always: true },
     { key: "metadata_completion_label", label: "主档完整度", sortable: true, always: true },
     { key: "species_name", label: "物种预估", sortable: true, always: true },
@@ -14706,6 +15870,14 @@ function getFilteredDatabaseRecords(rows) {
       let cell = "";
       if (key === "species_name") {
         cell = [row.species_name, row.mlst_species_name, row.mlst_st, row.serotype_result].join(" ");
+      } else if (key === "closure_trace") {
+        const trace = getSampleClosureTrace(row);
+        cell = [
+          trace.label,
+          trace.summary,
+          ...(Array.isArray(trace.missing) ? trace.missing : []),
+          ...(Array.isArray(trace.evidence) ? trace.evidence.map((item) => `${item.label || ""} ${item.value || ""}`) : []),
+        ].join(" ");
       } else if (String(key).startsWith("meta:")) {
         const fieldKey = String(key).slice(5);
         cell = fieldKey === "collection_site"
@@ -14989,6 +16161,7 @@ function getDatabaseSortLabel() {
     task_name: "任务名称",
     owner: "归属用户",
     metadata_completion_label: "主档完整度",
+    closure_trace: "证据链",
     species_name: "物种预估",
     imported_at: "入库时间",
     contig_count: "Contig",
@@ -15168,689 +16341,6 @@ function getDatabaseHistoricalBaseline(rows, period, selectedIssue, topicMeta) {
 const DATABASE_ALERT_RULE_STORAGE_KEY = "bac-database-alert-rule-overrides";
 const DATABASE_ALERT_RULE_DRAFT_STORAGE_KEY = "bac-database-alert-rule-drafts";
 const DATABASE_ALERT_RULE_VERSION_STORAGE_KEY = "bac-database-alert-rule-versions";
-const PROJECT_MILESTONE_OVERRIDE_STORAGE_KEY = "bac-project-milestone-overrides";
-const PROJECT_OWNER_OVERRIDE_STORAGE_KEY = "bac-project-owner-overrides";
-const PROJECT_DEFINITION_STORAGE_KEY = "bac-project-definitions";
-const PROJECT_HIDDEN_STORAGE_KEY = "bac-project-hidden";
-const PROJECT_ARCHIVED_STORAGE_KEY = "bac-project-archived";
-
-const PROJECT_STAGE_CONFIG = [
-  { key: "intake", label: "样本入组", tone: "steel" },
-  { key: "analysis", label: "分析处理中", tone: "cobalt" },
-  { key: "review", label: "结果复核", tone: "amber" },
-  { key: "delivery", label: "报告交付", tone: "teal" },
-];
-
-function readProjectMilestoneOverrides() {
-  try {
-    const raw = window.localStorage.getItem(PROJECT_MILESTONE_OVERRIDE_STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch (_error) {
-    return {};
-  }
-}
-
-function writeProjectMilestoneOverrides(overrides) {
-  window.localStorage.setItem(PROJECT_MILESTONE_OVERRIDE_STORAGE_KEY, JSON.stringify(overrides || {}));
-}
-
-function readProjectOwnerOverrides() {
-  try {
-    const raw = window.localStorage.getItem(PROJECT_OWNER_OVERRIDE_STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch (_error) {
-    return {};
-  }
-}
-
-function writeProjectOwnerOverrides(overrides) {
-  window.localStorage.setItem(PROJECT_OWNER_OVERRIDE_STORAGE_KEY, JSON.stringify(overrides || {}));
-}
-
-function readProjectDefinitions() {
-  try {
-    const raw = window.localStorage.getItem(PROJECT_DEFINITION_STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === "object") : [];
-  } catch (_error) {
-    return [];
-  }
-}
-
-function writeProjectDefinitions(items) {
-  window.localStorage.setItem(PROJECT_DEFINITION_STORAGE_KEY, JSON.stringify(Array.isArray(items) ? items : []));
-}
-
-function readHiddenProjectKeys() {
-  try {
-    const raw = window.localStorage.getItem(PROJECT_HIDDEN_STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.map((item) => String(item || "").trim()).filter(Boolean) : [];
-  } catch (_error) {
-    return [];
-  }
-}
-
-function writeHiddenProjectKeys(items) {
-  window.localStorage.setItem(PROJECT_HIDDEN_STORAGE_KEY, JSON.stringify(Array.isArray(items) ? items : []));
-}
-
-function readArchivedProjectKeys() {
-  try {
-    const raw = window.localStorage.getItem(PROJECT_ARCHIVED_STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.map((item) => String(item || "").trim()).filter(Boolean) : [];
-  } catch (_error) {
-    return [];
-  }
-}
-
-function writeArchivedProjectKeys(items) {
-  window.localStorage.setItem(PROJECT_ARCHIVED_STORAGE_KEY, JSON.stringify(Array.isArray(items) ? items : []));
-}
-
-function clearProjectLocalState(projectKey = "") {
-  const normalizedKey = String(projectKey || "").trim();
-  if (!normalizedKey) return;
-  const milestoneOverrides = readProjectMilestoneOverrides();
-  if (Object.prototype.hasOwnProperty.call(milestoneOverrides, normalizedKey)) {
-    delete milestoneOverrides[normalizedKey];
-    writeProjectMilestoneOverrides(milestoneOverrides);
-  }
-  const ownerOverrides = readProjectOwnerOverrides();
-  if (Object.prototype.hasOwnProperty.call(ownerOverrides, normalizedKey)) {
-    delete ownerOverrides[normalizedKey];
-    writeProjectOwnerOverrides(ownerOverrides);
-  }
-}
-
-function getSelectedProjectCandidateRows() {
-  const selectedKeys = new Set((state.databaseSelectedSamples || []).map((item) => String(item || "").trim()).filter(Boolean));
-  if (!selectedKeys.size) return [];
-  return (Array.isArray(state.databaseRecords) ? state.databaseRecords : []).filter((row) => {
-    const sampleKey = String(row?.sample_key || "").trim();
-    return sampleKey && selectedKeys.has(sampleKey) && String(row?.library_scope || "main") === "main";
-  });
-}
-
-function buildDefaultProjectName(rows = []) {
-  const first = rows[0] || {};
-  const submittingUnit = getDatabaseMetadataDisplayValue(first, "submitting_unit") || first.sample_name || "未命名项目";
-  const anchorDate = startOfDay(first.collection_date || first.imported_at || first.created_at || "") || new Date();
-  return `${submittingUnit} ${anchorDate.getFullYear()}年${anchorDate.getMonth() + 1}月项目`;
-}
-
-function bindProjectCreatePanelScroll() {
-  const panel = elements.projectCreateForm;
-  if (!(panel instanceof HTMLElement) || panel.dataset.scrollBound === "1") return;
-  panel.dataset.scrollBound = "1";
-  panel.addEventListener("wheel", (event) => {
-    const deltaY = Number(event.deltaY || 0);
-    if (!deltaY) return;
-    const maxScrollTop = panel.scrollHeight - panel.clientHeight;
-    if (maxScrollTop <= 0) return;
-    const nextScrollTop = Math.max(0, Math.min(maxScrollTop, panel.scrollTop + deltaY));
-    if (nextScrollTop === panel.scrollTop) return;
-    panel.scrollTop = nextScrollTop;
-    event.preventDefault();
-    event.stopPropagation();
-  }, { passive: false });
-}
-
-function handleOpenProjectCreateModal(event) {
-  event.preventDefault();
-  event.stopPropagation();
-  const dropdown = elements.openProjectCreateModalButton?.closest("details");
-  openProjectCreateModal();
-  window.setTimeout(() => {
-    dropdown?.removeAttribute("open");
-  }, 0);
-}
-
-function openProjectCreateModal() {
-  clearScopedValidation(elements.projectCreateForm);
-  const rows = getSelectedProjectCandidateRows();
-  const names = rows.slice(0, 4).map((row) => row.sample_name || row.sample_key).filter(Boolean);
-  const remainder = Math.max(0, rows.length - names.length);
-  const submittingUnits = Array.from(new Set(rows.map((row) => String(getDatabaseMetadataDisplayValue(row, "submitting_unit") || "").trim()).filter(Boolean)));
-  const leadUnit = submittingUnits[0] || "当前送检单位";
-  const syndromes = Array.from(new Set(rows.map((row) => String(getDatabaseMetadataDisplayValue(row, "suspected_syndrome") || "").trim()).filter(Boolean)));
-  const sampleDates = rows
-    .map((row) => startOfDay(row.collection_date || row.imported_at || row.created_at || ""))
-    .filter(Boolean)
-    .sort((left, right) => left.getTime() - right.getTime());
-  const dateRangeLabel = sampleDates.length
-    ? `${formatDate(sampleDates[0])} - ${formatDate(sampleDates[sampleDates.length - 1])}`
-    : "未记录采样日期";
-  if (elements.projectCreateSampleCount) {
-    elements.projectCreateSampleCount.textContent = `${rows.length} 份样本`;
-  }
-  if (elements.projectCreateSampleMetrics) {
-    elements.projectCreateSampleMetrics.innerHTML = rows.length
-      ? `
-        <span class="project-create-metric-chip"><small>送检单位</small><strong>${escapeHtml(leadUnit)}</strong></span>
-        <span class="project-create-metric-chip"><small>症候群</small><strong>${escapeHtml(syndromes[0] || "未标注")}</strong></span>
-        <span class="project-create-metric-chip"><small>时间范围</small><strong>${escapeHtml(dateRangeLabel)}</strong></span>
-      `
-      : "";
-  }
-  if (elements.projectCreateSampleSummary) {
-    if (!rows.length) {
-      elements.projectCreateSampleSummary.textContent = "当前还没有勾选样本。请先在样本列表里勾选需要纳入项目的样本，再提交创建。";
-    } else {
-      const tail = remainder > 0 ? `其余 ${remainder} 份样本将一并并入该项目。` : "当前选中的样本将全部并入该项目。";
-      elements.projectCreateSampleSummary.textContent = `建议优先确认项目名称与总负责人，后续可在项目管理中继续维护交付节点、负责人分工与项目甘特图。${tail}`;
-    }
-  }
-  if (elements.projectCreateSamplePreview) {
-    if (!rows.length) {
-      elements.projectCreateSamplePreview.innerHTML = "";
-    } else {
-      elements.projectCreateSamplePreview.innerHTML = `
-        <span class="project-create-preview-label">代表样本</span>
-        <div class="project-create-preview-list">
-          ${names.map((name) => `<span class="project-create-preview-chip">${escapeHtml(name)}</span>`).join("")}
-          ${remainder > 0 ? `<span class="project-create-preview-chip is-muted">+${remainder} 份</span>` : ""}
-        </div>
-      `;
-    }
-  }
-  if (elements.projectCreateNameInput instanceof HTMLInputElement) {
-    elements.projectCreateNameInput.value = rows.length ? buildDefaultProjectName(rows) : "";
-  }
-  if (elements.projectCreateOwnerInput instanceof HTMLInputElement) {
-    elements.projectCreateOwnerInput.value = "";
-  }
-  if (elements.submitProjectCreateButton instanceof HTMLButtonElement) {
-    elements.submitProjectCreateButton.disabled = rows.length === 0;
-  }
-  bindProjectCreatePanelScroll();
-  if (elements.projectCreateForm instanceof HTMLElement) {
-    elements.projectCreateForm.scrollTop = 0;
-  }
-  document.documentElement.classList.add("modal-scroll-locked");
-  document.body.classList.add("modal-scroll-locked");
-  elements.projectCreateModal?.classList.remove("hidden");
-  elements.projectCreateModal?.setAttribute("aria-hidden", "false");
-}
-
-function closeProjectCreateModal() {
-  clearScopedValidation(elements.projectCreateForm);
-  elements.projectCreateModal?.classList.add("hidden");
-  elements.projectCreateModal?.setAttribute("aria-hidden", "true");
-  document.documentElement.classList.remove("modal-scroll-locked");
-  document.body.classList.remove("modal-scroll-locked");
-  elements.projectCreateForm?.reset();
-  if (elements.projectCreateSampleCount) {
-    elements.projectCreateSampleCount.textContent = "0 份样本";
-  }
-  if (elements.submitProjectCreateButton instanceof HTMLButtonElement) {
-    elements.submitProjectCreateButton.disabled = false;
-  }
-  if (elements.projectCreateSampleSummary) {
-    elements.projectCreateSampleSummary.textContent = "当前尚未选择样本。";
-  }
-  if (elements.projectCreateSampleMetrics) {
-    elements.projectCreateSampleMetrics.innerHTML = "";
-  }
-  if (elements.projectCreateSamplePreview) {
-    elements.projectCreateSamplePreview.innerHTML = "";
-  }
-}
-
-function removeProjectDefinition(projectKey = "") {
-  const normalizedKey = String(projectKey || "").trim();
-  if (!normalizedKey) return;
-  const nextDefinitions = readProjectDefinitions().filter((item) => String(item?.key || "").trim() !== normalizedKey);
-  writeProjectDefinitions(nextDefinitions);
-  const archivedKeys = new Set(readArchivedProjectKeys());
-  if (archivedKeys.delete(normalizedKey)) {
-    writeArchivedProjectKeys(Array.from(archivedKeys));
-  }
-}
-
-function hideAutoProject(projectKey = "") {
-  const normalizedKey = String(projectKey || "").trim();
-  if (!normalizedKey) return;
-  const nextHidden = new Set(readHiddenProjectKeys());
-  nextHidden.add(normalizedKey);
-  writeHiddenProjectKeys(Array.from(nextHidden));
-}
-
-function performDeleteProject(projectKey = "") {
-  const project = getProjectByKey(projectKey);
-  if (!project) return false;
-  if (project.explicitProject) {
-    removeProjectDefinition(project.key);
-  } else {
-    hideAutoProject(project.key);
-  }
-  clearProjectLocalState(project.key);
-  if (state.projectManagementSelectedKey === project.key) {
-    state.projectManagementSelectedKey = "";
-    state.projectManagementStageKey = "";
-  }
-  showToast(project.explicitProject ? "项目已删除" : "项目已从项目管理中移除");
-  renderProjectManagement();
-  return true;
-}
-
-function saveProjectArchivedState(projectKey = "", archived = true) {
-  const normalizedKey = String(projectKey || "").trim();
-  if (!normalizedKey) return;
-  const archivedKeys = new Set(readArchivedProjectKeys());
-  if (archived) archivedKeys.add(normalizedKey);
-  else archivedKeys.delete(normalizedKey);
-  writeArchivedProjectKeys(Array.from(archivedKeys));
-}
-
-function isProjectArchived(projectKey = "") {
-  const normalizedKey = String(projectKey || "").trim();
-  if (!normalizedKey) return false;
-  return new Set(readArchivedProjectKeys()).has(normalizedKey);
-}
-
-function ensureProjectEditable(projectKey = "", actionLabel = "修改项目") {
-  const project = getProjectByKey(projectKey);
-  if (!project) {
-    showToast("未找到当前项目。", true);
-    return null;
-  }
-  if (project.archived) {
-    showToast(`项目已归档，暂不支持${actionLabel}。`, true);
-    return null;
-  }
-  return project;
-}
-
-function performArchiveProject(projectKey = "", archived = true) {
-  const project = getProjectByKey(projectKey);
-  if (!project) return false;
-  saveProjectArchivedState(project.key, archived);
-  if (archived && state.projectManagementSection === "gantt" && state.projectManagementSelectedKey === project.key) {
-    state.projectManagementSection = "overview";
-    state.projectManagementStageKey = "";
-  }
-  showToast(archived ? "项目已归档，已从甘特图中隐藏" : "项目已取消归档");
-  renderProjectManagement();
-  return true;
-}
-
-function openProjectDeleteModal(projectKey = "", mode = "delete") {
-  const project = getProjectByKey(projectKey);
-  if (!project) return;
-  state.currentProjectDeleteKey = project.key;
-  state.currentProjectDeleteMode = mode === "archive" ? "archive" : mode === "unarchive" ? "unarchive" : "delete";
-  if (elements.projectDeleteProjectName) {
-    elements.projectDeleteProjectName.textContent = project.name || "当前项目";
-  }
-  if (elements.projectDeleteTitle) {
-    elements.projectDeleteTitle.textContent = state.currentProjectDeleteMode === "archive"
-      ? "归档项目"
-      : state.currentProjectDeleteMode === "unarchive"
-        ? "取消归档"
-        : "删除项目";
-  }
-  if (elements.projectDeleteSummary) {
-    elements.projectDeleteSummary.textContent = state.currentProjectDeleteMode === "archive"
-      ? "确认后项目将被归档，并从甘特图中隐藏。"
-      : state.currentProjectDeleteMode === "unarchive"
-        ? "确认后项目将恢复到可编辑状态并重新进入甘特图。"
-        : "确认后将移除当前项目定义或将该自动聚合项目从项目管理中隐藏。";
-  }
-  if (elements.projectDeleteKicker) {
-    elements.projectDeleteKicker.textContent = state.currentProjectDeleteMode === "archive"
-      ? "归档操作"
-      : state.currentProjectDeleteMode === "unarchive"
-        ? "恢复操作"
-        : "删除操作";
-  }
-  if (elements.projectDeleteActionLabel) {
-    if (state.currentProjectDeleteMode === "archive") {
-      elements.projectDeleteActionLabel.textContent = "归档项目";
-    } else if (state.currentProjectDeleteMode === "unarchive") {
-      elements.projectDeleteActionLabel.textContent = "取消归档";
-      } else {
-        elements.projectDeleteActionLabel.textContent = project.explicitProject ? "删除项目定义" : "移除自动聚合项目";
-      }
-  }
-  if (elements.submitProjectDeleteButton) {
-    elements.submitProjectDeleteButton.textContent = state.currentProjectDeleteMode === "archive"
-      ? "确认归档"
-      : state.currentProjectDeleteMode === "unarchive"
-        ? "确认恢复"
-        : "确认删除";
-    elements.submitProjectDeleteButton.classList.toggle("danger", state.currentProjectDeleteMode !== "unarchive");
-  }
-  if (elements.projectDeleteNote) {
-    if (state.currentProjectDeleteMode === "archive") {
-      elements.projectDeleteNote.textContent = "确认后项目将被归档：不会再出现在甘特图中，且项目负责人、交付节点和阶段备注都将变为只读。";
-    } else if (state.currentProjectDeleteMode === "unarchive") {
-      elements.projectDeleteNote.textContent = "确认后项目将恢复到可编辑状态，并重新出现在项目甘特图中。";
-    } else {
-      elements.projectDeleteNote.textContent = project.explicitProject
-        ? "确认后将从项目管理中删除该客户项目定义，项目相关的本地负责人、节点配置和交付状态会一起移除。"
-        : "确认后将把当前自动聚合项目从项目管理中隐藏，后续仍可通过样本变化重新生成新的自动聚合项目。";
-    }
-  }
-  document.documentElement.classList.add("modal-scroll-locked");
-  document.body.classList.add("modal-scroll-locked");
-  elements.projectDeleteModal?.classList.remove("hidden");
-  elements.projectDeleteModal?.setAttribute("aria-hidden", "false");
-}
-
-function closeProjectDeleteModal() {
-  elements.projectDeleteModal?.classList.add("hidden");
-  elements.projectDeleteModal?.setAttribute("aria-hidden", "true");
-  document.documentElement.classList.remove("modal-scroll-locked");
-  document.body.classList.remove("modal-scroll-locked");
-  state.currentProjectDeleteKey = "";
-  state.currentProjectDeleteMode = "delete";
-}
-
-function onSubmitProjectDelete(event) {
-  event.preventDefault();
-  const projectKey = String(state.currentProjectDeleteKey || "").trim();
-  const mode = String(state.currentProjectDeleteMode || "delete");
-  if (!projectKey) {
-    closeProjectDeleteModal();
-    return;
-  }
-  let handled = false;
-  if (mode === "archive") {
-    handled = performArchiveProject(projectKey, true);
-  } else if (mode === "unarchive") {
-    handled = performArchiveProject(projectKey, false);
-  } else {
-    handled = performDeleteProject(projectKey);
-  }
-  closeProjectDeleteModal();
-  if (!handled) {
-    showToast("未找到当前项目，当前操作未执行。", true);
-  }
-}
-
-async function onSubmitProjectCreate(event) {
-  event.preventDefault();
-  clearScopedValidation(elements.projectCreateForm);
-  const rows = getSelectedProjectCandidateRows();
-  if (!rows.length) {
-    appendFieldValidationMessage(elements.projectCreateSampleSummary?.parentElement || elements.projectCreateForm, "project-create-samples", "请先在样本列表里勾选需要纳入项目的样本。");
-    showToast("当前没有可用于创建项目的样本，请重新勾选。", "warning");
-    return;
-  }
-  const projectName = String(elements.projectCreateNameInput?.value || "").trim();
-  const ownerName = String(elements.projectCreateOwnerInput?.value || "").trim();
-  if (!projectName) {
-    markFieldInvalid(elements.projectCreateNameInput, "project-create-name", "请填写项目名称，便于后续在项目管理中识别。");
-    elements.projectCreateNameInput?.focus();
-    return;
-  }
-  await withSubmittingState(elements.submitProjectCreateButton, "创建中...", async () => {
-    const sampleKeys = rows.map((row) => String(row.sample_key || "").trim()).filter(Boolean);
-    const firstSyndrome = getDatabaseMetadataDisplayValue(rows[0], "suspected_syndrome") || "未标注症候群";
-    const definitions = readProjectDefinitions();
-    const key = `manual__${Date.now()}`;
-    definitions.unshift({
-      key,
-      project_name: projectName,
-      owner_name: ownerName,
-      syndrome: firstSyndrome,
-      sample_keys: sampleKeys,
-      created_at: new Date().toISOString(),
-      created_by: String(state.currentUser?.username || "admin"),
-    });
-    writeProjectDefinitions(definitions);
-    const hiddenKeys = new Set(readHiddenProjectKeys());
-    hiddenKeys.delete(key);
-    writeHiddenProjectKeys(Array.from(hiddenKeys));
-    saveProjectArchivedState(key, false);
-    state.projectManagementSelectedKey = key;
-    state.projectManagementStageKey = "";
-    closeProjectCreateModal();
-    setActiveTab("project-tab");
-    renderProjectManagement();
-    showToast(`已创建项目：${projectName}`);
-  });
-}
-
-function getProjectOwnerState(projectKey = "", fallbackOwner = "") {
-  const overrides = readProjectOwnerOverrides();
-  const stored = overrides[String(projectKey || "")];
-  const ownerName = String(stored?.ownerName || "").trim();
-  return ownerName || String(fallbackOwner || "").trim() || "待分配";
-}
-
-function saveProjectOwnerState(projectKey = "", ownerName = "") {
-  const normalizedKey = String(projectKey || "").trim();
-  if (!normalizedKey) return;
-  const overrides = readProjectOwnerOverrides();
-  overrides[normalizedKey] = {
-    ownerName: String(ownerName || "").trim(),
-    modifiedAt: new Date().toISOString(),
-    modifiedBy: String(state.currentUser?.username || "admin"),
-  };
-  writeProjectOwnerOverrides(overrides);
-}
-
-function buildProjectDefaultMilestones({ sampleCount, taskLinkedCount, reportReadyCount, latestLog, progress, ownerName }) {
-  const milestoneOwner = String(ownerName || "").trim() || "待分配";
-  return [
-    {
-      id: "intake",
-      tone: "steel",
-      label: "样本入组",
-      owner: milestoneOwner,
-      weight: 20,
-      completion: sampleCount > 0 ? 100 : 0,
-      note: "",
-      detail: `${sampleCount} 份样本纳入项目`,
-    },
-    {
-      id: "analysis",
-      tone: "cobalt",
-      label: "任务关联",
-      owner: milestoneOwner,
-      weight: 28,
-      completion: sampleCount ? Math.round((taskLinkedCount / sampleCount) * 100) : 0,
-      note: "",
-      detail: `${taskLinkedCount}/${sampleCount} 份样本已关联分析任务`,
-    },
-    {
-      id: "review",
-      tone: "amber",
-      label: "报告整理",
-      owner: milestoneOwner,
-      weight: 24,
-      completion: sampleCount ? Math.round((reportReadyCount / sampleCount) * 100) : 0,
-      note: "",
-      detail: `${reportReadyCount}/${sampleCount} 份样本已生成报告目录`,
-    },
-    {
-      id: "release",
-      tone: "sage",
-      label: "主库发布",
-      owner: milestoneOwner,
-      weight: 13,
-      completion: latestLog ? 100 : 0,
-      note: "",
-      detail: latestLog ? `${latestLog.version_label || "已发布"} · ${formatDate(latestLog.created_at) || "-"}` : "尚未形成样本发布记录",
-    },
-    {
-      id: "delivery",
-      tone: "teal",
-      label: "客户交付",
-      owner: milestoneOwner,
-      weight: 15,
-      completion: Math.max(0, Math.min(100, progress)),
-      note: "",
-      detail: progress >= 90 ? "可进入客户交付复核" : "待样本分析与报告整理完成后交付",
-    },
-  ];
-}
-
-function normalizeProjectMilestone(item, fallbackIndex = 0) {
-  const weightValue = Number(item?.weight);
-  const completionValue = Number(item?.completion);
-  const label = String(item?.label || "").trim() || `节点${fallbackIndex + 1}`;
-  const tone = String(item?.tone || "").trim() || PROJECT_STAGE_CONFIG[fallbackIndex % PROJECT_STAGE_CONFIG.length]?.tone || "steel";
-  const id = String(item?.id || `${label}-${fallbackIndex + 1}`).trim();
-  const weight = Number.isFinite(weightValue) ? Math.max(1, Math.min(100, Math.round(weightValue))) : 20;
-  const completion = Number.isFinite(completionValue) ? Math.max(0, Math.min(100, Math.round(completionValue))) : 0;
-  const status = completion >= 100 ? "done" : completion > 0 ? "active" : "pending";
-  const startDate = startOfDay(item?.startDate || item?.start_date || "");
-  const endDate = startOfDay(item?.endDate || item?.end_date || "");
-  const children = Array.isArray(item?.children)
-    ? item.children
-        .map((child, childIndex) => {
-          const childCompletion = Number(child?.completion);
-          const childLabel = String(child?.label || "").trim();
-          if (!childLabel) return null;
-          return {
-            id: String(child?.id || `${id}-child-${childIndex + 1}`),
-            label: childLabel,
-            note: String(child?.note || "").trim(),
-            completion: Number.isFinite(childCompletion) ? Math.max(0, Math.min(100, Math.round(childCompletion))) : 0,
-          };
-        })
-        .filter(Boolean)
-    : [];
-  return {
-    id,
-    tone,
-    label,
-    owner: String(item?.owner || "").trim(),
-    weight,
-    completion,
-    status,
-    startDate: startDate ? startDate.toISOString() : "",
-    endDate: endDate ? endDate.toISOString() : "",
-    note: String(item?.note || "").trim(),
-    detail: String(item?.detail || "").trim(),
-    children,
-  };
-}
-
-function renderProjectMilestoneChildrenRows(children = []) {
-  if (!(elements.projectMilestoneChildren instanceof HTMLElement)) return;
-  const normalizedChildren = Array.isArray(children) ? children : [];
-  elements.projectMilestoneChildren.innerHTML = normalizedChildren.length
-    ? normalizedChildren.map((child, index) => `
-        <div class="project-milestone-child-row">
-          <label>
-            <span>子节点名称</span>
-            <input data-project-milestone-child-label value="${escapeHtml(String(child?.label || ""))}" placeholder="例如：中试样本准备">
-          </label>
-          <label>
-            <span>完成（%）</span>
-            <input data-project-milestone-child-completion type="number" min="0" max="100" step="1" value="${escapeHtml(String(child?.completion ?? ""))}" placeholder="0">
-          </label>
-          <label class="wide">
-            <span>备注</span>
-            <input data-project-milestone-child-note value="${escapeHtml(String(child?.note || ""))}" placeholder="补充该步骤的说明、阻塞项或输出结果">
-          </label>
-          <button class="ghost-button compact danger" type="button" data-project-milestone-child-remove="${index}">删除</button>
-        </div>
-      `).join("")
-    : `<div class="field-note">当前节点尚未拆分子节点，可点击“新增子节点”补充详细步骤。</div>`;
-}
-
-function appendProjectMilestoneChildRow(child = {}) {
-  if (!(elements.projectMilestoneChildren instanceof HTMLElement)) return;
-  const emptyNote = elements.projectMilestoneChildren.querySelector(".field-note");
-  emptyNote?.remove();
-  const row = document.createElement("div");
-  row.className = "project-milestone-child-row";
-  row.innerHTML = `
-    <label>
-      <span>子节点名称</span>
-      <input data-project-milestone-child-label value="${escapeHtml(String(child?.label || ""))}" placeholder="例如：中试样本准备">
-    </label>
-    <label>
-      <span>完成（%）</span>
-      <input data-project-milestone-child-completion type="number" min="0" max="100" step="1" value="${escapeHtml(String(child?.completion ?? ""))}" placeholder="0">
-    </label>
-    <label class="wide">
-      <span>备注</span>
-      <input data-project-milestone-child-note value="${escapeHtml(String(child?.note || ""))}" placeholder="补充该步骤的说明、阻塞项或输出结果">
-    </label>
-    <button class="ghost-button compact danger" type="button" data-project-milestone-child-remove="1">删除</button>
-  `;
-  elements.projectMilestoneChildren.appendChild(row);
-}
-
-function getProjectMilestoneState(projectKey, defaults) {
-  const overrides = readProjectMilestoneOverrides();
-  const stored = overrides[String(projectKey || "")];
-  if (!stored || !Array.isArray(stored.milestones)) {
-    return defaults.map((item, index) => normalizeProjectMilestone(item, index));
-  }
-  const normalized = stored.milestones
-    .map((item, index) => normalizeProjectMilestone(item, index))
-    .filter((item) => String(item.label || "").trim());
-  return normalized.length ? normalized : defaults.map((item, index) => normalizeProjectMilestone(item, index));
-}
-
-function saveProjectMilestoneState(projectKey, milestones) {
-  const normalizedKey = String(projectKey || "").trim();
-  if (!normalizedKey) return;
-  const overrides = readProjectMilestoneOverrides();
-  overrides[normalizedKey] = {
-    milestones: (Array.isArray(milestones) ? milestones : []).map((item, index) => normalizeProjectMilestone(item, index)),
-    modifiedAt: new Date().toISOString(),
-    modifiedBy: String(state.currentUser?.username || "admin"),
-  };
-  writeProjectMilestoneOverrides(overrides);
-}
-
-function buildProjectStageSegments(startDate, totalDays, milestones) {
-  const normalizedMilestones = (Array.isArray(milestones) ? milestones : []).map((item, index) => normalizeProjectMilestone(item, index));
-  const totalWeight = Math.max(1, normalizedMilestones.reduce((sum, item) => sum + Math.max(1, Number(item.weight) || 0), 0));
-  const safeTotalDays = Math.max(totalDays, normalizedMilestones.length || 1);
-  let cursor = startOfDay(startDate) || startOfDay(new Date());
-  const segments = normalizedMilestones.map((item, index) => {
-    const explicitStart = startOfDay(item.startDate || "");
-    const explicitEnd = startOfDay(item.endDate || "");
-    if (explicitStart && explicitEnd && explicitEnd.getTime() >= explicitStart.getTime()) {
-      const segmentStart = explicitStart.getTime() >= cursor.getTime() ? explicitStart : cursor;
-      const segmentEnd = explicitEnd.getTime() >= segmentStart.getTime() ? explicitEnd : segmentStart;
-      cursor = addDays(segmentEnd, 1);
-      return {
-        key: item.id,
-        label: item.label,
-        tone: item.tone,
-        start: segmentStart,
-        end: segmentEnd,
-        progressEnd: addDays(segmentStart, Math.max(0, Math.ceil(((daysBetween(segmentStart, segmentEnd) + 1) * item.completion) / 100) - 1)),
-        completion: item.completion,
-      };
-    }
-    const remainingWeight = normalizedMilestones.slice(index).reduce((sum, row) => sum + Math.max(1, Number(row.weight) || 0), 0);
-    const remainingDays = Math.max(1, safeTotalDays - index - normalizedMilestones.slice(0, index).reduce((sum, row) => sum + (row.durationDays || 0), 0));
-    const suggestedDays = index === normalizedMilestones.length - 1
-      ? remainingDays
-      : Math.max(1, Math.round((safeTotalDays * item.weight) / totalWeight));
-    const maxDays = index === normalizedMilestones.length - 1 ? remainingDays : Math.max(1, remainingDays - (normalizedMilestones.length - index - 1));
-    const durationDays = Math.min(Math.max(1, suggestedDays), maxDays);
-    item.durationDays = durationDays;
-    const segmentStart = startOfDay(cursor) || startOfDay(new Date());
-    const segmentEnd = addDays(segmentStart, durationDays - 1);
-    cursor = addDays(segmentEnd, 1);
-    return {
-      key: item.id,
-      label: item.label,
-      tone: item.tone,
-      start: segmentStart,
-      end: segmentEnd,
-      progressEnd: addDays(segmentStart, Math.max(0, Math.ceil((durationDays * item.completion) / 100) - 1)),
-      completion: item.completion,
-    };
-  });
-  return segments;
-}
-
 function getDefaultDatabaseSignalRuleProfile(topicKey = "general") {
   const normalizedTopic = String(topicKey || "general");
   if (normalizedTopic === "hai" || normalizedTopic === "syndrome:医院感染监测") {
@@ -16049,1355 +16539,6 @@ function readDatabaseAlertRuleVersions() {
 
 function writeDatabaseAlertRuleVersions(entries) {
   window.localStorage.setItem(DATABASE_ALERT_RULE_VERSION_STORAGE_KEY, JSON.stringify(Array.isArray(entries) ? entries : []));
-}
-
-function formatProjectMonthLabel(value) {
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
-}
-
-function formatProjectDateRange(start, end) {
-  const startLabel = formatDate(start);
-  const endLabel = formatDate(end);
-  if (!startLabel && !endLabel) return "-";
-  if (!startLabel) return endLabel;
-  if (!endLabel || startLabel === endLabel) return startLabel;
-  return `${startLabel} - ${endLabel}`;
-}
-
-function startOfDay(value) {
-  const date = value instanceof Date ? new Date(value) : new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  date.setHours(0, 0, 0, 0);
-  return date;
-}
-
-function endOfDay(value) {
-  const date = startOfDay(value);
-  if (!date) return null;
-  date.setHours(23, 59, 59, 999);
-  return date;
-}
-
-function addDays(date, days) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
-}
-
-function daysBetween(start, end) {
-  const startDate = startOfDay(start);
-  const endDate = startOfDay(end);
-  if (!startDate || !endDate) return 0;
-  return Math.max(0, Math.round((endDate.getTime() - startDate.getTime()) / 86400000));
-}
-
-function buildProjectTimelineMonths(projects) {
-  if (!projects.length) return [];
-  const start = startOfDay(new Date(Math.min(...projects.map((item) => item.timelineStart.getTime()))));
-  const end = startOfDay(new Date(Math.max(...projects.map((item) => item.timelineEnd.getTime()))));
-  if (!start || !end) return [];
-  const cursor = new Date(start.getFullYear(), start.getMonth(), 1);
-  const limit = new Date(end.getFullYear(), end.getMonth(), 1);
-  const monthStarts = [];
-  while (cursor.getTime() <= limit.getTime()) {
-    monthStarts.push(new Date(cursor));
-    cursor.setMonth(cursor.getMonth() + 1);
-  }
-  return monthStarts;
-}
-
-function buildProjectManagementProjectRecord(group, versionLogs, releaseVersions, options = {}) {
-    const explicitName = String(options.projectName || "").trim();
-    const explicitOwnerName = String(options.ownerName || "").trim();
-    const archived = Boolean(options.archived);
-    const sampleCount = group.rows.length;
-    const dates = group.rows
-      .map((item) => startOfDay(item.collection_date || item.imported_at || item.created_at || ""))
-      .filter(Boolean)
-      .sort((a, b) => a.getTime() - b.getTime());
-    const startDate = dates[0] || startOfDay(new Date());
-    const endDate = dates[dates.length - 1] || startDate;
-    const typedCount = group.rows.filter((item) => String(item.mlst_st || "").trim() || String(item.serotype_result || "").trim()).length;
-    const molecularCount = group.rows.filter((item) => (
-      String(item.resistance_gene_hits || "").trim()
-      || String(item.virulence_gene_hits || "").trim()
-      || String(item.resistance_mge_hits || "").trim()
-      || String(item.virulence_mge_hits || "").trim()
-    )).length;
-    const completedCount = group.rows.filter((item) => String(item.metadata_completion_status || "").trim() === "complete").length;
-    const metadataRatio = sampleCount ? completedCount / sampleCount : 0;
-    const typedRatio = sampleCount ? typedCount / sampleCount : 0;
-    const molecularRatio = sampleCount ? molecularCount / sampleCount : 0;
-    const inferredProgress = Math.max(
-      12,
-      Math.min(
-        100,
-        Math.round((metadataRatio * 0.35 + typedRatio * 0.3 + molecularRatio * 0.2 + 0.15) * 100),
-      ),
-    );
-    const area = group.rows
-      .map((item) => {
-        const location = parseLocationJson(item.location_json);
-        return [location.province, location.city].filter(Boolean).join(" / ");
-      })
-      .filter(Boolean)
-      .sort((a, b) => a.localeCompare(b))[0] || "区域待补充";
-    const taskNames = Array.from(new Set(group.rows.map((item) => String(item.task_name || "").trim()).filter(Boolean)));
-    const taskLinkedCount = group.rows.filter((item) => String(item.task_id || "").trim() || String(item.task_name || "").trim()).length;
-    const reportReadyCount = group.rows.filter((item) => String(item.report_dir || "").trim()).length;
-    const sampleKeySet = new Set(group.rows.map((item) => String(item.sample_key || "").trim()).filter(Boolean));
-    const projectLogs = versionLogs.filter((item) => sampleKeySet.has(String(item.sample_key || "").trim()));
-    const latestLog = projectLogs.length ? projectLogs[0] : null;
-    const latestRelease = releaseVersions[0] || null;
-    const inferredOwnerName = group.syndrome.includes("脑膜")
-      ? "侵袭感染项目组"
-      : group.syndrome.includes("腹泻") || group.syndrome.includes("肠道")
-        ? "肠道病项目组"
-        : group.syndrome.includes("环境")
-          ? "环境监测项目组"
-          : group.syndrome.includes("医院感染")
-            ? "院感项目组"
-            : "综合项目组";
-    const ownerName = getProjectOwnerState(group.key, explicitOwnerName || inferredOwnerName);
-    const deliveryEnd = addDays(endDate, 4);
-    const totalDurationDays = Math.max(7, daysBetween(startDate, deliveryEnd) + 1);
-    const blockerParts = [];
-    if (completedCount < sampleCount) blockerParts.push("主档补录未完成");
-    if (taskLinkedCount < sampleCount) blockerParts.push("部分样本未关联任务");
-    if (reportReadyCount < sampleCount) blockerParts.push("部分样本尚未形成报告");
-    if (!latestLog) blockerParts.push("未形成主库发布记录");
-    const blockerText = blockerParts.length ? blockerParts.slice(0, 2).join("；") : "当前无明显阻塞项";
-    const defaultMilestones = buildProjectDefaultMilestones({
-      sampleCount,
-      taskLinkedCount,
-      reportReadyCount,
-      latestLog,
-      progress: inferredProgress,
-      ownerName,
-    });
-    const milestones = getProjectMilestoneState(group.key, defaultMilestones);
-    const milestoneWeightSum = Math.max(1, milestones.reduce((sum, item) => sum + Math.max(1, Number(item.weight) || 0), 0));
-    const progress = Math.max(
-      0,
-      Math.min(
-        100,
-        Math.round(milestones.reduce((sum, item) => sum + ((Math.max(1, Number(item.weight) || 0) / milestoneWeightSum) * Math.max(0, Math.min(100, Number(item.completion) || 0))), 0)),
-      ),
-    );
-    const currentMilestone = milestones.find((item) => item.completion < 100) || milestones[milestones.length - 1];
-    const stageLabel = progress >= 90
-      ? "交付复核"
-      : currentMilestone?.label || "样本入组";
-    const customerStatus = progress >= 90
-      ? "待客户确认"
-      : progress >= 68
-        ? "交付准备中"
-        : progress >= 42
-          ? "分析推进中"
-          : "样本收集中";
-    const stageSegments = buildProjectStageSegments(startDate, totalDurationDays, milestones);
-    const timelineEnd = stageSegments.length ? stageSegments[stageSegments.length - 1].end : deliveryEnd;
-    const samples = group.rows
-      .slice()
-      .sort((a, b) => String(a.collection_date || a.imported_at || "").localeCompare(String(b.collection_date || b.imported_at || "")))
-      .map((item) => {
-        const itemLogs = projectLogs.filter((entry) => String(entry.sample_key || "").trim() === String(item.sample_key || "").trim());
-        const itemLatestLog = itemLogs[0] || null;
-        return {
-          sampleKey: String(item.sample_key || ""),
-          sampleName: String(item.sample_name || item.sample_key || "-"),
-          date: item.collection_date || item.imported_at || "",
-          species: item.species_name || item.mlst_species_name || "-",
-          taskName: item.task_name || "-",
-          mlst: item.mlst_st || "-",
-          serotype: item.serotype_result || "-",
-          releaseLabel: itemLatestLog?.version_label || latestRelease?.version_label || "未发布",
-          taskStatus: String(item.report_dir || "").trim()
-            ? "报告已生成"
-            : (String(item.task_id || "").trim() || String(item.task_name || "").trim())
-              ? "分析处理中"
-              : "待关联任务",
-        };
-      });
-    return {
-      key: group.key,
-      name: explicitName || `${group.customer} · ${group.monthLabel}`,
-      shortName: explicitName || group.customer,
-      monthLabel: group.monthLabel,
-      syndrome: group.syndrome,
-      area,
-      sampleCount,
-      metadataRatio,
-      typedRatio,
-      molecularRatio,
-      progress,
-      stageLabel,
-      ownerName,
-      plannedDeliveryDate: timelineEnd,
-      blockerText,
-      customerStatus,
-      taskNames,
-      taskLinkedCount,
-      reportReadyCount,
-      projectLogs,
-      latestLog,
-      latestRelease,
-      milestones,
-      samples,
-      startDate,
-      endDate,
-      timelineStart: startDate,
-      timelineEnd,
-      stageSegments,
-      explicitProject: Boolean(options.explicitProject),
-      archived,
-    };
-}
-
-function buildProjectManagementProjects() {
-  const rows = Array.isArray(state.databaseRecords) ? state.databaseRecords : [];
-  const scopedRows = rows.filter((row) => String(row?.library_scope || "main") === "main");
-  const versionLogs = Array.isArray(state.databaseVersionLogs) ? state.databaseVersionLogs : [];
-  const releaseVersions = Array.isArray(state.databaseReleaseVersions) ? state.databaseReleaseVersions : [];
-  const rowMap = new Map(scopedRows.map((row) => [String(row.sample_key || "").trim(), row]));
-  const projectDefinitions = readProjectDefinitions();
-  const hiddenProjectKeys = new Set(readHiddenProjectKeys());
-  const archivedProjectKeys = new Set(readArchivedProjectKeys());
-  const explicitSampleKeys = new Set();
-  const explicitGroups = projectDefinitions
-    .map((definition) => {
-      const sampleKeys = Array.isArray(definition.sample_keys) ? definition.sample_keys.map((item) => String(item || "").trim()).filter(Boolean) : [];
-      const groupRows = sampleKeys.map((key) => rowMap.get(key)).filter(Boolean);
-      if (!groupRows.length) return null;
-      sampleKeys.forEach((key) => explicitSampleKeys.add(key));
-      const firstDate = startOfDay(groupRows[0]?.collection_date || groupRows[0]?.imported_at || "");
-      const monthLabel = firstDate ? `${firstDate.getFullYear()}-${String(firstDate.getMonth() + 1).padStart(2, "0")}` : "未定时间";
-      return {
-        key: String(definition.key || "").trim(),
-        customer: String(definition.project_name || "").trim() || "未命名项目",
-        monthLabel,
-        syndrome: String(definition.syndrome || getDatabaseMetadataDisplayValue(groupRows[0], "suspected_syndrome") || "未标注症候群").trim(),
-        rows: groupRows,
-        projectName: String(definition.project_name || "").trim(),
-        ownerName: String(definition.owner_name || "").trim(),
-        explicitProject: true,
-        archived: archivedProjectKeys.has(String(definition.key || "").trim()),
-      };
-    })
-    .filter(Boolean);
-  const grouped = new Map();
-  scopedRows.forEach((row) => {
-    const sampleKey = String(row.sample_key || "").trim();
-    if (explicitSampleKeys.has(sampleKey)) return;
-    const submittingUnit = getDatabaseMetadataDisplayValue(row, "submitting_unit") || "未标注送检单位";
-    const syndrome = getDatabaseMetadataDisplayValue(row, "suspected_syndrome") || "未标注症候群";
-    const collectionDate = startOfDay(row.collection_date || row.imported_at || row.created_at || "");
-    const monthLabel = collectionDate ? `${collectionDate.getFullYear()}-${String(collectionDate.getMonth() + 1).padStart(2, "0")}` : "未定时间";
-    const projectKey = `${submittingUnit}__${monthLabel}`;
-    if (hiddenProjectKeys.has(projectKey)) return;
-    if (!grouped.has(projectKey)) {
-      grouped.set(projectKey, {
-        key: projectKey,
-        customer: submittingUnit,
-        monthLabel,
-        syndrome,
-        rows: [],
-        archived: archivedProjectKeys.has(projectKey),
-      });
-    }
-    grouped.get(projectKey).rows.push(row);
-  });
-  const projects = explicitGroups
-    .concat(Array.from(grouped.values()))
-    .map((group) => buildProjectManagementProjectRecord(group, versionLogs, releaseVersions, {
-      projectName: group.projectName,
-      ownerName: group.ownerName,
-      explicitProject: group.explicitProject,
-      archived: group.archived,
-    }))
-    .sort((a, b) => {
-      const endDelta = b.timelineEnd.getTime() - a.timelineEnd.getTime();
-      if (endDelta !== 0) return endDelta;
-      return b.sampleCount - a.sampleCount;
-    });
-  return projects;
-}
-
-function formatProjectMilestoneStepScore(project, segment) {
-  const milestones = Array.isArray(project?.milestones) ? project.milestones : [];
-  const milestone = milestones.find((item) => String(item?.id || "") === String(segment?.key || "")) || null;
-  const children = Array.isArray(milestone?.children) ? milestone.children : [];
-  if (children.length) {
-    const completedCount = children.filter((child) => Number(child?.completion || 0) >= 100).length;
-    return `${completedCount}/${children.length}`;
-  }
-  return Number(segment?.completion || 0) >= 100 ? "1/1" : "0/1";
-}
-
-function formatStandaloneMilestoneStepScore(milestone) {
-  const children = Array.isArray(milestone?.children) ? milestone.children : [];
-  if (children.length) {
-    const completedCount = children.filter((child) => Number(child?.completion || 0) >= 100).length;
-    return `${completedCount}/${children.length}`;
-  }
-  return Number(milestone?.completion || 0) >= 100 ? "1/1" : "0/1";
-}
-
-function getProjectOverallScoreMeta(project) {
-  const milestones = Array.isArray(project?.milestones) ? project.milestones : [];
-  if (!milestones.length) {
-    return { completedCount: 0, totalCount: 0, label: "0/0" };
-  }
-  const completedCount = milestones.filter((item) => Number(item?.completion || 0) >= 100).length;
-  return {
-    completedCount,
-    totalCount: milestones.length,
-    label: `${completedCount}/${milestones.length}`,
-  };
-}
-
-const PROJECT_GANTT_ZOOM_MIN = 0.35;
-const PROJECT_GANTT_ZOOM_MAX = 1.75;
-const PROJECT_GANTT_ZOOM_STEP = 0.15;
-const PROJECT_GANTT_BASE_DAY_WIDTH = 92;
-const PROJECT_GANTT_META_WIDTH = 220;
-const PROJECT_GANTT_TRACK_GAP = 14;
-const PROJECT_GANTT_SHELL_PADDING_X = 24;
-const PROJECT_GANTT_ROW_PADDING_X = 12;
-
-function clampProjectGanttZoom(value) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return 1;
-  return Math.max(PROJECT_GANTT_ZOOM_MIN, Math.min(PROJECT_GANTT_ZOOM_MAX, Math.round(numeric * 100) / 100));
-}
-
-function calculateProjectGanttFitZoom(totalDays, shellWidth) {
-  const safeDays = Math.max(1, Number(totalDays) || 1);
-  const availableTrackWidth = calculateProjectGanttFitTrackWidth(shellWidth);
-  return clampProjectGanttZoom(availableTrackWidth / (safeDays * PROJECT_GANTT_BASE_DAY_WIDTH));
-}
-
-function calculateProjectGanttFitTrackWidth(shellWidth) {
-  const safeShellWidth = Math.max(0, Number(shellWidth) || 0);
-  return Math.max(
-    240,
-    safeShellWidth
-      - PROJECT_GANTT_SHELL_PADDING_X
-      - PROJECT_GANTT_ROW_PADDING_X
-      - PROJECT_GANTT_META_WIDTH
-      - PROJECT_GANTT_TRACK_GAP
-  );
-}
-
-function getProjectGanttTrackWidth(totalDaysForTrack, zoom, fitMode, shellWidth = 0) {
-  if (fitMode) {
-    return calculateProjectGanttFitTrackWidth(shellWidth);
-  }
-  return Math.max(720, Math.min(24000, totalDaysForTrack * PROJECT_GANTT_BASE_DAY_WIDTH * zoom));
-}
-
-function updateProjectGanttViewport(totalDaysForTrack, options = {}) {
-  if (!elements.projectManagementContent) return;
-  const shell = elements.projectManagementContent.querySelector(".project-gantt-shell-interactive");
-  if (!(shell instanceof HTMLElement)) return;
-  const zoom = clampProjectGanttZoom(options.zoom ?? state.projectManagementGanttZoom);
-  const fitMode = Boolean(options.fitMode);
-  const trackWidth = getProjectGanttTrackWidth(totalDaysForTrack, zoom, fitMode, shell.clientWidth || 0);
-  const summaryValue = elements.projectManagementContent.querySelector("[data-project-gantt-zoom-value]");
-  const summaryNote = elements.projectManagementContent.querySelector("[data-project-gantt-zoom-note]");
-  const range = elements.projectManagementContent.querySelector("[data-project-gantt-zoom-range]");
-  const fitButton = elements.projectManagementContent.querySelector("[data-project-gantt-zoom-fit]");
-  const zoomOutButton = elements.projectManagementContent.querySelector("[data-project-gantt-zoom-out]");
-  const zoomInButton = elements.projectManagementContent.querySelector("[data-project-gantt-zoom-in]");
-
-  shell.style.setProperty("--project-gantt-track-width", `${trackWidth}px`);
-  shell.dataset.fitMode = fitMode ? "true" : "false";
-  if (fitMode && options.resetScroll !== false) {
-    shell.scrollLeft = 0;
-  }
-  if (summaryValue) {
-    summaryValue.textContent = fitMode ? "适配全宽" : `${Math.round(zoom * 100)}%`;
-  }
-  if (summaryNote) {
-    summaryNote.textContent = fitMode ? "当前宽度已完整显示整个时间轴。" : "缩小时优先看全跨度，放大后便于查看单个阶段细节。";
-  }
-  if (range instanceof HTMLInputElement && document.activeElement !== range) {
-    range.value = String(Math.max(PROJECT_GANTT_ZOOM_MIN, Math.min(PROJECT_GANTT_ZOOM_MAX, zoom)));
-  }
-  if (fitButton instanceof HTMLElement) {
-    fitButton.classList.toggle("is-active", fitMode);
-  }
-  if (zoomOutButton instanceof HTMLButtonElement) {
-    zoomOutButton.disabled = zoom <= PROJECT_GANTT_ZOOM_MIN;
-  }
-  if (zoomInButton instanceof HTMLButtonElement) {
-    zoomInButton.disabled = zoom >= PROJECT_GANTT_ZOOM_MAX;
-  }
-}
-
-function renderProjectManagement() {
-  if (!elements.projectManagementSummary || !elements.projectManagementContent) return;
-  const projects = buildProjectManagementProjects();
-  if (!projects.length) {
-    elements.projectManagementSummary.innerHTML = "";
-    elements.projectManagementContent.innerHTML = `
-      <section class="database-alert-rule-block project-management-block">
-        <div class="panel-head compact">
-          <div>
-            <h3>项目进度概览</h3>
-            <p class="field-note">当前主数据库尚未形成可用于项目聚合的样本批次。</p>
-          </div>
-        </div>
-      </section>
-    `;
-    return;
-  }
-  const archivedProjects = projects.filter((item) => item.archived);
-  const editableProjects = projects.filter((item) => !item.archived);
-  const activeProjects = editableProjects.filter((item) => item.progress < 90).length;
-  const completedProjects = editableProjects.filter((item) => item.progress >= 90).length;
-  const overallProgress = Math.round(projects.reduce((sum, item) => sum + item.progress, 0) / projects.length);
-  const overallCompletedMilestones = projects.reduce((sum, item) => sum + getProjectOverallScoreMeta(item).completedCount, 0);
-  const overallMilestones = projects.reduce((sum, item) => sum + getProjectOverallScoreMeta(item).totalCount, 0);
-  const nextDelivery = editableProjects.slice().sort((a, b) => a.timelineEnd.getTime() - b.timelineEnd.getTime())[0] || null;
-  const totalSamples = projects.reduce((sum, item) => sum + item.sampleCount, 0);
-  const activeSection = state.projectManagementSection === "gantt" ? "gantt" : "overview";
-  if (!state.projectManagementSelectedKey || !projects.some((item) => item.key === state.projectManagementSelectedKey)) {
-    state.projectManagementSelectedKey = projects[0].key;
-  }
-  let selectedProject = projects.find((item) => item.key === state.projectManagementSelectedKey) || projects[0];
-  const timelineProjects = projects.filter((item) => !item.archived);
-  if (activeSection === "gantt" && timelineProjects.length && selectedProject.archived) {
-    selectedProject = timelineProjects[0];
-    state.projectManagementSelectedKey = selectedProject.key;
-    state.projectManagementStageKey = "";
-  }
-  const resolvedStageKey = String(state.projectManagementStageKey || "").trim();
-  const selectedStageSegment = selectedProject.stageSegments.find((segment) => String(segment.key || "") === resolvedStageKey) || null;
-  const selectedStageLabel = selectedStageSegment?.label || "";
-  const selectedStageMilestone = resolvedStageKey
-    ? selectedProject.milestones.find((item) => String(item.id || "") === resolvedStageKey) || null
-    : null;
-  const monthStarts = buildProjectTimelineMonths(timelineProjects);
-  const chartStart = timelineProjects.length
-    ? startOfDay(new Date(Math.min(...timelineProjects.map((item) => item.timelineStart.getTime()))))
-    : startOfDay(new Date());
-  const chartEnd = timelineProjects.length
-    ? endOfDay(new Date(Math.max(...timelineProjects.map((item) => item.timelineEnd.getTime()))))
-    : endOfDay(new Date());
-  const chartWidth = 1120;
-  const leftGutter = 248;
-  const topGutter = 62;
-  const rowHeight = 60;
-  const chartHeight = topGutter + timelineProjects.length * rowHeight + 26;
-  const plotWidth = chartWidth - leftGutter - 24;
-  const totalMs = Math.max(86400000, chartEnd.getTime() - chartStart.getTime());
-  const toX = (date) => {
-    const value = startOfDay(date) || chartStart;
-    const delta = Math.max(0, Math.min(totalMs, value.getTime() - chartStart.getTime()));
-    return leftGutter + (delta / totalMs) * plotWidth;
-  };
-  const toPercent = (date) => {
-    const value = startOfDay(date) || chartStart;
-    const delta = Math.max(0, Math.min(totalMs, value.getTime() - chartStart.getTime()));
-    return (delta / totalMs) * 100;
-  };
-  const monthBands = monthStarts.map((month) => {
-    const next = new Date(month);
-    next.setMonth(month.getMonth() + 1);
-    const startPercent = toPercent(month);
-    const endPercent = Math.min(100, toPercent(next));
-    return {
-      label: formatProjectMonthLabel(month),
-      startPercent,
-      widthPercent: Math.max(4, endPercent - startPercent),
-    };
-  });
-  const totalDaysForTrack = Math.max(1, daysBetween(chartStart, chartEnd) + 1);
-  const ganttZoom = clampProjectGanttZoom(state.projectManagementGanttZoom);
-  if (ganttZoom !== state.projectManagementGanttZoom) {
-    state.projectManagementGanttZoom = ganttZoom;
-  }
-  const sliderZoom = Math.max(PROJECT_GANTT_ZOOM_MIN, Math.min(PROJECT_GANTT_ZOOM_MAX, ganttZoom));
-  const ganttTrackWidth = state.projectManagementGanttFitMode
-    ? getProjectGanttTrackWidth(totalDaysForTrack, ganttZoom, true, elements.projectManagementContent.querySelector(".project-gantt-shell-interactive")?.clientWidth || 0)
-    : getProjectGanttTrackWidth(totalDaysForTrack, ganttZoom, false, 0);
-  const ganttZoomPercent = state.projectManagementGanttFitMode ? null : Math.round(ganttZoom * 100);
-  const selectedProjectCurrentSegment = selectedProject.stageSegments.find((segment) => Number(segment.completion || 0) < 100) || selectedProject.stageSegments[selectedProject.stageSegments.length - 1];
-  const ganttLegendItems = Array.from(
-    new Map(
-      timelineProjects.flatMap((project) =>
-        project.stageSegments.map((segment) => {
-          const stage = PROJECT_STAGE_CONFIG.find((item) => item.key === segment.key) || PROJECT_STAGE_CONFIG.find((item) => item.tone === segment.tone) || PROJECT_STAGE_CONFIG[0];
-          const segmentLabel = String(segment.label || "").trim() || stage.label;
-          return [
-            `${segment.key || segmentLabel || stage.tone}`,
-            {
-              key: segment.key || segmentLabel || stage.tone,
-              label: segmentLabel,
-              tone: String(segment.tone || "").trim() || stage.tone,
-            },
-          ];
-        })
-      )
-    ).values()
-  );
-  const stageMatchesSample = (sample, stageKey) => {
-    if (!stageKey) return true;
-    const taskStatus = String(sample?.taskStatus || "").trim();
-    const releaseLabel = String(sample?.releaseLabel || "").trim();
-    if (stageKey === "intake") return true;
-    if (stageKey === "analysis") return taskStatus === "分析处理中" || taskStatus === "报告已生成";
-    if (stageKey === "review") return taskStatus === "报告已生成";
-    if (stageKey === "release") return releaseLabel && releaseLabel !== "未发布";
-    if (stageKey === "delivery") return releaseLabel && releaseLabel !== "未发布";
-    return true;
-  };
-  const filteredMilestones = resolvedStageKey
-    ? selectedProject.milestones.filter((item) => String(item.id || "") === resolvedStageKey)
-    : selectedProject.milestones;
-  const filteredSamples = selectedProject.samples.filter((item) => stageMatchesSample(item, resolvedStageKey));
-  const filteredProjectLogs = resolvedStageKey
-    ? ((resolvedStageKey === "release" || resolvedStageKey === "delivery") ? selectedProject.projectLogs : [])
-    : selectedProject.projectLogs;
-  const releaseLogCards = Array.from(
-    new Map(
-      filteredProjectLogs.map((item) => [
-        `${item.version_label || item.version_id || item.created_at}`,
-        item,
-      ])
-    ).values()
-  ).slice(0, 6);
-
-  elements.projectManagementSummary.innerHTML = `
-    <article class="knowledge-base-card project-summary-card project-summary-card-primary">
-      <span>在管项目</span>
-      <strong>${projects.length} 个</strong>
-      <p>覆盖 ${totalSamples} 份样本，按送检单位与月份聚合项目批次。</p>
-    </article>
-    <article class="knowledge-base-card project-summary-card">
-      <span>项目状态</span>
-      <strong>${activeProjects} 个进行中</strong>
-      <p>已完成 ${completedProjects} 个，已归档 ${archivedProjects.length} 个，当前项目整体节点完成 ${overallCompletedMilestones}/${overallMilestones}。</p>
-    </article>
-    <article class="knowledge-base-card project-summary-card">
-      <span>当前最急交付</span>
-      <strong>${escapeHtml(nextDelivery?.shortName || (editableProjects.length ? "-" : "暂无在制项目"))}</strong>
-      <p>${escapeHtml(nextDelivery?.monthLabel || "-")} · ${escapeHtml(nextDelivery?.stageLabel || "-")} · ${escapeHtml(nextDelivery ? `预计 ${formatDate(nextDelivery?.timelineEnd) || "-"} 前交付。` : "当前仅剩归档项目。")}</p>
-    </article>
-    <article class="knowledge-base-card project-summary-card">
-      <span>主要专题</span>
-      <strong>${escapeHtml(projects[0]?.syndrome || "未标注症候群")}</strong>
-      <p>当前样本量最高的项目批次主要围绕 ${escapeHtml(projects[0]?.syndrome || "未标注症候群")} 展开。</p>
-    </article>
-  `;
-
-  elements.projectManagementContent.innerHTML = `
-    <div class="project-management-tabs" role="tablist" aria-label="项目管理视图切换">
-      <button class="tab-button database-section-button ${activeSection === "overview" ? "active" : ""}" type="button" data-project-section="overview" aria-selected="${activeSection === "overview" ? "true" : "false"}">项目批次概览</button>
-      <button class="tab-button database-section-button ${activeSection === "gantt" ? "active" : ""}" type="button" data-project-section="gantt" aria-selected="${activeSection === "gantt" ? "true" : "false"}">项目甘特图</button>
-    </div>
-    <div class="project-management-panel ${activeSection === "overview" ? "" : "hidden"}" data-project-panel="overview">
-      <div class="project-management-overview-grid">
-        <section class="database-alert-rule-block project-management-block project-management-block-rail">
-          <div class="panel-head compact">
-            <div>
-              <h3>项目批次概览</h3>
-              <p class="field-note">将同一送检单位在同一月份的样本视作同一项目批次，用于跟踪样本入组、分析、复核和交付进度。</p>
-            </div>
-          </div>
-          <div class="project-management-lanes">
-            ${projects.slice(0, 8).map((project) => `
-              <article class="project-lane-card tone-${escapeHtml(project.progress >= 90 ? "teal" : project.progress >= 68 ? "amber" : project.progress >= 42 ? "cobalt" : "steel")} ${project.key === selectedProject.key ? "is-active" : ""}" data-project-card="${escapeHtml(project.key)}" tabindex="0" role="button">
-                <span>${escapeHtml(project.monthLabel)}</span>
-                <strong>${escapeHtml(project.shortName)}</strong>
-                <p>${escapeHtml(project.syndrome)} · ${escapeHtml(project.area)}</p>
-                <p>${escapeHtml(`${project.sampleCount} 份样本 · ${project.archived ? "已归档" : `当前阶段 ${project.stageLabel}`} · 节点完成 ${getProjectOverallScoreMeta(project).label}`)}</p>
-              </article>
-            `).join("")}
-          </div>
-        </section>
-        <section class="database-alert-rule-block project-management-block project-management-block-detail">
-          <div class="panel-head compact">
-            <div>
-              <h3>项目协同详情</h3>
-              <p class="field-note">围绕当前选中项目查看样本清单、任务关联、主库发布和客户交付节点，便于按项目而不是按单样本推进工作。</p>
-            </div>
-            <div class="project-detail-head-actions">
-              <button class="ghost-button compact" type="button" data-project-archive="${escapeHtml(selectedProject.key)}" data-project-archive-mode="${selectedProject.archived ? "unarchive" : "archive"}">
-                ${selectedProject.archived ? "取消归档" : "归档项目"}
-              </button>
-              <button class="project-delete-button" type="button" data-project-delete="${escapeHtml(selectedProject.key)}">
-                <span aria-hidden="true">⌫</span>
-                <span>${selectedProject.explicitProject ? "删除项目" : "移除项目"}</span>
-              </button>
-              ${selectedStageSegment ? `
-              <div class="project-stage-filter-banner">
-                <span>当前阶段视角</span>
-                <strong>${escapeHtml(selectedStageLabel)}</strong>
-                <button class="ghost-button compact" type="button" data-project-stage-clear="1">查看全部阶段</button>
-              </div>
-              ` : ""}
-            </div>
-          </div>
-          <div class="project-detail-grid">
-        <article class="project-detail-card">
-          <span>当前项目</span>
-          <strong>${escapeHtml(selectedProject.name)}</strong>
-          <p>${escapeHtml(selectedProject.sampleCount + " 份样本")} · ${escapeHtml(selectedProject.syndrome)} · ${escapeHtml(selectedProject.area)}${selectedProject.archived ? " · 已归档" : ""}</p>
-        </article>
-        <article class="project-detail-card">
-          <span>总负责人</span>
-          <strong>${escapeHtml(selectedProject.ownerName)}</strong>
-          <p>${escapeHtml(selectedProject.taskNames.slice(0, 2).join(" / ") || "待补充任务")} · ${escapeHtml(`${selectedProject.taskLinkedCount}/${selectedProject.sampleCount} 份样本已关联任务`)}</p>
-          <div class="project-detail-card-actions">
-            ${selectedProject.archived ? `<span class="field-note">归档项目不可修改负责人</span>` : ""}
-            ${selectedProject.archived ? "" : `
-            <button class="ghost-button compact" type="button" data-project-owner-edit="${escapeHtml(selectedProject.key)}">修改负责人</button>
-            `}
-          </div>
-        </article>
-        <article class="project-detail-card">
-          <span>计划交付日</span>
-          <strong>${escapeHtml(formatDate(selectedProject.plannedDeliveryDate) || "-")}</strong>
-          <p>${escapeHtml(`当前阶段：${selectedProject.stageLabel}`)} · ${escapeHtml(selectedProject.customerStatus)}</p>
-        </article>
-        <article class="project-detail-card">
-          <span>当前阻塞项</span>
-          <strong>${escapeHtml(selectedProject.blockerText)}</strong>
-          <p>${escapeHtml(`客户状态：${selectedProject.customerStatus}`)}</p>
-        </article>
-          </div>
-          <div class="project-detail-layout">
-            <section class="project-detail-section">
-              <div class="panel-head compact">
-                <div>
-                  <h3>交付节点</h3>
-                  <p class="field-note">${selectedProject.archived ? "当前项目已归档，仅保留节点只读查看，不再支持编辑，也不会出现在甘特图中。" : "按项目推进链路展示当前阶段，便于客户项目协同管理。"}</p>
-                </div>
-                <div class="database-alert-topic-actions">
-                  ${selectedProject.archived ? "" : `
-                  <button class="database-alert-rule-button is-primary" type="button" data-project-milestone-create="${escapeHtml(selectedProject.key)}">新增节点</button>
-                  `}
-                </div>
-              </div>
-              <div class="project-milestone-list">
-                ${filteredMilestones.map((item) => `
-                  <article class="project-milestone-card tone-${item.status}">
-                    <div class="project-milestone-head">
-                      <div>
-                        <strong>${escapeHtml(item.label)}</strong>
-                        <p>${escapeHtml(item.detail || "未补充节点说明")}</p>
-                      </div>
-                      <div class="project-milestone-actions">
-                        ${selectedProject.archived ? "" : `
-                        <button class="ghost-button compact" type="button" data-project-milestone-edit="${escapeHtml(item.id)}">修改</button>
-                        <button class="ghost-button compact danger" type="button" data-project-milestone-delete="${escapeHtml(item.id)}">删除</button>
-                        `}
-                      </div>
-                    </div>
-                    <div class="project-milestone-meta">
-                      <span>节点负责人 ${escapeHtml(item.owner || selectedProject.ownerName || "待分配")}</span>
-                      ${item.startDate && item.endDate ? `<span>时间区段 ${escapeHtml(formatProjectDateRange(item.startDate, item.endDate))}</span>` : ""}
-                      <span>节点权重 ${escapeHtml(String(item.weight))}%</span>
-                      <span>节点进度 ${escapeHtml(formatStandaloneMilestoneStepScore(item))}</span>
-                    </div>
-                    ${item.note ? `<p class="project-milestone-note">${escapeHtml(item.note)}</p>` : ""}
-                    ${item.children?.length ? `
-                      <div class="project-milestone-children-preview">
-                        ${item.children.map((child) => `
-                          <div class="project-milestone-child-chip">
-                            <span>${escapeHtml(child.label)}</span>
-                            <strong>${escapeHtml(String(child.completion))}%</strong>
-                          </div>
-                        `).join("")}
-                      </div>
-                    ` : ""}
-                  </article>
-                `).join("")}
-              </div>
-            </section>
-            <section class="project-detail-section">
-              <div class="panel-head compact">
-                <div>
-                  <h3>报告版本</h3>
-                  <p class="field-note">${selectedStageSegment ? "当前仅展示与所选阶段相关的版本记录。" : "展示当前项目关联的主库发布与版本记录。"}</p>
-                </div>
-              </div>
-              <div class="project-release-log-list">
-                ${releaseLogCards.length ? releaseLogCards.map((item) => `
-                  <article class="project-release-log-card">
-                    <div>
-                      <strong>${escapeHtml(item.version_label || item.version_id || "未命名版本")}</strong>
-                      <p>${escapeHtml(item.action_label || item.action || "版本发布")} · ${escapeHtml(formatDateTime(item.created_at) || "-")}</p>
-                    </div>
-                    <span>${escapeHtml(item.sample_name || item.sample_key || "项目关联样本")}</span>
-                  </article>
-                `).join("") : `<div class="field-note">当前阶段暂无关联版本记录。</div>`}
-              </div>
-            </section>
-          </div>
-        </section>
-      </div>
-      <section class="database-alert-rule-block project-management-block project-management-block-wide">
-        <div class="panel-head compact">
-          <div>
-            <h3>样本清单</h3>
-            <p class="field-note">${selectedStageSegment ? `当前仅展示与“${escapeHtml(selectedStageLabel)}”相关的样本、任务和版本状态。` : "当前项目下的样本、任务和版本状态一览，便于从项目视角统一核查分析与交付准备情况。"}</p>
-          </div>
-        </div>
-        <div class="database-table-shell project-sample-table-shell">
-          <div class="database-table-frame">
-            <table class="database-table report-table table-tone-assembly project-sample-table">
-              <thead>
-                <tr>
-                  <th>样本</th>
-                  <th>采样时间</th>
-                  <th>物种</th>
-                  <th>任务状态</th>
-                  <th>MLST</th>
-                  <th>血清型</th>
-                  <th>发布版本</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${filteredSamples.map((item) => `
-                  <tr>
-                    <td${renderMobileCellAttributes("样本")}>${escapeHtml(item.sampleName)}</td>
-                    <td${renderMobileCellAttributes("采样时间")}>${escapeHtml(formatDate(item.date) || "-")}</td>
-                    <td${renderMobileCellAttributes("物种")}>${escapeHtml(item.species)}</td>
-                    <td${renderMobileCellAttributes("任务状态")}>${escapeHtml(item.taskStatus)}</td>
-                    <td${renderMobileCellAttributes("MLST")}>${escapeHtml(item.mlst)}</td>
-                    <td${renderMobileCellAttributes("血清型")}>${escapeHtml(item.serotype)}</td>
-                    <td${renderMobileCellAttributes("发布版本")}>${escapeHtml(item.releaseLabel)}</td>
-                    <td${renderMobileCellAttributes("操作", "actions")}><button class="ghost-button compact" type="button" data-project-sample-key="${escapeHtml(item.sampleKey)}">查看样本</button></td>
-                  </tr>
-                `).join("") || `<tr><td colspan="8" class="project-sample-table-empty">当前阶段暂无关联样本。</td></tr>`}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-      </div>
-    </section>
-    </div>
-    <div class="project-management-panel ${activeSection === "gantt" ? "" : "hidden"}" data-project-panel="gantt">
-      <section class="database-alert-rule-block project-management-block">
-        <div class="panel-head compact">
-          <div>
-            <h3>项目甘特图</h3>
-            <p class="field-note">按项目批次展示样本入组、分析处理中、结果复核和报告交付各阶段，归档项目不会出现在甘特图中。</p>
-          </div>
-        </div>
-        ${timelineProjects.length ? `
-        <div class="project-gantt-legend">
-          ${ganttLegendItems.map((stage) => `
-            <span class="project-gantt-legend-chip tone-${escapeHtml(stage.tone)}">${escapeHtml(stage.label)}</span>
-          `).join("")}
-        </div>
-        <div class="project-gantt-toolbar">
-          <div class="project-gantt-toolbar-copy">
-            <span>时间缩放</span>
-            <strong data-project-gantt-zoom-value>${state.projectManagementGanttFitMode ? "适配全宽" : `${ganttZoomPercent}%`}</strong>
-            <p data-project-gantt-zoom-note>${state.projectManagementGanttFitMode ? "当前宽度已完整显示整个时间轴。" : "缩小时优先看全跨度，放大后便于查看单个阶段细节。"}</p>
-          </div>
-          <div class="project-gantt-toolbar-actions" role="group" aria-label="甘特图缩放控制">
-            <button class="project-gantt-toolbar-button" type="button" data-project-gantt-zoom-out="1" ${ganttZoom <= PROJECT_GANTT_ZOOM_MIN ? "disabled" : ""}>缩小</button>
-            <div class="project-gantt-zoom-control">
-              <input class="project-gantt-zoom-range" type="range" min="${PROJECT_GANTT_ZOOM_MIN}" max="${PROJECT_GANTT_ZOOM_MAX}" step="${PROJECT_GANTT_ZOOM_STEP}" value="${sliderZoom}" data-project-gantt-zoom-range="1" aria-label="甘特图时间缩放">
-            </div>
-            <button class="project-gantt-toolbar-button" type="button" data-project-gantt-zoom-in="1" ${ganttZoom >= PROJECT_GANTT_ZOOM_MAX ? "disabled" : ""}>放大</button>
-            <button class="project-gantt-toolbar-button is-fit ${state.projectManagementGanttFitMode ? "is-active" : ""}" type="button" data-project-gantt-zoom-fit="1">适配全宽</button>
-          </div>
-        </div>
-        <div class="project-gantt-shell project-gantt-shell-interactive" style="--project-gantt-track-width:${ganttTrackWidth}px;">
-          <div class="project-gantt-header">
-            <div class="project-gantt-header-meta">
-              <span>项目</span>
-              <strong>当前阶段 / 进度</strong>
-            </div>
-            <div class="project-gantt-header-scale">
-              ${monthBands.map((band, index) => `
-                <div class="project-gantt-header-band ${index % 2 === 0 ? "is-even" : "is-odd"}" style="left:${band.startPercent.toFixed(3)}%; width:${band.widthPercent.toFixed(3)}%;">
-                  <span>${escapeHtml(band.label)}</span>
-                </div>
-              `).join("")}
-            </div>
-          </div>
-          <div class="project-gantt-rows">
-            ${timelineProjects.map((project) => `
-              <article class="project-gantt-row ${project.key === selectedProject.key ? "is-active" : ""}" data-project-gantt-select="${escapeHtml(project.key)}" tabindex="0" role="button">
-                <div class="project-gantt-row-meta">
-                  <strong>${escapeHtml(project.shortName)}</strong>
-                  <p>${escapeHtml(`${project.sampleCount} 份样本 · ${project.syndrome}`)}</p>
-                  <span>${escapeHtml(`${project.stageLabel} · ${getProjectOverallScoreMeta(project).label}`)}</span>
-                </div>
-                <div class="project-gantt-row-track">
-                  <div class="project-gantt-row-bands">
-                    ${monthBands.map((band, index) => `
-                      <div class="project-gantt-row-band ${index % 2 === 0 ? "is-even" : "is-odd"}" style="left:${band.startPercent.toFixed(3)}%; width:${band.widthPercent.toFixed(3)}%;"></div>
-                    `).join("")}
-                  </div>
-                  ${project.stageSegments.map((segment) => {
-                    const stage = PROJECT_STAGE_CONFIG.find((item) => item.key === segment.key) || PROJECT_STAGE_CONFIG.find((item) => item.tone === segment.tone) || PROJECT_STAGE_CONFIG[0];
-                    const segmentLabel = String(segment.label || "").trim() || stage.label;
-                    const startPercent = toPercent(segment.start);
-                    const endPercent = Math.min(100, toPercent(addDays(segment.end, 1)));
-                    const widthPercent = Math.max(0.12, endPercent - startPercent);
-                    const widthPx = ganttTrackWidth * (widthPercent / 100);
-                    const progressWidth = Math.max(0, Math.min(100, Number(segment.completion) || 0));
-                    const showLabel = widthPx >= 156;
-                    const showValue = widthPx >= 252;
-                    const compactLabel = !showLabel && widthPx >= 102;
-                    const compactValue = !showValue && widthPx >= 96;
-                    const compactSegmentLabel = compactLabel
-                      ? (segmentLabel.length > 4 ? `${segmentLabel.slice(0, 4)}…` : segmentLabel)
-                      : "";
-                    const segmentScoreLabel = formatProjectMilestoneStepScore(project, segment);
-                    return `
-                      <button class="project-gantt-segment tone-${escapeHtml(stage.tone)} ${resolvedStageKey === String(segment.key || "") ? "is-active" : ""}" type="button" data-project-gantt-segment="${escapeHtml(project.key)}" data-project-gantt-stage-key="${escapeHtml(String(segment.key || ""))}" style="left:${startPercent.toFixed(3)}%; width:${widthPercent.toFixed(3)}%;" title="${escapeHtml(`${project.shortName} · ${segmentLabel} · ${formatProjectDateRange(segment.start, segment.end)} · 节点进度 ${segmentScoreLabel}`)}">
-                        <span class="project-gantt-segment-progress" style="width:${progressWidth}%;"></span>
-                        ${showLabel ? `<span class="project-gantt-segment-label">${escapeHtml(segmentLabel)}</span>` : compactLabel ? `<span class="project-gantt-segment-label is-compact">${escapeHtml(compactSegmentLabel)}</span>` : ""}
-                        ${showValue ? `<span class="project-gantt-segment-value">${escapeHtml(segmentScoreLabel)}</span>` : compactValue ? `<span class="project-gantt-segment-value is-compact">${escapeHtml(segmentScoreLabel)}</span>` : ""}
-                      </button>
-                    `;
-                  }).join("")}
-                </div>
-              </article>
-            `).join("")}
-          </div>
-        </div>
-        <div class="project-gantt-focus-card">
-          <div class="project-gantt-focus-head">
-            <div>
-              <p class="section-kicker">Current Project Focus</p>
-              <h4>${escapeHtml(selectedProject.name)}</h4>
-              <p class="field-note">当前项目的阶段推进、计划交付窗口和节点完成情况会随着甘特图选择联动更新。</p>
-            </div>
-            <span class="project-gantt-focus-badge">${escapeHtml(getProjectOverallScoreMeta(selectedProject).label)}</span>
-          </div>
-          <div class="project-gantt-focus-grid">
-            <article class="project-gantt-focus-item">
-              <span>当前阶段</span>
-              <strong>${escapeHtml(selectedProject.stageLabel)}</strong>
-              <p>${escapeHtml(selectedProjectCurrentSegment?.label || "待确定")}</p>
-            </article>
-            <article class="project-gantt-focus-item">
-              <span>计划窗口</span>
-              <strong>${escapeHtml(formatProjectDateRange(selectedProject.timelineStart, selectedProject.timelineEnd))}</strong>
-              <p>${escapeHtml(`计划交付日：${formatDate(selectedProject.plannedDeliveryDate) || "-"}`)}</p>
-            </article>
-            <article class="project-gantt-focus-item">
-              <span>总负责人</span>
-              <strong>${escapeHtml(selectedProject.ownerName)}</strong>
-              <p>${escapeHtml(selectedProject.customerStatus)}</p>
-            </article>
-            <article class="project-gantt-focus-item">
-              <span>节点负责人</span>
-              <strong>${escapeHtml(selectedStageSegment?.owner || selectedProject.ownerName || "待分配")}</strong>
-              <p>${escapeHtml(selectedStageSegment?.label || "当前未选中特定节点")}</p>
-            </article>
-          </div>
-          ${selectedStageMilestone ? `
-            <div class="project-gantt-stage-detail">
-              <div class="project-gantt-stage-detail-head">
-                <div>
-                  <span>节点备注</span>
-                  <strong>${escapeHtml(selectedStageMilestone.label || selectedStageLabel || "当前阶段")}</strong>
-                </div>
-              </div>
-              <label class="project-gantt-stage-editor">
-                <span>节点备注</span>
-                <textarea data-project-stage-note rows="3" placeholder="补充当前节点的执行要点、阻塞项或交付说明">${escapeHtml(selectedStageMilestone.note || "")}</textarea>
-              </label>
-              <div class="project-gantt-stage-children">
-                <strong>子节点步骤</strong>
-                ${selectedStageMilestone.children?.length ? `
-                  <div class="project-gantt-stage-child-list">
-                    ${selectedStageMilestone.children.map((child, index) => `
-                      <article class="project-gantt-stage-child-card" data-project-stage-child-index="${index}">
-                        <div>
-                          <span>${escapeHtml(child.label)}</span>
-                          <textarea data-project-stage-child-note rows="2" placeholder="补充该子节点的执行备注">${escapeHtml(child.note || "")}</textarea>
-                        </div>
-                        <label class="project-gantt-stage-child-progress">
-                          <small>完成度</small>
-                          <input data-project-stage-child-completion type="number" min="0" max="100" step="1" value="${escapeHtml(String(child.completion ?? 0))}">
-                        </label>
-                      </article>
-                    `).join("")}
-                  </div>
-                ` : `<div class="field-note">当前节点尚未拆分子节点步骤。</div>`}
-              </div>
-              <div class="project-gantt-stage-actions">
-                <button class="primary-button" type="button" data-project-stage-save="${escapeHtml(selectedProject.key)}" data-project-stage-save-id="${escapeHtml(selectedStageMilestone.id)}">保存当前节点</button>
-              </div>
-            </div>
-          ` : ""}
-          <div class="project-gantt-stage-list">
-            ${selectedProject.stageSegments.map((segment) => {
-              const stage = PROJECT_STAGE_CONFIG.find((item) => item.key === segment.key) || PROJECT_STAGE_CONFIG.find((item) => item.tone === segment.tone) || PROJECT_STAGE_CONFIG[0];
-              const segmentLabel = String(segment.label || "").trim() || stage.label;
-              const segmentScoreLabel = formatProjectMilestoneStepScore(selectedProject, segment);
-              return `
-                <article class="project-gantt-stage-card tone-${escapeHtml(stage.tone)} ${resolvedStageKey === String(segment.key || "") ? "is-active" : ""}">
-                  <div>
-                    <strong>${escapeHtml(segmentLabel)}</strong>
-                    <p>${escapeHtml(formatProjectDateRange(segment.start, segment.end))}</p>
-                    <p>${escapeHtml(`负责人：${segment.owner || selectedProject.ownerName || "待分配"}`)}</p>
-                  </div>
-                  <span>${escapeHtml(segmentScoreLabel)}</span>
-                </article>
-              `;
-            }).join("")}
-          </div>
-        </div>
-        ` : `
-        <div class="field-note" style="padding: 12px 0 4px;">
-          当前没有可显示的在制项目。所有项目都已归档，或尚未形成可进入甘特图的项目批次。
-        </div>
-        `}
-      </section>
-    </div>
-  `;
-
-  if (activeSection === "gantt" && timelineProjects.length && state.projectManagementGanttAutoFitPending) {
-    const shell = elements.projectManagementContent.querySelector(".project-gantt-shell-interactive");
-    if (shell instanceof HTMLElement && shell.clientWidth > 0) {
-      state.projectManagementGanttFitMode = true;
-      state.projectManagementGanttZoom = calculateProjectGanttFitZoom(totalDaysForTrack, shell.clientWidth);
-      state.projectManagementGanttAutoFitPending = false;
-      renderProjectManagement();
-      return;
-    }
-  }
-
-  elements.projectManagementContent.querySelectorAll("[data-project-section]").forEach((node) => {
-    node.addEventListener("click", () => {
-      state.projectManagementSection = String(node.getAttribute("data-project-section") || "overview");
-      renderProjectManagement();
-    });
-  });
-  scheduleSegmentedControlsSync(elements.projectManagementContent);
-  elements.projectManagementContent.querySelectorAll("[data-project-card]").forEach((node) => {
-    const selectProject = () => {
-      state.projectManagementSelectedKey = String(node.getAttribute("data-project-card") || "");
-      state.projectManagementStageKey = "";
-      renderProjectManagement();
-    };
-    node.addEventListener("click", selectProject);
-    node.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        selectProject();
-      }
-    });
-  });
-  elements.projectManagementContent.querySelectorAll("[data-project-gantt-select]").forEach((node) => {
-    const selectProject = () => {
-      state.projectManagementSelectedKey = String(node.getAttribute("data-project-gantt-select") || "");
-      state.projectManagementStageKey = "";
-      renderProjectManagement();
-    };
-    node.addEventListener("click", selectProject);
-    node.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        selectProject();
-      }
-    });
-  });
-  elements.projectManagementContent.querySelectorAll("[data-project-gantt-segment]").forEach((node) => {
-    node.addEventListener("click", (event) => {
-      event.stopPropagation();
-      state.projectManagementSelectedKey = String(node.getAttribute("data-project-gantt-segment") || "");
-      const stageKey = String(node.getAttribute("data-project-gantt-stage-key") || "");
-      state.projectManagementStageKey = state.projectManagementStageKey === stageKey ? "" : stageKey;
-      renderProjectManagement();
-    });
-  });
-  elements.projectManagementContent.querySelectorAll("[data-project-stage-clear]").forEach((node) => {
-    node.addEventListener("click", () => {
-      state.projectManagementStageKey = "";
-      renderProjectManagement();
-    });
-  });
-  elements.projectManagementContent.querySelectorAll("[data-project-gantt-zoom-out]").forEach((node) => {
-    node.addEventListener("click", () => {
-      state.projectManagementGanttFitMode = false;
-      state.projectManagementGanttZoom = clampProjectGanttZoom(state.projectManagementGanttZoom - PROJECT_GANTT_ZOOM_STEP);
-      state.projectManagementGanttAutoFitPending = false;
-      renderProjectManagement();
-    });
-  });
-  elements.projectManagementContent.querySelectorAll("[data-project-gantt-zoom-in]").forEach((node) => {
-    node.addEventListener("click", () => {
-      state.projectManagementGanttFitMode = false;
-      state.projectManagementGanttZoom = clampProjectGanttZoom(state.projectManagementGanttZoom + PROJECT_GANTT_ZOOM_STEP);
-      state.projectManagementGanttAutoFitPending = false;
-      renderProjectManagement();
-    });
-  });
-  elements.projectManagementContent.querySelectorAll("[data-project-gantt-zoom-range]").forEach((node) => {
-    let pendingFrame = 0;
-    const commitZoom = () => {
-      if (pendingFrame) {
-        window.cancelAnimationFrame(pendingFrame);
-        pendingFrame = 0;
-      }
-      state.projectManagementGanttFitMode = false;
-      state.projectManagementGanttZoom = clampProjectGanttZoom(node.value);
-      state.projectManagementGanttAutoFitPending = false;
-      renderProjectManagement();
-    };
-    node.addEventListener("input", () => {
-      state.projectManagementGanttFitMode = false;
-      state.projectManagementGanttZoom = clampProjectGanttZoom(node.value);
-      state.projectManagementGanttAutoFitPending = false;
-      if (pendingFrame) {
-        window.cancelAnimationFrame(pendingFrame);
-      }
-      pendingFrame = window.requestAnimationFrame(() => {
-        pendingFrame = 0;
-        updateProjectGanttViewport(totalDaysForTrack, {
-          zoom: state.projectManagementGanttZoom,
-          fitMode: false,
-          resetScroll: false,
-        });
-      });
-    });
-    node.addEventListener("change", commitZoom);
-    node.addEventListener("pointerup", commitZoom);
-  });
-  elements.projectManagementContent.querySelectorAll("[data-project-gantt-zoom-fit]").forEach((node) => {
-    node.addEventListener("click", () => {
-      const shell = elements.projectManagementContent.querySelector(".project-gantt-shell-interactive");
-      state.projectManagementGanttFitMode = true;
-      state.projectManagementGanttZoom = calculateProjectGanttFitZoom(totalDaysForTrack, shell?.clientWidth || 0);
-      state.projectManagementGanttAutoFitPending = false;
-      renderProjectManagement();
-    });
-  });
-  elements.projectManagementContent.querySelectorAll(".project-gantt-shell-interactive").forEach((shell) => {
-    if (state.projectManagementGanttFitMode) {
-      shell.scrollLeft = 0;
-    }
-    let dragging = false;
-    let startX = 0;
-    let startScroll = 0;
-    const onPointerMove = (event) => {
-      if (!dragging) return;
-      const delta = event.clientX - startX;
-      shell.scrollLeft = startScroll - delta;
-    };
-    const endDrag = () => {
-      if (!dragging) return;
-      dragging = false;
-      shell.classList.remove("is-dragging");
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", endDrag);
-    };
-    shell.addEventListener("pointerdown", (event) => {
-      const target = event.target;
-      if (!(target instanceof HTMLElement)) return;
-      if (target.closest("button, input, textarea, select, a")) return;
-      dragging = true;
-      startX = event.clientX;
-      startScroll = shell.scrollLeft;
-      shell.classList.add("is-dragging");
-      window.addEventListener("pointermove", onPointerMove);
-      window.addEventListener("pointerup", endDrag);
-    });
-  });
-  if (activeSection === "gantt") {
-    updateProjectGanttViewport(totalDaysForTrack, {
-      zoom: state.projectManagementGanttZoom,
-      fitMode: state.projectManagementGanttFitMode,
-      resetScroll: state.projectManagementGanttFitMode,
-    });
-  }
-  elements.projectManagementContent.querySelectorAll("[data-project-sample-key]").forEach((node) => {
-    node.addEventListener("click", async () => {
-      const sampleKey = String(node.getAttribute("data-project-sample-key") || "");
-      if (!sampleKey) return;
-      await openDatabaseSampleModal(sampleKey);
-    });
-  });
-  elements.projectManagementContent.querySelectorAll("[data-project-milestone-create]").forEach((node) => {
-    node.addEventListener("click", () => {
-      openProjectMilestoneModal(String(node.getAttribute("data-project-milestone-create") || ""), "");
-    });
-  });
-  elements.projectManagementContent.querySelectorAll("[data-project-owner-edit]").forEach((node) => {
-    node.addEventListener("click", () => {
-      openProjectOwnerModal(String(node.getAttribute("data-project-owner-edit") || ""));
-    });
-  });
-  elements.projectManagementContent.querySelectorAll("[data-project-archive]").forEach((node) => {
-    node.addEventListener("click", () => {
-      openProjectDeleteModal(
-        String(node.getAttribute("data-project-archive") || ""),
-        String(node.getAttribute("data-project-archive-mode") || "archive"),
-      );
-    });
-  });
-  elements.projectManagementContent.querySelectorAll("[data-project-delete]").forEach((node) => {
-    node.addEventListener("click", () => {
-      openProjectDeleteModal(String(node.getAttribute("data-project-delete") || ""));
-    });
-  });
-  elements.projectManagementContent.querySelectorAll("[data-project-milestone-edit]").forEach((node) => {
-    node.addEventListener("click", () => {
-      openProjectMilestoneModal(selectedProject.key, String(node.getAttribute("data-project-milestone-edit") || ""));
-    });
-  });
-  elements.projectManagementContent.querySelectorAll("[data-project-milestone-delete]").forEach((node) => {
-    node.addEventListener("click", () => {
-      deleteProjectMilestone(selectedProject.key, String(node.getAttribute("data-project-milestone-delete") || ""));
-    });
-  });
-  elements.projectManagementContent.querySelectorAll("[data-project-stage-save]").forEach((node) => {
-    node.addEventListener("click", () => {
-      const projectKey = String(node.getAttribute("data-project-stage-save") || "");
-      const milestoneId = String(node.getAttribute("data-project-stage-save-id") || "");
-      const stageDetail = node.closest(".project-gantt-stage-detail");
-      if (!(stageDetail instanceof HTMLElement)) return;
-      const note = String(stageDetail.querySelector("[data-project-stage-note]")?.value || "").trim();
-      const children = Array.from(stageDetail.querySelectorAll("[data-project-stage-child-index]")).map((row) => {
-        const index = Number(row.getAttribute("data-project-stage-child-index") || 0);
-        return {
-          index,
-          note: String(row.querySelector("[data-project-stage-child-note]")?.value || "").trim(),
-          completion: Math.max(0, Math.min(100, Number(row.querySelector("[data-project-stage-child-completion]")?.value || 0))),
-        };
-      });
-      const project = getProjectByKey(projectKey);
-      const milestone = project?.milestones.find((item) => item.id === milestoneId);
-      const nextChildren = Array.isArray(milestone?.children)
-        ? milestone.children.map((child, index) => {
-            const edited = children.find((item) => item.index === index);
-            return edited ? { ...child, note: edited.note, completion: edited.completion } : child;
-          })
-        : [];
-      saveProjectStageExecutionPanel(projectKey, milestoneId, { note, children: nextChildren });
-    });
-  });
-}
-
-function getProjectByKey(projectKey = "") {
-  const normalizedKey = String(projectKey || "").trim();
-  if (!normalizedKey) return null;
-  return buildProjectManagementProjects().find((item) => item.key === normalizedKey) || null;
-}
-
-function openProjectMilestoneModal(projectKey = "", milestoneId = "") {
-  const project = ensureProjectEditable(projectKey, milestoneId ? "修改交付节点" : "新增交付节点");
-  if (!project || !elements.projectMilestoneModal) return;
-  clearScopedValidation(elements.projectMilestoneForm);
-  const milestone = project.milestones.find((item) => item.id === milestoneId) || null;
-  state.currentProjectMilestoneEditor = {
-    projectKey: project.key,
-    milestoneId: milestone?.id || "",
-  };
-  if (elements.projectMilestoneTitle) {
-    elements.projectMilestoneTitle.textContent = milestone ? "修改交付节点" : "新增交付节点";
-  }
-  if (elements.projectMilestoneProjectName) {
-    elements.projectMilestoneProjectName.textContent = `${project.name} · 当前项目共 ${project.milestones.length} 个节点`;
-  }
-  if (elements.projectMilestoneNameInput instanceof HTMLInputElement) {
-    elements.projectMilestoneNameInput.value = milestone?.label || "";
-  }
-  if (elements.projectMilestoneOwnerInput instanceof HTMLInputElement) {
-    elements.projectMilestoneOwnerInput.value = milestone?.owner || project.ownerName || "";
-  }
-  if (elements.projectMilestoneStartDateInput instanceof HTMLInputElement) {
-    elements.projectMilestoneStartDateInput.value = milestone?.startDate ? String(milestone.startDate).slice(0, 10) : "";
-  }
-  if (elements.projectMilestoneEndDateInput instanceof HTMLInputElement) {
-    elements.projectMilestoneEndDateInput.value = milestone?.endDate ? String(milestone.endDate).slice(0, 10) : "";
-  }
-  if (elements.projectMilestoneNoteInput instanceof HTMLTextAreaElement) {
-    elements.projectMilestoneNoteInput.value = milestone?.note || "";
-  }
-  if (elements.projectMilestoneWeightInput instanceof HTMLInputElement) {
-    elements.projectMilestoneWeightInput.value = milestone ? String(milestone.weight || "") : "";
-  }
-  if (elements.projectMilestoneCompletionInput instanceof HTMLInputElement) {
-    elements.projectMilestoneCompletionInput.value = milestone ? String(milestone.completion || "") : "";
-  }
-  renderProjectMilestoneChildrenRows(milestone?.children || []);
-  if (elements.projectMilestoneDeleteButton instanceof HTMLButtonElement) {
-    elements.projectMilestoneDeleteButton.classList.toggle("hidden", !milestone);
-  }
-  elements.projectMilestoneModal.classList.remove("hidden");
-  elements.projectMilestoneModal.setAttribute("aria-hidden", "false");
-}
-
-function closeProjectMilestoneModal() {
-  clearScopedValidation(elements.projectMilestoneForm);
-  state.currentProjectMilestoneEditor = null;
-  elements.projectMilestoneModal?.classList.add("hidden");
-  elements.projectMilestoneModal?.setAttribute("aria-hidden", "true");
-}
-
-function openProjectOwnerModal(projectKey = "") {
-  const project = ensureProjectEditable(projectKey, "修改项目负责人");
-  if (!project || !elements.projectOwnerModal) return;
-  clearScopedValidation(elements.projectOwnerForm);
-  state.currentProjectOwnerEditor = { projectKey: project.key };
-  if (elements.projectOwnerProjectName) {
-    elements.projectOwnerProjectName.textContent = `${project.name} · 当前总负责人 ${project.ownerName || "待分配"}`;
-  }
-  if (elements.projectOwnerNameInput instanceof HTMLInputElement) {
-    elements.projectOwnerNameInput.value = project.ownerName || "";
-  }
-  elements.projectOwnerModal.classList.remove("hidden");
-  elements.projectOwnerModal.setAttribute("aria-hidden", "false");
-}
-
-function closeProjectOwnerModal() {
-  clearScopedValidation(elements.projectOwnerForm);
-  state.currentProjectOwnerEditor = null;
-  elements.projectOwnerModal?.classList.add("hidden");
-  elements.projectOwnerModal?.setAttribute("aria-hidden", "true");
-}
-
-function onSubmitProjectOwner(event) {
-  event.preventDefault();
-  clearScopedValidation(elements.projectOwnerForm);
-  const editor = state.currentProjectOwnerEditor;
-  if (!editor?.projectKey) return;
-  if (!ensureProjectEditable(editor.projectKey, "修改项目负责人")) return;
-  const ownerName = String(elements.projectOwnerNameInput?.value || "").trim();
-  if (!ownerName) {
-    markFieldInvalid(elements.projectOwnerNameInput, "project-owner-name", "请填写项目总负责人。");
-    elements.projectOwnerNameInput?.focus();
-    return;
-  }
-  return withSubmittingState(elements.submitProjectOwnerButton, "保存中...", async () => {
-    saveProjectOwnerState(editor.projectKey, ownerName);
-    closeProjectOwnerModal();
-    renderProjectManagement();
-  });
-}
-
-function upsertProjectMilestone(projectKey, nextMilestone, milestoneId = "") {
-  const project = ensureProjectEditable(projectKey, milestoneId ? "修改交付节点" : "新增交付节点");
-  if (!project) return;
-  const milestones = project.milestones.slice();
-  const normalized = normalizeProjectMilestone({
-    ...nextMilestone,
-    id: milestoneId || `custom-${Date.now()}`,
-  }, milestones.length);
-  const index = milestones.findIndex((item) => item.id === milestoneId);
-  if (index >= 0) milestones[index] = normalized;
-  else milestones.push(normalized);
-  saveProjectMilestoneState(project.key, milestones);
-  renderProjectManagement();
-}
-
-function deleteProjectMilestone(projectKey, milestoneId = "") {
-  const project = ensureProjectEditable(projectKey, "删除交付节点");
-  if (!project || !milestoneId) return;
-  const milestones = project.milestones.filter((item) => item.id !== milestoneId);
-  if (!milestones.length) return;
-  saveProjectMilestoneState(project.key, milestones);
-  if (state.currentProjectMilestoneEditor?.projectKey === project.key && state.currentProjectMilestoneEditor?.milestoneId === milestoneId) {
-    closeProjectMilestoneModal();
-  }
-  renderProjectManagement();
-}
-
-function saveProjectStageExecutionPanel(projectKey = "", milestoneId = "", payload = {}) {
-  const project = ensureProjectEditable(projectKey, "保存阶段备注");
-  if (!project || !milestoneId) return;
-  const milestone = project.milestones.find((item) => item.id === milestoneId);
-  if (!milestone) return;
-  upsertProjectMilestone(project.key, {
-    ...milestone,
-    note: String(payload.note ?? milestone.note ?? "").trim(),
-    children: Array.isArray(payload.children) ? payload.children : milestone.children,
-  }, milestoneId);
-}
-
-function onDeleteProjectMilestone() {
-  const editor = state.currentProjectMilestoneEditor;
-  if (!editor?.projectKey || !editor?.milestoneId) return;
-  deleteProjectMilestone(editor.projectKey, editor.milestoneId);
-}
-
-function onSubmitProjectMilestone(event) {
-  event.preventDefault();
-  clearScopedValidation(elements.projectMilestoneForm);
-  const editor = state.currentProjectMilestoneEditor;
-  if (!editor?.projectKey) return;
-  if (!ensureProjectEditable(editor.projectKey, editor.milestoneId ? "修改交付节点" : "新增交付节点")) return;
-  const label = String(elements.projectMilestoneNameInput?.value || "").trim();
-  const owner = String(elements.projectMilestoneOwnerInput?.value || "").trim();
-  const startDate = String(elements.projectMilestoneStartDateInput?.value || "").trim();
-  const endDate = String(elements.projectMilestoneEndDateInput?.value || "").trim();
-  const note = String(elements.projectMilestoneNoteInput?.value || "").trim();
-  const weight = Number(elements.projectMilestoneWeightInput?.value || 0);
-  const completion = Number(elements.projectMilestoneCompletionInput?.value || 0);
-  const children = elements.projectMilestoneChildren instanceof HTMLElement
-    ? Array.from(elements.projectMilestoneChildren.querySelectorAll(".project-milestone-child-row"))
-        .map((row, index) => {
-          const label = String(row.querySelector("[data-project-milestone-child-label]")?.value || "").trim();
-          const note = String(row.querySelector("[data-project-milestone-child-note]")?.value || "").trim();
-          const completionValue = Number(row.querySelector("[data-project-milestone-child-completion]")?.value || 0);
-          if (!label) return null;
-          return {
-            id: `${editor.milestoneId || "custom"}-child-${index + 1}`,
-            label,
-            note,
-            completion: Number.isFinite(completionValue) ? Math.max(0, Math.min(100, Math.round(completionValue))) : 0,
-          };
-        })
-        .filter(Boolean)
-    : [];
-  if (!label) {
-    markFieldInvalid(elements.projectMilestoneNameInput, "project-milestone-name", "请填写节点名称。");
-    elements.projectMilestoneNameInput?.focus();
-    return;
-  }
-  if (!Number.isFinite(weight) || weight <= 0) {
-    markFieldInvalid(elements.projectMilestoneWeightInput, "project-milestone-weight", "请填写大于 0 的节点权重。");
-    elements.projectMilestoneWeightInput?.focus();
-    return;
-  }
-  if (!Number.isFinite(completion) || completion < 0 || completion > 100) {
-    markFieldInvalid(elements.projectMilestoneCompletionInput, "project-milestone-completion", "节点完成百分比需在 0 到 100 之间。");
-    elements.projectMilestoneCompletionInput?.focus();
-    return;
-  }
-  if ((startDate && !endDate) || (!startDate && endDate)) {
-    markFieldInvalid(elements.projectMilestoneStartDateInput, "project-milestone-start-date", "请同时填写节点开始日期和结束日期，或都留空。");
-    markFieldInvalid(elements.projectMilestoneEndDateInput, "project-milestone-end-date", "请同时填写节点开始日期和结束日期，或都留空。");
-    return;
-  }
-  if (startDate && endDate && new Date(endDate).getTime() < new Date(startDate).getTime()) {
-    markFieldInvalid(elements.projectMilestoneEndDateInput, "project-milestone-end-date", "节点结束日期不能早于开始日期。");
-    elements.projectMilestoneEndDateInput?.focus();
-    return;
-  }
-  return withSubmittingState(elements.submitProjectMilestoneButton, "保存中...", async () => {
-    upsertProjectMilestone(editor.projectKey, {
-      label,
-      owner,
-      startDate,
-      endDate,
-      note,
-      weight,
-      completion,
-      children,
-      detail: note || `${label}${startDate && endDate ? ` · ${formatProjectDateRange(startDate, endDate)}` : ""} · 当前完成 ${Math.round(completion)}%，节点权重 ${Math.round(weight)}%。`,
-    }, editor.milestoneId || "");
-    closeProjectMilestoneModal();
-  });
 }
 
 function getDatabaseAlertRuleVersionEntries(topicKey = "") {
@@ -17841,6 +16982,8 @@ function getVisibleDatabaseRecords() {
     const haystack = [
       row.sample_name,
       row.task_name,
+      getSampleClosureTrace(row).label,
+      getSampleClosureTrace(row).summary,
       row.owner,
       row.metadata_completion_label,
       row.metadata_missing_summary,
@@ -17949,11 +17092,145 @@ function inferDatabaseRecordPathogenType(row) {
   return "bacteria";
 }
 
+function getSampleClosureTrace(record) {
+  const trace = record?.closure_trace;
+  return trace && typeof trace === "object" ? trace : {};
+}
+
+function databaseTraceClassName(stateValue) {
+  const normalized = String(stateValue || "").trim().toLowerCase();
+  if (normalized === "traceable") return "trace-complete";
+  if (normalized === "incomplete") return "trace-incomplete";
+  if (normalized === "pending") return "trace-incomplete";
+  return "trace-neutral";
+}
+
+function renderDatabaseTraceCell(row) {
+  const trace = getSampleClosureTrace(row);
+  const missing = Array.isArray(trace.missing) ? trace.missing : [];
+  const label = String(trace.label || "").trim() || "待确认";
+  const taskClosureLabel = String(trace.task_closure_label || "").trim();
+  const taskClosed = Boolean(trace.task_closed);
+  const reportHref = String(trace.report_href || "").trim();
+  const taskId = String(trace.task_id || row?.task_id || "").trim();
+  const subLabel = taskClosureLabel
+    ? `来源任务：${taskClosureLabel}${taskClosed ? "" : " · 未交付"}`
+    : (missing.length ? `缺 ${missing.join("、")}` : "任务/报告/FASTA 可追溯");
+  return `
+    <div class="database-trace-cell ${databaseTraceClassName(taskClosureLabel && !taskClosed ? "pending" : trace.state)}">
+      <strong>${escapeHtml(label)}</strong>
+      <span>${escapeHtml(subLabel)}</span>
+      ${(reportHref || taskId) ? `
+        <div class="database-trace-cell-actions">
+          ${reportHref ? `<a href="${escapeHtml(buildTaskResultPageHref(taskId, { returnTo: "database", sampleKey: row?.sample_key || "" }))}">结果</a>` : ""}
+          ${taskId ? `<a href="/workstation?tab=queue&task=${encodeURIComponent(taskId)}">任务</a>` : ""}
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function renderDatabaseClosureTracePanel(record) {
+  const trace = getSampleClosureTrace(record);
+  const evidence = Array.isArray(trace.evidence) ? trace.evidence : [];
+  const actions = Array.isArray(trace.actions) ? trace.actions : [];
+  const recentEvents = Array.isArray(trace.recent_events) ? trace.recent_events : [];
+  if (!String(trace.label || "").trim() && !evidence.length) return "";
+  return `
+    <section class="database-trace-panel ${databaseTraceClassName(trace.state)}">
+      <div class="database-trace-panel-head">
+        <div>
+          <span class="section-kicker">Closure Trace</span>
+          <strong>${escapeHtml(String(trace.label || "证据链待确认"))}</strong>
+        </div>
+        <span>${escapeHtml([
+          String(trace.task_name || record.task_name || "未关联任务"),
+          String(trace.task_closure_label || "").trim() ? `来源任务：${String(trace.task_closure_label || "").trim()}` : "",
+        ].filter(Boolean).join(" · "))}</span>
+      </div>
+      <p>${escapeHtml(String(trace.summary || "该样本尚未形成完整证据链。"))}</p>
+      ${evidence.length ? `
+        <div class="database-trace-evidence-grid">
+          ${evidence.map((item) => `
+            <article class="database-trace-evidence is-${escapeHtml(String(item.state || "available"))}">
+              <span>${escapeHtml(String(item.label || "-"))}</span>
+              <strong title="${escapeHtml(String(item.value || ""))}">${escapeHtml(truncateText(String(item.value || "-"), 52))}</strong>
+            </article>
+          `).join("")}
+        </div>
+      ` : ""}
+      ${actions.length ? `
+        <div class="database-trace-actions">
+          ${actions.map((item) => {
+            const label = escapeHtml(String(item.label || item.id || "继续处理"));
+            const href = String(item.href || "").trim();
+            return href
+              ? `<a class="database-action-button database-action-button-primary" href="${escapeHtml(href)}">${label}</a>`
+              : `<span class="database-trace-action-static">${label}</span>`;
+          }).join("")}
+        </div>
+      ` : ""}
+      ${recentEvents.length ? `
+        <div class="database-trace-events">
+          <span>最近样本留痕</span>
+          <ul>
+            ${recentEvents.map((event) => `
+              <li>
+                <strong>${escapeHtml(String(event.summary || event.action || "样本动作"))}</strong>
+                <em>${escapeHtml([event.operator || "", event.version_label || "", event.created_at ? formatDate(event.created_at) : ""].filter(Boolean).join(" · ") || "未记录")}</em>
+              </li>
+            `).join("")}
+          </ul>
+        </div>
+      ` : ""}
+    </section>
+  `;
+}
+
+function preparePendingDatabaseSampleFocus() {
+  const sampleKey = String(state.pendingDatabaseSampleKeyFromUrl || "").trim();
+  if (!sampleKey) return;
+  setActiveDatabaseSection("database-samples-panel");
+  const visibleRows = getFilteredDatabaseRecords(getVisibleDatabaseRecords());
+  const isVisible = visibleRows.some((row) => String(row.sample_key || "") === sampleKey);
+  if (!isVisible) {
+    state.databaseSearch = "";
+    if (elements.databaseSearch) elements.databaseSearch.value = "";
+    Object.keys(state.databaseTable.filters || {}).forEach((key) => {
+      state.databaseTable.filters[key] = "";
+    });
+  }
+  const sortedRows = getSortedDatabaseRecords(getFilteredDatabaseRecords(getVisibleDatabaseRecords()));
+  const rowIndex = sortedRows.findIndex((row) => String(row.sample_key || "") === sampleKey);
+  if (rowIndex >= 0) {
+    state.databaseTable.page = Math.floor(rowIndex / Number(state.databaseTable.pageSize || 50)) + 1;
+  }
+}
+
+function focusPendingDatabaseSampleFromUrl() {
+  const sampleKey = String(state.pendingDatabaseSampleKeyFromUrl || "").trim();
+  if (!sampleKey || !elements.databaseList) return;
+  window.requestAnimationFrame(() => {
+    const row = elements.databaseList.querySelector(`[data-database-row-key="${CSS.escape(sampleKey)}"]`);
+    if (!(row instanceof HTMLElement)) return;
+    row.classList.add("database-row-return-focus");
+    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    window.setTimeout(() => row.classList.remove("database-row-return-focus"), 2600);
+    state.pendingDatabaseSampleKeyFromUrl = "";
+  });
+}
+
 function renderDatabaseRecords(focusKey = "", caretPosition = null) {
   if (!elements.databaseList) return;
   const rows = getVisibleDatabaseRecords();
   const filteredRows = getFilteredDatabaseRecords(rows);
   const sortedRows = getSortedDatabaseRecords(filteredRows);
+  const pageSize = Math.max(10, Number(state.databaseTable.pageSize || 50));
+  const pageCount = Math.max(1, Math.ceil(sortedRows.length / pageSize));
+  const page = Math.max(1, Math.min(Number(state.databaseTable.page || 1), pageCount));
+  state.databaseTable.page = page;
+  const pageStart = (page - 1) * pageSize;
+  const pageRows = sortedRows.slice(pageStart, pageStart + pageSize);
   const columns = getVisibleDatabaseColumns();
   const selectedSet = new Set(state.databaseSelectedSamples || []);
   const selectedInView = sortedRows.filter((row) => selectedSet.has(String(row.sample_key || "")));
@@ -17995,7 +17272,7 @@ function renderDatabaseRecords(focusKey = "", caretPosition = null) {
                         <span>${state.databaseTable.sortKey === column.key ? (state.databaseTable.sortDirection === "asc" ? "↑" : "↓") : "↕"}</span>
                       </button>
 	                    ` : `<span class="queue-table-head-label">${escapeHtml(column.label)}</span>`}
-	                    ${["sample_name", "task_name", "owner", "metadata_completion_label", "species_name", "completeness", "contamination", "sample_alias", "genome_id", "taxid", "sample_source", "collection_date", "country", "host_info", "sample_type", "sequencing_method", "final_fasta_path", "mlst_st", "serotype_result", "resistance_gene_hits", "virulence_gene_hits", "resistance_mge_hits", "virulence_mge_hits"].includes(column.key) || column.metadata ? `
+	                    ${["sample_name", "task_name", "closure_trace", "owner", "metadata_completion_label", "species_name", "completeness", "contamination", "sample_alias", "genome_id", "taxid", "sample_source", "collection_date", "country", "host_info", "sample_type", "sequencing_method", "final_fasta_path", "mlst_st", "serotype_result", "resistance_gene_hits", "virulence_gene_hits", "resistance_mge_hits", "virulence_mge_hits"].includes(column.key) || column.metadata ? `
 	                      ${renderTableFilterInput({
 	                        value: state.databaseTable.filters[column.key] || "",
 	                        placeholder: ["completeness", "contamination"].includes(column.key) ? "如 >90 或 5-10" : "筛选",
@@ -18011,8 +17288,8 @@ function renderDatabaseRecords(focusKey = "", caretPosition = null) {
             </tr>
           </thead>
           <tbody>
-            ${sortedRows.length ? sortedRows.map((row) => `
-              <tr>
+            ${pageRows.length ? pageRows.map((row) => `
+              <tr data-database-row-key="${escapeHtml(row.sample_key || "")}">
                 <td class="database-select-column"${renderMobileCellAttributes("选择", "selection")}>
                   <input type="checkbox" data-database-select-row="${escapeHtml(row.sample_key || "")}" ${selectedSet.has(String(row.sample_key || "")) ? "checked" : ""}>
                 </td>
@@ -18023,6 +17300,10 @@ function renderDatabaseRecords(focusKey = "", caretPosition = null) {
                   }
                   if (column.key === "task_name") {
                     return `<td title="${escapeHtml(row.task_name || "")}"${cellAttrs}>${escapeHtml(truncateText(row.task_name || "-", 24))}</td>`;
+                  }
+                  if (column.key === "closure_trace") {
+                    const trace = getSampleClosureTrace(row);
+                    return `<td title="${escapeHtml(String(trace.summary || trace.label || ""))}"${cellAttrs}>${renderDatabaseTraceCell(row)}</td>`;
                   }
                   if (column.key === "owner") {
                     return `<td${cellAttrs}>${escapeHtml(row.owner || "-")}</td>`;
@@ -18158,8 +17439,26 @@ function renderDatabaseRecords(focusKey = "", caretPosition = null) {
           </tbody>
         </table>
       </div>
+      ${sortedRows.length ? `
+        <div class="database-table-pagination">
+          <span>第 ${pageStart + 1}-${Math.min(pageStart + pageSize, sortedRows.length)} 条，共 ${sortedRows.length} 条</span>
+          <div>
+            <button class="ghost-button compact-button" type="button" data-database-page-prev ${page <= 1 ? "disabled" : ""}>上一页</button>
+            <strong>${page} / ${pageCount}</strong>
+            <button class="ghost-button compact-button" type="button" data-database-page-next ${page >= pageCount ? "disabled" : ""}>下一页</button>
+          </div>
+        </div>
+      ` : ""}
     </div>
   `;
+  elements.databaseList.querySelector("[data-database-page-prev]")?.addEventListener("click", () => {
+    state.databaseTable.page = Math.max(1, page - 1);
+    renderDatabaseRecords();
+  });
+  elements.databaseList.querySelector("[data-database-page-next]")?.addEventListener("click", () => {
+    state.databaseTable.page = Math.min(pageCount, page + 1);
+    renderDatabaseRecords();
+  });
   elements.databaseList.querySelectorAll("[data-database-sort]").forEach((button) => {
     button.addEventListener("click", () => {
       const key = String(button.dataset.databaseSort || "");
@@ -18356,6 +17655,7 @@ async function onSubmitDatabaseBatchToMain(event) {
 }
 
 async function renderDatabaseMonitoring() {
+  if (state.activeTab !== "database-tab" || state.databaseSection !== "database-monitor-panel") return;
   const rows = getSortedDatabaseRecords(getFilteredDatabaseRecords(getVisibleDatabaseRecords()));
   if (!elements.databaseSurveillanceKpis) return;
   if (elements.databaseTimelineRange && elements.databaseTimelineRange.value !== state.databaseTimelineRange) {
@@ -18480,10 +17780,13 @@ async function renderDatabaseMonitoring() {
 	  } else if (elements.databaseSurveillanceCluster) {
 	    elements.databaseSurveillanceCluster.innerHTML = renderMonitoringEmptyState("暂无聚集性状态数据", "当前样本还没有标注散发、聚集或待判定状态。", "补全聚集性状态后，专题预警会更容易解释。");
 	  }
-  renderDatabaseReport();
+  if (state.databaseSection === "database-report-panel") {
+    renderDatabaseReport();
+  }
 }
 
 function renderDatabaseReport() {
+  if (state.activeTab !== "database-tab" || state.databaseSection !== "database-report-panel") return;
   if (!elements.databaseReportContent) return;
   const renderReport = async () => {
     if (!state.knowledgeBaseBundle) {
@@ -22313,6 +21616,7 @@ async function openDatabaseSampleModal(sampleKey, options = {}) {
     submitButton.textContent = editable ? "保存样本信息" : "只读查看";
   }
   elements.databaseSampleStatic.innerHTML = `
+    ${renderDatabaseClosureTracePanel(record)}
     <article><span>任务</span><strong>${escapeHtml(record.task_name || "-")}</strong></article>
     <article><span>物种预估</span><strong>${escapeHtml(record.species_name || record.mlst_species_name || "--")}</strong></article>
     <article><span>MLST ST</span><strong>${escapeHtml(record.mlst_st || "--")}</strong></article>
@@ -22332,8 +21636,7 @@ async function openDatabaseSampleModal(sampleKey, options = {}) {
     <article><span>更新时间</span><strong>${escapeHtml(record.updated_at ? formatDate(record.updated_at) : "-")}</strong></article>
     <article><span>报告目录</span><strong title="${escapeHtml(record.report_dir || "")}">${escapeHtml(truncateText(record.report_dir || "-", 56))}</strong></article>
   `;
-  elements.databaseSampleModal?.classList.remove("hidden");
-  elements.databaseSampleModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.databaseSampleModal);
   if (options.focusMetadata) {
     window.requestAnimationFrame(() => {
       const target = elements.databaseMetadataRows?.closest(".database-metadata-section");
@@ -22365,16 +21668,14 @@ async function openDatabaseBatchEditModal() {
       : `已选择 ${state.databaseSelectedSamples.length} 个样本：${names.join("、")}。`;
   }
   renderDatabaseMetadataEditor("[]", state.databaseMetadataTemplates, elements.databaseBatchEditRows, { includeCustom: false });
-  elements.databaseBatchEditModal?.classList.remove("hidden");
-  elements.databaseBatchEditModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.databaseBatchEditModal);
 }
 
 function closeDatabaseSampleModal() {
   state.currentDatabaseSample = null;
   if (elements.databaseMetadataRows) elements.databaseMetadataRows.innerHTML = "";
   if (elements.databaseArchiveTemplate) elements.databaseArchiveTemplate.value = "";
-  elements.databaseSampleModal?.classList.add("hidden");
-  elements.databaseSampleModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.databaseSampleModal);
 }
 
 function openDatabaseDeleteModal(sampleKey = "") {
@@ -22392,17 +21693,11 @@ function openDatabaseDeleteModal(sampleKey = "") {
       ? `删除后，“${record.sample_name}”这条样本的主档、统计归档和数据库筛选记录将一起移除，但不会删除原始分析结果目录。`
       : "删除后，该样本的主档、统计归档和数据库筛选记录将一起移除，但不会删除原始分析结果目录。";
   }
-  document.documentElement.classList.add("modal-scroll-locked");
-  document.body.classList.add("modal-scroll-locked");
-  elements.databaseDeleteModal?.classList.remove("hidden");
-  elements.databaseDeleteModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.databaseDeleteModal);
 }
 
 function closeDatabaseDeleteModal() {
-  elements.databaseDeleteModal?.classList.add("hidden");
-  elements.databaseDeleteModal?.setAttribute("aria-hidden", "true");
-  document.documentElement.classList.remove("modal-scroll-locked");
-  document.body.classList.remove("modal-scroll-locked");
+  hideModalElement(elements.databaseDeleteModal);
   state.currentDatabaseDeleteKey = "";
 }
 
@@ -22446,17 +21741,11 @@ function openReferenceDeleteModal(category, hostKey) {
       ? "删除后，该宿主参考基因组的数据库记录、已保存 FASTA 文件和已构建索引将一起移除，请确认当前去宿主流程不再依赖它。"
       : "删除后，该病原参考基因组的数据库记录、已保存 FASTA 文件和已构建索引将一起移除，请确认当前比对、分型或溯源流程不再依赖它。";
   }
-  document.documentElement.classList.add("modal-scroll-locked");
-  document.body.classList.add("modal-scroll-locked");
-  elements.referenceDeleteModal?.classList.remove("hidden");
-  elements.referenceDeleteModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.referenceDeleteModal);
 }
 
 function closeReferenceDeleteModal() {
-  elements.referenceDeleteModal?.classList.add("hidden");
-  elements.referenceDeleteModal?.setAttribute("aria-hidden", "true");
-  document.documentElement.classList.remove("modal-scroll-locked");
-  document.body.classList.remove("modal-scroll-locked");
+  hideModalElement(elements.referenceDeleteModal);
   state.currentReferenceDelete = null;
 }
 
@@ -22481,8 +21770,7 @@ async function onSubmitReferenceDelete(event) {
 function closeDatabaseBatchEditModal() {
   if (elements.databaseBatchEditRows) elements.databaseBatchEditRows.innerHTML = "";
   if (elements.databaseBatchArchiveTemplate) elements.databaseBatchArchiveTemplate.value = "";
-  elements.databaseBatchEditModal?.classList.add("hidden");
-  elements.databaseBatchEditModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.databaseBatchEditModal);
 }
 
 function openDatabaseReleaseModal() {
@@ -22516,13 +21804,11 @@ function openDatabaseReleaseModal() {
       </article>
     `;
   }
-  elements.databaseReleaseModal?.classList.remove("hidden");
-  elements.databaseReleaseModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.databaseReleaseModal);
 }
 
 function closeDatabaseReleaseModal() {
-  elements.databaseReleaseModal?.classList.add("hidden");
-  elements.databaseReleaseModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.databaseReleaseModal);
 }
 
 async function openDatabaseDictionaryModal() {
@@ -22530,8 +21816,7 @@ async function openDatabaseDictionaryModal() {
     await loadDatabaseMetadataTemplates();
   }
   renderDatabaseDictionaryEditor();
-  elements.databaseDictionaryModal?.classList.remove("hidden");
-  elements.databaseDictionaryModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.databaseDictionaryModal);
 }
 
 async function onSubmitDatabaseRelease(event) {
@@ -22564,8 +21849,7 @@ async function onSubmitDatabaseRelease(event) {
 
 function closeDatabaseDictionaryModal() {
   if (elements.databaseDictionaryRows) elements.databaseDictionaryRows.innerHTML = "";
-  elements.databaseDictionaryModal?.classList.add("hidden");
-  elements.databaseDictionaryModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.databaseDictionaryModal);
 }
 
 function openDatabaseLocalImportModal() {
@@ -22576,14 +21860,12 @@ function openDatabaseLocalImportModal() {
   resetDatabaseLocalImportForm();
   renderDatabaseMetadataEditor("[]", state.databaseMetadataTemplates, elements.databaseLocalMetadataRows, { includeCustom: false });
   syncMetadataLocationFieldsForContainer(elements.databaseLocalMetadataRows, elements.databaseLocalCountry?.value || "");
-  elements.databaseLocalImportModal?.classList.remove("hidden");
-  elements.databaseLocalImportModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.databaseLocalImportModal);
 }
 
 function closeDatabaseLocalImportModal() {
   clearScopedValidation(elements.databaseLocalImportForm);
-  elements.databaseLocalImportModal?.classList.add("hidden");
-  elements.databaseLocalImportModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.databaseLocalImportModal);
 }
 
 function resetDatabaseLocalImportForm() {
@@ -22604,14 +21886,12 @@ function openHostLocalImportModal() {
   resetHostLocalImportForm();
   if (elements.hostLocalImportTitle) elements.hostLocalImportTitle.textContent = "本地导入宿主基因组";
   if (elements.hostLocalImportSubmit) elements.hostLocalImportSubmit.textContent = "导入宿主基因组";
-  elements.hostLocalImportModal?.classList.remove("hidden");
-  elements.hostLocalImportModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.hostLocalImportModal);
 }
 
 function closeHostLocalImportModal() {
   state.currentReferenceEdit = null;
-  elements.hostLocalImportModal?.classList.add("hidden");
-  elements.hostLocalImportModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.hostLocalImportModal);
 }
 
 function resetHostLocalImportForm() {
@@ -22625,15 +21905,13 @@ function resetHostLocalImportForm() {
 function openHostRemoteImportModal() {
   resetHostRemoteImportForm();
   setRemoteImportBusy("host", false);
-  elements.hostRemoteImportModal?.classList.remove("hidden");
-  elements.hostRemoteImportModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.hostRemoteImportModal);
 }
 
 function closeHostRemoteImportModal() {
   setRemoteImportBusy("host", false);
   resetRemoteImportProgress("host");
-  elements.hostRemoteImportModal?.classList.add("hidden");
-  elements.hostRemoteImportModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.hostRemoteImportModal);
 }
 
 function resetHostRemoteImportForm() {
@@ -22649,14 +21927,12 @@ function openPathogenLocalImportModal() {
   resetPathogenLocalImportForm();
   if (elements.pathogenLocalImportTitle) elements.pathogenLocalImportTitle.textContent = "本地导入病原基因组";
   if (elements.pathogenLocalImportSubmit) elements.pathogenLocalImportSubmit.textContent = "导入病原基因组";
-  elements.pathogenLocalImportModal?.classList.remove("hidden");
-  elements.pathogenLocalImportModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.pathogenLocalImportModal);
 }
 
 function closePathogenLocalImportModal() {
   state.currentReferenceEdit = null;
-  elements.pathogenLocalImportModal?.classList.add("hidden");
-  elements.pathogenLocalImportModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.pathogenLocalImportModal);
 }
 
 function resetPathogenLocalImportForm() {
@@ -22670,15 +21946,13 @@ function resetPathogenLocalImportForm() {
 function openPathogenRemoteImportModal() {
   resetPathogenRemoteImportForm();
   setRemoteImportBusy("pathogen", false);
-  elements.pathogenRemoteImportModal?.classList.remove("hidden");
-  elements.pathogenRemoteImportModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.pathogenRemoteImportModal);
 }
 
 function closePathogenRemoteImportModal() {
   setRemoteImportBusy("pathogen", false);
   resetRemoteImportProgress("pathogen");
-  elements.pathogenRemoteImportModal?.classList.add("hidden");
-  elements.pathogenRemoteImportModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.pathogenRemoteImportModal);
 }
 
 function closeReferenceImportMenus() {
@@ -22704,13 +21978,11 @@ function openReferenceBatchImportModal(category) {
       ? "模板字段已包含宿主名称、基因组名称、TaxID、NCBI编号、FASTA 路径、备注等信息。"
       : "模板字段已包含病原名称、基因组名称、TaxID、NCBI编号、FASTA 路径、备注等信息。";
   }
-  elements.referenceBatchImportModal?.classList.remove("hidden");
-  elements.referenceBatchImportModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.referenceBatchImportModal);
 }
 
 function closeReferenceBatchImportModal() {
-  elements.referenceBatchImportModal?.classList.add("hidden");
-  elements.referenceBatchImportModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.referenceBatchImportModal);
 }
 
 function resetReferenceBatchImportForm() {
@@ -22775,8 +22047,7 @@ async function openReferenceEditModal(category, hostKey) {
     if (elements.hostLocalSourceLabel) elements.hostLocalSourceLabel.value = String(record.source_label || "");
     if (elements.hostLocalFasta) elements.hostLocalFasta.value = String(record.fasta_path || "");
     if (elements.hostLocalDescription) elements.hostLocalDescription.value = String(record.description || "");
-    elements.hostLocalImportModal?.classList.remove("hidden");
-    elements.hostLocalImportModal?.setAttribute("aria-hidden", "false");
+    showModalElement(elements.hostLocalImportModal);
     return;
   }
   resetPathogenLocalImportForm();
@@ -22789,19 +22060,16 @@ async function openReferenceEditModal(category, hostKey) {
   if (elements.pathogenLocalSourceLabel) elements.pathogenLocalSourceLabel.value = String(record.source_label || "");
   if (elements.pathogenLocalFasta) elements.pathogenLocalFasta.value = String(record.fasta_path || "");
   if (elements.pathogenLocalDescription) elements.pathogenLocalDescription.value = String(record.description || "");
-  elements.pathogenLocalImportModal?.classList.remove("hidden");
-  elements.pathogenLocalImportModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.pathogenLocalImportModal);
 }
 
 function openDatabaseBatchImportModal() {
   resetDatabaseBatchImportForm();
-  elements.databaseBatchImportModal?.classList.remove("hidden");
-  elements.databaseBatchImportModal?.setAttribute("aria-hidden", "false");
+  showModalElement(elements.databaseBatchImportModal);
 }
 
 function closeDatabaseBatchImportModal() {
-  elements.databaseBatchImportModal?.classList.add("hidden");
-  elements.databaseBatchImportModal?.setAttribute("aria-hidden", "true");
+  hideModalElement(elements.databaseBatchImportModal);
 }
 
 function resetDatabaseBatchImportForm() {
@@ -24634,15 +23902,6 @@ function buildRoleLabel(role) {
   return "普通用户";
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
 function statusClassName(status) {
   return String(status || "").toLowerCase();
 }
@@ -24689,24 +23948,6 @@ function showToast(message, variant = "success") {
   showToast.timer = window.setTimeout(() => elements.toast.classList.add("hidden"), 2600);
 }
 
-function setTextContentById(id, value) {
-  const node = document.getElementById(id);
-  if (node) node.textContent = String(value || "");
-}
-
-function closeConfirmActionModal(result = false) {
-  const modal = document.getElementById("confirm-action-modal");
-  if (!modal) return;
-  modal.classList.add("hidden");
-  modal.setAttribute("aria-hidden", "true");
-  document.body.classList.remove("modal-scroll-locked");
-  if (typeof closeConfirmActionModal.resolve === "function") {
-    const resolve = closeConfirmActionModal.resolve;
-    closeConfirmActionModal.resolve = null;
-    resolve(Boolean(result));
-  }
-}
-
 function confirmDangerAction({
   title = "确认操作",
   message = "请确认是否继续。",
@@ -24716,30 +23957,16 @@ function confirmDangerAction({
   cancelLabel = "取消",
   tone = "danger",
 } = {}) {
-  const modal = document.getElementById("confirm-action-modal");
-  if (!modal) {
-    showToast("确认弹窗未能加载，当前操作已取消。", "error");
-    return Promise.resolve(false);
-  }
-  if (typeof closeConfirmActionModal.resolve === "function") {
-    closeConfirmActionModal(false);
-  }
-  const panel = modal.querySelector(".confirm-action-panel");
-  panel?.classList.toggle("is-warning", tone === "warning");
-  setTextContentById("confirm-action-kicker", tone === "warning" ? "Confirm" : "Danger Zone");
-  setTextContentById("confirm-action-title", title);
-  setTextContentById("confirm-action-message", message);
-  setTextContentById("confirm-action-level", tone === "warning" ? "覆盖操作" : "危险操作");
-  setTextContentById("confirm-action-impact", impact);
-  setTextContentById("confirm-action-detail", detail);
-  setTextContentById("confirm-action-confirm", confirmLabel);
-  setTextContentById("confirm-action-cancel", cancelLabel);
-  modal.classList.remove("hidden");
-  modal.setAttribute("aria-hidden", "false");
-  document.body.classList.add("modal-scroll-locked");
-  document.getElementById("confirm-action-confirm")?.focus({ preventScroll: true });
-  return new Promise((resolve) => {
-    closeConfirmActionModal.resolve = resolve;
+  return openWorkbenchConfirmModal({
+    kicker: tone === "warning" ? "Confirm" : "Danger Zone",
+    title,
+    message,
+    tone,
+    summaryKicker: tone === "warning" ? "覆盖操作" : "危险操作",
+    summaryTitle: impact,
+    summaryDetail: detail,
+    cancelLabel,
+    confirmLabel,
   });
 }
 
@@ -25146,6 +24373,26 @@ function splitAdminTriggerTextarea(value) {
     .filter(Boolean);
 }
 
+function readAdminTriggerSelectValues(select) {
+  if (!(select instanceof HTMLSelectElement)) return [];
+  return Array.from(select.selectedOptions)
+    .map((option) => String(option.value || "").trim())
+    .filter(Boolean);
+}
+
+function syncAdminPathosourceSampleSourceOptions(selectedValues = []) {
+  const select = elements.adminPathosourceTriggerSampleSources;
+  if (!(select instanceof HTMLSelectElement)) return;
+  const selectedSet = new Set((Array.isArray(selectedValues) ? selectedValues : []).map((item) => String(item || "").trim()).filter(Boolean));
+  const optionValues = ADMIN_PATHOSOURCE_SAMPLE_SOURCE_OPTIONS.slice();
+  selectedSet.forEach((value) => {
+    if (!optionValues.includes(value)) optionValues.push(value);
+  });
+  select.innerHTML = optionValues.map((value) => `
+    <option value="${escapeHtml(value)}" ${selectedSet.has(value) ? "selected" : ""}>${escapeHtml(value)}${ADMIN_PATHOSOURCE_SAMPLE_SOURCE_OPTIONS.includes(value) ? "" : "（历史配置）"}</option>
+  `).join("");
+}
+
 function collectAdminPathosourceTriggerRules() {
   return {
     enabled: Boolean(elements.adminPathosourceTriggerEnabled?.checked),
@@ -25157,28 +24404,88 @@ function collectAdminPathosourceTriggerRules() {
     max_reference_genomes: Number(elements.adminPathosourceTriggerMaxGenomes?.value || 1),
     msa_method: String(elements.adminPathosourceTriggerMsaMethod?.value || "snippy"),
     tree_method: String(elements.adminPathosourceTriggerTreeMethod?.value || "ML"),
-    allowed_sample_sources: splitAdminTriggerTextarea(elements.adminPathosourceTriggerSampleSources?.value || ""),
+    allowed_sample_sources: readAdminTriggerSelectValues(elements.adminPathosourceTriggerSampleSources),
     priority_species: splitAdminTriggerTextarea(elements.adminPathosourceTriggerPrioritySpecies?.value || ""),
     excluded_species: splitAdminTriggerTextarea(elements.adminPathosourceTriggerExcludedSpecies?.value || ""),
   };
+}
+
+function formatAdminTriggerListPreview(items, emptyText) {
+  const values = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!values.length) return escapeHtml(emptyText);
+  const visible = values.slice(0, 4).map((item) => `<span>${escapeHtml(item)}</span>`).join("");
+  const overflow = values.length > 4 ? `<span>+${values.length - 4}</span>` : "";
+  return `${visible}${overflow}`;
+}
+
+function renderAdminPathosourceTriggerListPreview(rules) {
+  const sampleSources = Array.isArray(rules?.allowed_sample_sources) ? rules.allowed_sample_sources : [];
+  const prioritySpecies = Array.isArray(rules?.priority_species) ? rules.priority_species : [];
+  const excludedSpecies = Array.isArray(rules?.excluded_species) ? rules.excluded_species : [];
+  if (elements.adminPathosourceTriggerSampleSourceCount) {
+    elements.adminPathosourceTriggerSampleSourceCount.textContent = sampleSources.length ? `${sampleSources.length} 项` : "不限";
+  }
+  if (elements.adminPathosourceTriggerSampleSourcePreview) {
+    elements.adminPathosourceTriggerSampleSourcePreview.innerHTML = formatAdminTriggerListPreview(sampleSources, "未限制样本来源");
+  }
+  if (elements.adminPathosourceTriggerPrioritySpeciesCount) {
+    elements.adminPathosourceTriggerPrioritySpeciesCount.textContent = `${prioritySpecies.length} 个`;
+  }
+  if (elements.adminPathosourceTriggerPrioritySpeciesPreview) {
+    elements.adminPathosourceTriggerPrioritySpeciesPreview.innerHTML = formatAdminTriggerListPreview(prioritySpecies, "未设置重点病原");
+  }
+  if (elements.adminPathosourceTriggerExcludedSpeciesCount) {
+    elements.adminPathosourceTriggerExcludedSpeciesCount.textContent = `${excludedSpecies.length} 个`;
+  }
+  if (elements.adminPathosourceTriggerExcludedSpeciesPreview) {
+    elements.adminPathosourceTriggerExcludedSpeciesPreview.innerHTML = formatAdminTriggerListPreview(excludedSpecies, "未设置排除物种");
+  }
+}
+
+function renderAdminPathosourceTriggerDraftState(markDirty = false) {
+  const draft = collectAdminPathosourceTriggerRules();
+  renderAdminPathosourceTriggerSummary(draft);
+  if (markDirty && elements.adminPathosourceTriggerResult) {
+    elements.adminPathosourceTriggerResult.className = "admin-monitor-result";
+    elements.adminPathosourceTriggerResult.innerHTML = `
+      <strong>规则有未保存修改</strong>
+      <p>保存后才会影响后续宏基因组任务的自动溯源判定。</p>
+    `;
+  }
 }
 
 function renderAdminPathosourceTriggerSummary(rules) {
   if (!elements.adminPathosourceTriggerSummary) return;
   const enabled = Boolean(rules?.enabled);
   const priorityOnly = Boolean(rules?.priority_only);
+  const autoStart = Boolean(rules?.auto_start);
   const sampleSources = Array.isArray(rules?.allowed_sample_sources) ? rules.allowed_sample_sources : [];
   const prioritySpecies = Array.isArray(rules?.priority_species) ? rules.priority_species : [];
+  const excludedSpecies = Array.isArray(rules?.excluded_species) ? rules.excluded_species : [];
+  const minAbundance = Number(rules?.min_abundance_percent || 0);
+  const minReads = Number(rules?.min_support_reads || 0);
+  const minCoverage = Number(rules?.min_coverage_percent || 0);
+  const maxGenomes = Number(rules?.max_reference_genomes || 0);
+  const triggerMode = priorityOnly ? `重点病原 ${prioritySpecies.length} 个` : "全部候选物种";
+  const sourceMode = sampleSources.length ? `来源 ${sampleSources.length} 项` : "来源不限";
+  const excludedMode = excludedSpecies.length ? `排除 ${excludedSpecies.length} 个` : "无排除名单";
+  const executionMode = autoStart ? "命中后创建子任务" : "命中后仅生成建议";
   elements.adminPathosourceTriggerSummary.innerHTML = `
-    <span>当前状态</span>
-    <strong>${enabled ? "已启用自动溯源" : "未启用自动溯源"}</strong>
-    <p>${enabled
-      ? `触发阈值为丰度 ${Number(rules?.min_abundance_percent || 0).toFixed(1)}%、支持 reads ${Number(rules?.min_support_reads || 0)}、覆盖度 ${Number(rules?.min_coverage_percent || 0).toFixed(1)}%。`
-      : "当前只保存配置，不会从宏基因组任务自动派生溯源子任务。"}</p>
-    <p>${priorityOnly
-      ? `仅对 ${prioritySpecies.length || 0} 个重点病原启用自动触发。`
-      : `样本来源${sampleSources.length ? `限定为 ${sampleSources.slice(0, 3).join("、")}${sampleSources.length > 3 ? " 等" : ""}` : "不限"}。`}</p>
+    <div class="admin-trigger-summary-head">
+      <span>当前状态</span>
+      <strong>${enabled ? "已启用" : "未启用"}</strong>
+    </div>
+    <p>${enabled ? executionMode : "仅保存配置，不参与自动派生。"}</p>
+    <div class="admin-trigger-summary-grid">
+      <div><span>触发范围</span><strong>${escapeHtml(triggerMode)}</strong></div>
+      <div><span>样本来源</span><strong>${escapeHtml(sourceMode)}</strong></div>
+      <div><span>排除策略</span><strong>${escapeHtml(excludedMode)}</strong></div>
+    </div>
   `;
+  if (elements.adminPathosourceTriggerThresholdSummary) {
+    elements.adminPathosourceTriggerThresholdSummary.textContent = `丰度 >= ${minAbundance.toFixed(1)}%，reads >= ${minReads}，覆盖度 >= ${minCoverage.toFixed(1)}%；最多纳入 ${maxGenomes || 0} 条历史株。`;
+  }
+  renderAdminPathosourceTriggerListPreview(rules);
 }
 
 function renderAdminPathosourceTriggerResult(message, isError = false) {
@@ -25223,7 +24530,7 @@ function applyAdminPathosourceTriggerRules(rawRules) {
     elements.adminPathosourceTriggerTreeMethod.value = String(rules.tree_method || ADMIN_PATHOSOURCE_TRIGGER_DEFAULTS.tree_method);
   }
   if (elements.adminPathosourceTriggerSampleSources) {
-    elements.adminPathosourceTriggerSampleSources.value = (Array.isArray(rules.allowed_sample_sources) ? rules.allowed_sample_sources : []).join("\n");
+    syncAdminPathosourceSampleSourceOptions(Array.isArray(rules.allowed_sample_sources) ? rules.allowed_sample_sources : []);
   }
   if (elements.adminPathosourceTriggerPrioritySpecies) {
     elements.adminPathosourceTriggerPrioritySpecies.value = (Array.isArray(rules.priority_species) ? rules.priority_species : []).join("\n");
@@ -25358,4 +24665,1009 @@ function syncBrowserShortcuts() {
     if (!node) return;
     node.classList.toggle("active", Boolean(active));
   });
+}
+
+async function loadModelingPlatform(options = {}) {
+  if (!elements.modelingContent) return;
+  if (state.modeling.loaded && !options.force) {
+    renderModelingPlatform();
+    return;
+  }
+  elements.modelingContent.innerHTML = renderEmptyState({
+    title: "正在加载建模平台",
+    reason: "读取数据集、特征方案、模型库和预测记录。",
+    action: "这里不会复制样本原始数据。",
+  });
+  const [modelOptions, datasets, featureSets, models, predictions] = await Promise.all([
+    requestJson("/api/modeling/options"),
+    requestJson("/api/modeling/datasets"),
+    requestJson("/api/modeling/feature-sets"),
+    requestJson("/api/modeling/models"),
+    requestJson("/api/modeling/predictions"),
+  ]);
+  state.modeling.options = modelOptions || {};
+  state.modeling.datasets = Array.isArray(datasets?.items) ? datasets.items : [];
+  state.modeling.featureSets = Array.isArray(featureSets?.items) ? featureSets.items : [];
+  state.modeling.models = Array.isArray(models?.items) ? models.items : [];
+  state.modeling.predictions = Array.isArray(predictions?.items) ? predictions.items : [];
+  state.modeling.loaded = true;
+  state.modeling.selectedDatasetId ||= state.modeling.datasets[0]?.dataset_id || "";
+  state.modeling.selectedFeatureSetId ||= state.modeling.featureSets[0]?.feature_set_id || "";
+  state.modeling.selectedModelId ||= state.modeling.models[0]?.model_id || "";
+  state.modeling.selectedPredictionId ||= state.modeling.predictions[0]?.prediction_id || "";
+  renderModelingPlatform();
+}
+
+function setActiveModelingSection(sectionId) {
+  state.modeling.activeSection = sectionId || "modeling-samples-section";
+  elements.modelingSectionTabs.forEach((button) => {
+    button.classList.toggle("active", button.dataset.modelingSection === state.modeling.activeSection);
+  });
+  renderModelingPlatform();
+}
+
+function renderModelingPlatform() {
+  if (!elements.modelingContent) return;
+  elements.modelingSectionTabs.forEach((button) => {
+    button.classList.toggle("active", button.dataset.modelingSection === state.modeling.activeSection);
+  });
+  const section = state.modeling.activeSection;
+  if (section === "modeling-features-section") {
+    elements.modelingContent.innerHTML = renderModelingFeatures();
+  } else if (section === "modeling-training-section") {
+    elements.modelingContent.innerHTML = renderModelingTraining();
+  } else if (section === "modeling-library-section") {
+    elements.modelingContent.innerHTML = renderModelingLibrary();
+  } else if (section === "modeling-prediction-section") {
+    elements.modelingContent.innerHTML = renderModelingPrediction();
+  } else {
+    elements.modelingContent.innerHTML = renderModelingSamples();
+  }
+}
+
+function renderModelingSummary(summary = {}) {
+  const missing = summary.missing_values || {};
+  const timeSpan = summary.time_span || {};
+  return `
+    <div class="modeling-kpi-grid">
+      <article><span>样本数</span><strong>${escapeHtml(summary.sample_count ?? 0)}</strong></article>
+      <article><span>时间跨度</span><strong>${escapeHtml(timeSpan.start || "-")} 至 ${escapeHtml(timeSpan.end || "-")}</strong></article>
+      <article><span>缺失采样日期</span><strong>${escapeHtml(missing.collection_date ?? 0)}</strong></article>
+      <article><span>缺失耐药基因</span><strong>${escapeHtml(missing.amr_genes ?? 0)}</strong></article>
+    </div>
+  `;
+}
+
+function renderModelingDatasetSnapshots() {
+  const datasets = Array.isArray(state.modeling.datasets) ? state.modeling.datasets : [];
+  const selected = datasets.find((item) => item.dataset_id === state.modeling.selectedDatasetId) || null;
+  const selectedSampleIds = Array.isArray(selected?.sample_ids) ? selected.sample_ids : [];
+  if (!datasets.length) {
+    return `
+      <div class="modeling-card">
+        <div class="modeling-card-head"><strong>已保存训练集快照</strong><span>0 个</span></div>
+        <p class="field-note">筛选样本后保存，固定样本 ID 将用于模型复现。</p>
+      </div>
+    `;
+  }
+  return `
+    <div class="modeling-card">
+      <div class="modeling-card-head"><strong>已保存训练集快照</strong><span>${datasets.length} 个</span></div>
+      <div class="modeling-table-wrap">
+        <table class="modeling-table modeling-dataset-table">
+          <thead><tr><th>训练集</th><th>固定样本数</th><th>时间跨度</th><th>创建信息</th><th>操作</th></tr></thead>
+          <tbody>${datasets.map((dataset) => {
+            const summary = dataset.summary || {};
+            const timeSpan = summary.time_span || {};
+            const active = dataset.dataset_id === state.modeling.selectedDatasetId;
+            return `
+              <tr class="${active ? "is-selected" : ""}">
+                <td><strong>${escapeHtml(dataset.dataset_name || dataset.dataset_id)}</strong></td>
+                <td>${escapeHtml(summary.sample_count ?? (dataset.sample_ids || []).length)}</td>
+                <td>${escapeHtml(timeSpan.start || "-")} 至 ${escapeHtml(timeSpan.end || "-")}</td>
+                <td>${escapeHtml(dataset.created_by || "-")}<br><span>${escapeHtml(formatDate(dataset.created_at || ""))}</span></td>
+                <td>
+                  <button class="ghost-button compact-button" type="button" data-modeling-action="view-dataset" data-dataset-id="${escapeHtml(dataset.dataset_id)}">${active ? "正在查看" : "查看快照"}</button>
+                  <button class="ghost-button compact-button" type="button" data-modeling-action="train-dataset" data-dataset-id="${escapeHtml(dataset.dataset_id)}">用于训练</button>
+                </td>
+              </tr>
+            `;
+          }).join("")}</tbody>
+        </table>
+      </div>
+      ${selected ? `
+        <div class="modeling-snapshot-detail">
+          <div class="modeling-card-head">
+            <strong>${escapeHtml(selected.dataset_name || selected.dataset_id)} · 固定样本 ID</strong>
+            <span>${selectedSampleIds.length} 条 · ${escapeHtml(selected.dataset_id || "")}</span>
+          </div>
+          <div class="modeling-snapshot-ids">${selectedSampleIds.map((sampleId) => `<code>${escapeHtml(sampleId)}</code>`).join("")}</div>
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function renderModelingSamples() {
+  const search = state.modeling.sampleSearch;
+  const items = Array.isArray(search?.items) ? search.items : [];
+  const pageSize = Number(state.modeling.samplePageSize || 20);
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const page = Math.max(1, Math.min(Number(state.modeling.samplePage || 1), pageCount));
+  state.modeling.samplePage = page;
+  const pageStart = (page - 1) * pageSize;
+  const pageItems = items.slice(pageStart, pageStart + pageSize);
+  const rangeStart = items.length ? pageStart + 1 : 0;
+  const rangeEnd = Math.min(pageStart + pageSize, items.length);
+  const pagination = `
+    <div class="modeling-pagination">
+      <span>第 ${rangeStart}-${rangeEnd} 条，共 ${items.length} 条 · 第 ${page}/${pageCount} 页</span>
+      <div class="modeling-pagination-actions">
+        <label><span>每页</span><select name="modeling-sample-page-size"><option value="20" ${pageSize === 20 ? "selected" : ""}>20</option><option value="50" ${pageSize === 50 ? "selected" : ""}>50</option><option value="100" ${pageSize === 100 ? "selected" : ""}>100</option></select></label>
+        <button class="ghost-button compact-button" type="button" data-modeling-action="sample-page-prev" ${page <= 1 ? "disabled" : ""}>上一页</button>
+        <button class="ghost-button compact-button" type="button" data-modeling-action="sample-page-next" ${page >= pageCount ? "disabled" : ""}>下一页</button>
+      </div>
+    </div>
+  `;
+  return `
+    <form class="modeling-card modeling-form" data-modeling-form="sample-search">
+      <div class="modeling-form-grid">
+        <label><span>病原名称</span><input name="pathogen" placeholder="如 Klebsiella"></label>
+        <label><span>项目/批次</span><input name="project_id" placeholder="项目 ID"></label>
+        <label><span>地区</span><input name="region" placeholder="省/市/区"></label>
+        <label><span>采样开始</span><input name="collection_start" type="date"></label>
+        <label><span>采样结束</span><input name="collection_end" type="date"></label>
+        <label><span>样本类型</span><input name="sample_type" placeholder="血液/环境/食品"></label>
+        <label><span>来源类型</span><input name="source_category" placeholder="临床/食品/环境/动物源"></label>
+        <label><span>Q30 下限</span><input name="min_q30" type="number" min="0" max="100" step="0.1"></label>
+      </div>
+      <div class="modeling-actions">
+        <button class="primary-button" type="submit">筛选样本</button>
+        <button class="ghost-button" type="button" data-modeling-action="create-dataset">保存训练集快照</button>
+      </div>
+    </form>
+    ${search ? renderModelingSummary(search.summary || {}) : ""}
+    ${renderModelingDatasetSnapshots()}
+    <div class="modeling-card">
+      <div class="modeling-card-head"><strong>样本预览</strong><span>${items.length ? `共 ${items.length} 条` : "尚未筛选"}</span></div>
+      ${items.length ? pagination : ""}
+      <div class="modeling-table-wrap">
+        <table class="modeling-table">
+          <thead><tr><th>sample_id</th><th>病原</th><th>地区</th><th>采样时间</th><th>ST</th><th>耐药/毒力</th></tr></thead>
+          <tbody>
+            ${pageItems.map((item) => `
+              <tr>
+                <td>${escapeHtml(item.sample_key || "")}</td>
+                <td>${escapeHtml(item.species_name || "-")}</td>
+                <td>${escapeHtml(item.country || "-")}</td>
+                <td>${escapeHtml(item.collection_date || "-")}</td>
+                <td>${escapeHtml(item.mlst_st || "-")}</td>
+                <td>${escapeHtml(item.resistance_count || 0)} / ${escapeHtml(item.virulence_count || 0)}</td>
+              </tr>
+            `).join("") || `<tr><td colspan="6">没有样本。先设置筛选条件。</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+      ${items.length ? pagination : ""}
+    </div>
+  `;
+}
+
+function renderModelingFeatures() {
+  const groups = state.modeling.options.feature_options || {};
+  const groupMeta = {
+    meta: ["基础信息", "样本来源与采集属性"],
+    typing: ["分型信息", "菌株分型与传播簇"],
+    genes: ["基因组特征", "耐药、毒力与可移动元件"],
+    statistics: ["统计趋势", "历史频率与变化率"],
+  };
+  const featureLabels = {
+    collection_date: "采样日期", region: "地区", sample_type: "样本类型", source_category: "来源类型",
+    hospital_or_lab: "医院或实验室", project_id: "项目 ID", batch_id: "批次 ID", sequencing_platform: "测序平台",
+    patient_group: "患者分组", age_group: "年龄分组", gender: "性别",
+    ST: "序列型", MLST: "MLST 分型", "cgMLST cluster": "cgMLST 聚类", serotype: "血清型",
+    "SNP cluster": "SNP 聚类", "phylogenetic cluster": "系统发育聚类",
+    "AMR genes": "耐药基因", "VF genes": "毒力基因", "plasmid replicons": "质粒复制子", "mobile elements": "可移动元件",
+    type_historical_frequency: "型别历史频率", amr_historical_frequency: "耐药基因历史频率", vf_historical_frequency: "毒力基因历史频率",
+    region_detection_rate: "地区历史检出率", type_growth_rate: "型别增长率", amr_growth_rate: "耐药基因增长率", vf_growth_rate: "毒力基因增长率",
+  };
+  const defaults = ["collection_date", "region", "sample_type", "source_category", "ST", "serotype", "AMR genes", "VF genes"];
+  const orderedGroups = ["meta", "typing", "genes", "statistics"].filter((group) => groups[group]);
+  const featureChecks = orderedGroups.map((group) => {
+    const values = Array.isArray(groups[group]) ? groups[group] : [];
+    const [title, description] = groupMeta[group] || [group, ""];
+    const selectedCount = values.filter((feature) => defaults.includes(feature)).length;
+    return `
+    <fieldset class="modeling-feature-group">
+      <legend>
+        <span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(description)}</small></span>
+        <span class="modeling-feature-group-tools">
+          <em data-feature-group-count="${escapeHtml(group)}">${selectedCount}/${values.length}</em>
+          <button class="ghost-button compact-button" type="button" data-modeling-action="feature-group-select" data-feature-group="${escapeHtml(group)}">全选</button>
+          <button class="ghost-button compact-button" type="button" data-modeling-action="feature-group-clear" data-feature-group="${escapeHtml(group)}">清空</button>
+        </span>
+      </legend>
+      <div class="modeling-feature-options">
+      ${values.map((feature) => `
+        <label class="modeling-feature-option">
+          <input type="checkbox" name="features" value="${escapeHtml(feature)}" data-feature-group="${escapeHtml(group)}" ${defaults.includes(feature) ? "checked" : ""}>
+          <span class="modeling-feature-check" aria-hidden="true"></span>
+          <span class="modeling-feature-name"><strong>${escapeHtml(featureLabels[feature] || feature)}</strong><small>${escapeHtml(feature)}</small></span>
+        </label>
+      `).join("")}
+      </div>
+    </fieldset>
+  `;
+  }).join("");
+  return `
+    <form class="modeling-card modeling-form" data-modeling-form="feature-set">
+      <div class="modeling-form-grid">
+        <label><span>方案名称</span><input name="feature_set_name" required placeholder="如 克隆风险基础特征 v1"></label>
+        <label><span>版本</span><input name="version" value="1"></label>
+      </div>
+      <div class="modeling-feature-grid">${featureChecks}</div>
+      <div class="modeling-feature-selection-summary">
+        <div><strong data-feature-selection-count>${defaults.length} 项已选</strong><span data-feature-selection-list>${defaults.map((feature) => featureLabels[feature] || feature).join("、")}</span></div>
+        <button class="primary-button" type="submit">保存特征方案</button>
+      </div>
+    </form>
+    <div class="modeling-card">
+      <div class="modeling-card-head"><strong>已保存特征方案</strong><span>${state.modeling.featureSets.length} 个</span></div>
+      ${renderModelingFeatureSetList()}
+    </div>
+  `;
+}
+
+function updateModelingFeatureSelection(form) {
+  if (!(form instanceof HTMLFormElement)) return;
+  const selected = Array.from(form.querySelectorAll('input[name="features"]:checked'));
+  const count = form.querySelector("[data-feature-selection-count]");
+  const list = form.querySelector("[data-feature-selection-list]");
+  if (count) count.textContent = `${selected.length} 项已选`;
+  if (list) list.textContent = selected.length ? selected.map((input) => input.closest("label")?.querySelector(".modeling-feature-name strong")?.textContent || input.value).join("、") : "尚未选择输入特征";
+  form.querySelectorAll("[data-feature-group-count]").forEach((node) => {
+    const group = node.dataset.featureGroupCount || "";
+    const groupInputs = Array.from(form.querySelectorAll(`input[name="features"][data-feature-group="${group}"]`));
+    node.textContent = `${groupInputs.filter((input) => input.checked).length}/${groupInputs.length}`;
+  });
+}
+
+function renderModelingFeatureSetList() {
+  if (!state.modeling.featureSets.length) return `<p class="field-note">还没有特征方案。</p>`;
+  return state.modeling.featureSets.map((item) => `
+    <article class="modeling-list-row">
+      <div><strong>${escapeHtml(item.feature_set_name || item.feature_set_id)}</strong><span>v${escapeHtml(item.version || "1")} · ${escapeHtml(item.created_by || "")}</span></div>
+      <code>${escapeHtml((item.feature_schema?.features || []).join(", "))}</code>
+    </article>
+  `).join("");
+}
+
+function renderModelingSelectOptions(items, valueKey, labelKey, selectedValue) {
+  return items.map((item) => `<option value="${escapeHtml(item[valueKey] || "")}" ${item[valueKey] === selectedValue ? "selected" : ""}>${escapeHtml(item[labelKey] || item[valueKey] || "")}</option>`).join("");
+}
+
+function renderModelingTraining() {
+  const algorithms = Array.isArray(state.modeling.options.algorithms) ? state.modeling.options.algorithms : [];
+  return `
+    <form class="modeling-card modeling-form" data-modeling-form="train">
+      <div class="modeling-form-grid">
+        <label><span>模型名称</span><input name="model_name" required placeholder="如 沙门趋势偏移扫描模型"></label>
+        <label><span>训练数据集</span><select name="dataset_id" required>${renderModelingSelectOptions(state.modeling.datasets, "dataset_id", "dataset_name", state.modeling.selectedDatasetId)}</select></label>
+        <label><span>特征方案</span><select name="feature_set_id" required>${renderModelingSelectOptions(state.modeling.featureSets, "feature_set_id", "feature_set_name", state.modeling.selectedFeatureSetId)}</select></label>
+        <label><span>预测目标类型</span><select name="target_type"><option value="trend_signal_scan">自动发现偏移信号（推荐）</option><option value="trend_regular_change">单目标后续变化</option><option value="binary_amr_gene">是否携带耐药基因</option><option value="binary_vf_gene">是否携带毒力基因</option><option value="predict_st">预测 ST</option><option value="predict_serotype">预测血清型</option><option value="risk_level">关注级别</option><option value="modeling_review_label">历史复核标签（测试）</option></select></label>
+        <label><span>可选过滤目标</span><input name="target_name" placeholder="留空则自动扫描全部候选"></label>
+        <fieldset class="modeling-scan-types">
+          <legend>扫描对象</legend>
+          <label><input type="checkbox" name="scan_signal_types" value="amr_gene" checked><span>耐药基因</span></label>
+          <label><input type="checkbox" name="scan_signal_types" value="st" checked><span>ST / MLST</span></label>
+          <label><input type="checkbox" name="scan_signal_types" value="serotype" checked><span>血清型</span></label>
+          <label><input type="checkbox" name="scan_signal_types" value="vf_gene"><span>毒力基因</span></label>
+        </fieldset>
+        <label><span>单目标信号类型</span><select name="trend_signal_type"><option value="amr_gene">耐药基因</option><option value="serotype">血清型</option><option value="vf_gene">毒力基因</option><option value="st">ST / MLST</option></select></label>
+        <label><span>历史窗口</span><select name="lookback_months"><option value="3">前 3 个月</option><option value="6">前 6 个月</option></select></label>
+        <label><span>后续窗口</span><select name="forecast_months"><option value="1">后续 1 个月</option><option value="3">后续 3 个月</option></select></label>
+        <label><span>偏移阈值（检出率绝对变化）</span><input name="regular_threshold" value="0.1" type="number" min="0.01" max="1" step="0.01"></label>
+        <label><span>最小月样本数</span><input name="min_monthly_samples" value="10" type="number" min="1" step="1"></label>
+        <label><span>最小总命中数</span><input name="min_hit_count" value="5" type="number" min="1" step="1"></label>
+        <label><span>显著偏移阈值</span><input name="severe_z_threshold" value="3" type="number" min="1" max="6" step="0.5"></label>
+        <label><span>算法</span><select name="algorithm">${algorithms.map((item) => `<option value="${escapeHtml(item.key)}" ${item.available ? "" : "disabled"}>${escapeHtml(item.label)}${item.available ? "" : "（不可用）"}</option>`).join("")}</select></label>
+        <label><span>test_size</span><input name="test_size" value="0.2" type="number" min="0.1" max="0.5" step="0.05"></label>
+        <label><span>切分方式</span><select name="split_mode"><option value="time">按时间切分</option><option value="random">随机切分</option></select></label>
+        <label><span>随机种子</span><input name="random_state" value="42" type="number"></label>
+        <label><span>类别不平衡</span><select name="class_weight"><option value="">不处理</option><option value="balanced">balanced</option></select></label>
+      </div>
+      <div class="modeling-actions"><button class="primary-button" type="submit">启动训练</button></div>
+    </form>
+    <div class="modeling-card"><div class="modeling-card-head"><strong>训练结果</strong><span>保存模型文件、配置、指标和数据集快照</span></div><div id="modeling-train-result"></div></div>
+  `;
+}
+
+function renderModelingLibrary() {
+  if (!state.modeling.models.length) {
+    return `<div class="modeling-card">${renderEmptyState({ title: "模型库为空", reason: "训练完成后模型会出现在这里。", action: "先创建训练集和特征方案。" })}</div>`;
+  }
+  const selectedModel = state.modeling.models.find((item) => item.model_id === state.modeling.selectedModelId) || state.modeling.models[0];
+  state.modeling.selectedModelId = selectedModel?.model_id || "";
+  const compared = state.modeling.models.filter((item) => state.modeling.compareModelIds.includes(item.model_id));
+  return `
+    <div class="modeling-card">
+      <div class="modeling-card-head"><strong>模型库</strong><span>${state.modeling.models.length} 个模型</span></div>
+      <div class="modeling-table-wrap">
+        <table class="modeling-table">
+          <thead><tr><th>比较</th><th>模型</th><th>目标</th><th>算法</th><th>样本/特征</th><th>核心指标</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody>${state.modeling.models.map((model) => `
+            <tr class="${model.model_id === state.modeling.selectedModelId ? "is-selected" : ""}">
+              <td><input type="checkbox" name="modeling-compare-model" value="${escapeHtml(model.model_id)}" ${state.modeling.compareModelIds.includes(model.model_id) ? "checked" : ""} aria-label="选择模型进行比较"></td>
+              <td><strong>${escapeHtml(model.model_name || model.model_id)}</strong><br><span>${escapeHtml(model.version || "")}</span></td>
+              <td>${escapeHtml(model.target_type || "-")}<br><span>${escapeHtml(model.target_name || "")}</span></td>
+              <td>${escapeHtml(model.algorithm || "-")}</td>
+              <td>${escapeHtml(model.training_summary?.sample_count ?? model.metrics?.train_sample_count ?? "-")} / ${escapeHtml(model.feature_schema?.feature_count ?? "-")}</td>
+              <td>Macro F1 ${escapeHtml(model.metrics?.macro_f1 ?? model.metrics?.f1 ?? "-")}<br><span>Acc ${escapeHtml(model.metrics?.accuracy ?? "-")} · Recall ${escapeHtml(model.metrics?.recall ?? "-")}</span></td>
+              <td><span class="status-chip ${escapeHtml(model.status || "inactive")}">${escapeHtml(model.status || "inactive")}</span></td>
+              <td>
+                <button class="ghost-button compact-button" type="button" data-modeling-action="view-model" data-model-id="${escapeHtml(model.model_id)}">查看详情</button>
+                <button class="ghost-button compact-button" type="button" data-modeling-action="select-model" data-model-id="${escapeHtml(model.model_id)}">用于预测</button>
+                <button class="ghost-button compact-button" type="button" data-modeling-action="${model.status === "active" ? "deactivate-model" : "activate-model"}" data-model-id="${escapeHtml(model.model_id)}">${model.status === "active" ? "停用" : "启用"}</button>
+              </td>
+            </tr>
+          `).join("")}</tbody>
+        </table>
+      </div>
+      <p class="field-note">${escapeHtml(state.modeling.options.metrics_disclaimer || "")}</p>
+    </div>
+    ${compared.length >= 2 ? renderModelingComparison(compared) : ""}
+    ${selectedModel ? renderModelingModelDetail(selectedModel) : ""}
+  `;
+}
+
+function renderModelingMetric(value) {
+  return value === undefined || value === null || value === "" ? "-" : escapeHtml(value);
+}
+
+function renderModelingDistribution(distribution = {}) {
+  const entries = Object.entries(distribution || {});
+  return entries.length ? entries.map(([label, count]) => `<span class="modeling-distribution-chip">${escapeHtml(label)} <strong>${escapeHtml(count)}</strong></span>`).join("") : `<span class="field-note">暂无记录</span>`;
+}
+
+function modelingParameterLabel(key) {
+  return {
+    class_weight: "类别不平衡处理",
+    random_state: "随机种子",
+    split_mode: "切分方式",
+    test_size: "测试集比例",
+    n_estimators: "迭代次数",
+    max_depth: "最大树深度",
+    learning_rate: "学习率",
+    n_neighbors: "邻居数量",
+    max_iter: "最大迭代次数",
+  }[key] || key.replaceAll("_", " ");
+}
+
+function modelingParameterValue(key, value) {
+  const text = String(value ?? "").trim();
+  if (key === "split_mode") return text === "time" ? "按时间切分" : text === "random" ? "随机切分" : text || "-";
+  if (key === "class_weight") return !text ? "不处理" : text === "balanced" ? "自动平衡类别权重" : text;
+  if (text === "none") return "未使用";
+  if (text === "true") return "是";
+  if (text === "false") return "否";
+  return text || "-";
+}
+
+function renderModelingParameterList(parameters = {}, excludedKeys = []) {
+  const excluded = new Set(excludedKeys);
+  const entries = Object.entries(parameters || {}).filter(([key]) => !excluded.has(key));
+  if (!entries.length) return `<p class="field-note">没有额外训练参数。</p>`;
+  return `<dl class="modeling-parameter-list">${entries.map(([key, value]) => `<dt>${escapeHtml(modelingParameterLabel(key))}</dt><dd>${escapeHtml(modelingParameterValue(key, value))}</dd>`).join("")}</dl>`;
+}
+
+function renderModelingComparison(models) {
+  const bestMacroF1 = Math.max(...models.map((model) => Number(model.metrics?.macro_f1 ?? model.metrics?.f1 ?? -1)));
+  return `
+    <div class="modeling-card">
+      <div class="modeling-card-head"><strong>模型横向比较</strong><span>${models.length} 个模型</span></div>
+      <div class="modeling-table-wrap"><table class="modeling-table">
+        <thead><tr><th>模型</th><th>目标</th><th>算法</th><th>样本数</th><th>特征数</th><th>Accuracy</th><th>Macro F1</th><th>Recall</th><th>ROC-AUC</th><th>PR-AUC</th><th>创建时间</th><th>状态</th></tr></thead>
+        <tbody>${models.map((model) => {
+          const macroF1 = Number(model.metrics?.macro_f1 ?? model.metrics?.f1 ?? -1);
+          return `<tr class="${macroF1 === bestMacroF1 ? "is-recommended" : ""}">
+            <td><strong>${escapeHtml(model.model_name || model.model_id)}</strong>${macroF1 === bestMacroF1 ? `<span class="modeling-recommended">推荐</span>` : ""}</td>
+            <td>${escapeHtml(model.target_name || model.target_type || "-")}</td><td>${escapeHtml(model.algorithm || "-")}</td>
+            <td>${renderModelingMetric(model.training_summary?.sample_count)}</td><td>${renderModelingMetric(model.feature_schema?.feature_count)}</td>
+            <td>${renderModelingMetric(model.metrics?.accuracy)}</td><td>${renderModelingMetric(model.metrics?.macro_f1 ?? model.metrics?.f1)}</td>
+            <td>${renderModelingMetric(model.metrics?.recall)}</td><td>${renderModelingMetric(model.metrics?.roc_auc)}</td><td>${renderModelingMetric(model.metrics?.pr_auc)}</td>
+            <td>${escapeHtml(formatDate(model.created_at || ""))}</td><td>${escapeHtml(model.status || "-")}</td>
+          </tr>`;
+        }).join("")}</tbody>
+      </table></div>
+    </div>
+  `;
+}
+
+function renderModelingCurveChart(title, points, metricLabel, metricValue, options = {}) {
+  const validPoints = Array.isArray(points) ? points.filter((point) => Number.isFinite(Number(point?.x)) && Number.isFinite(Number(point?.y))) : [];
+  if (validPoints.length < 2) {
+    return `<section class="modeling-evaluation-chart"><h4>${escapeHtml(title)}</h4><p class="field-note">当前模型未保存该曲线数据，重新训练二分类模型后可查看。</p></section>`;
+  }
+  const width = 420;
+  const height = 260;
+  const left = 44;
+  const right = 16;
+  const top = 18;
+  const bottom = 38;
+  const chartWidth = width - left - right;
+  const chartHeight = height - top - bottom;
+  const path = validPoints.map((point, index) => {
+    const x = left + Math.max(0, Math.min(1, Number(point.x))) * chartWidth;
+    const y = top + (1 - Math.max(0, Math.min(1, Number(point.y)))) * chartHeight;
+    return `${index ? "L" : "M"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+  }).join(" ");
+  const baseline = options.baseline === "diagonal"
+    ? `<line x1="${left}" y1="${top + chartHeight}" x2="${left + chartWidth}" y2="${top}" class="modeling-chart-baseline"></line>`
+    : `<line x1="${left}" y1="${(top + (1 - Number(options.baseline || 0)) * chartHeight).toFixed(2)}" x2="${left + chartWidth}" y2="${(top + (1 - Number(options.baseline || 0)) * chartHeight).toFixed(2)}" class="modeling-chart-baseline"></line>`;
+  return `
+    <section class="modeling-evaluation-chart">
+      <div class="modeling-evaluation-chart-head"><h4>${escapeHtml(title)}</h4><strong>${escapeHtml(metricLabel)} ${renderModelingMetric(metricValue)}</strong></div>
+      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(title)}">
+        <line x1="${left}" y1="${top}" x2="${left}" y2="${top + chartHeight}" class="modeling-chart-axis"></line>
+        <line x1="${left}" y1="${top + chartHeight}" x2="${left + chartWidth}" y2="${top + chartHeight}" class="modeling-chart-axis"></line>
+        ${[0, 0.25, 0.5, 0.75, 1].map((tick) => {
+          const x = left + tick * chartWidth;
+          const y = top + (1 - tick) * chartHeight;
+          return `<line x1="${left}" y1="${y}" x2="${left + chartWidth}" y2="${y}" class="modeling-chart-grid"></line><text x="${left - 8}" y="${y + 4}" text-anchor="end">${tick}</text><text x="${x}" y="${top + chartHeight + 20}" text-anchor="middle">${tick}</text>`;
+        }).join("")}
+        ${baseline}
+        <path d="${path}" class="modeling-chart-line"></path>
+        <text x="${left + chartWidth / 2}" y="${height - 5}" text-anchor="middle">${escapeHtml(options.xLabel || "")}</text>
+        <text x="12" y="${top + chartHeight / 2}" text-anchor="middle" transform="rotate(-90 12 ${top + chartHeight / 2})">${escapeHtml(options.yLabel || "")}</text>
+      </svg>
+    </section>
+  `;
+}
+
+function modelingHeatClass(value, maxValue) {
+  if (!maxValue || !value) return "heat-0";
+  return `heat-${Math.max(1, Math.min(5, Math.ceil((Number(value) / maxValue) * 5)))}`;
+}
+
+function renderModelingModelDetail(model) {
+  const metrics = model.metrics || {};
+  const training = model.training_summary || {};
+  const schema = model.feature_schema || {};
+  const validation = model.validation_summary || {};
+  const split = model.split_strategy || {};
+  const matrix = model.confusion_matrix || {};
+  const matrixLabels = Array.isArray(matrix.labels) ? matrix.labels : [];
+  const matrixRows = Array.isArray(matrix.matrix) ? matrix.matrix : [];
+  const matrixMax = Math.max(0, ...matrixRows.flat().map((value) => Number(value) || 0));
+  const classMetrics = model.class_metrics || {};
+  const warnings = Array.isArray(model.reliability_warnings) ? model.reliability_warnings : [];
+  const importance = Array.isArray(model.feature_importance) ? model.feature_importance : [];
+  return `
+    <div class="modeling-card modeling-detail">
+      <div class="modeling-card-head">
+        <div><strong>${escapeHtml(model.model_name || model.model_id)}</strong><span>${escapeHtml(model.model_id)} · ${escapeHtml(model.version || "")}</span></div>
+        <div class="modeling-detail-actions"><button class="ghost-button compact-button" type="button" data-modeling-action="export-model-report" data-model-id="${escapeHtml(model.model_id)}">导出评估报告</button></div>
+      </div>
+      <div class="modeling-detail-grid">
+        <section><h4>模型基本信息</h4><dl>
+          <dt>创建人</dt><dd>${escapeHtml(model.created_by || "-")}</dd><dt>创建/完成时间</dt><dd>${escapeHtml(formatDate(model.created_at || ""))}</dd>
+          <dt>状态</dt><dd>${escapeHtml(model.status || "-")}</dd><dt>算法</dt><dd>${escapeHtml(model.algorithm || "-")} ${escapeHtml(validation.algorithm_version || "")}</dd>
+          <dt>任务类型</dt><dd>${escapeHtml(model.target_type || "-")}</dd><dt>预测目标</dt><dd>${escapeHtml(model.target_name || "-")}</dd>
+          <dt>适用病原</dt><dd>${escapeHtml(model.pathogen || "-")}</dd><dt>数据范围</dt><dd>${escapeHtml(training.time_span?.start || "-")} 至 ${escapeHtml(training.time_span?.end || "-")}</dd>
+        </dl></section>
+        <section><h4>训练数据</h4><dl>
+          <dt>数据集</dt><dd>${escapeHtml(training.dataset_name || model.dataset_id || "-")}</dd><dt>样本总数</dt><dd>${renderModelingMetric(training.sample_count)}</dd>
+          <dt>训练/验证/测试</dt><dd>${renderModelingMetric(training.train_sample_count)} / ${renderModelingMetric(training.validation_sample_count)} / ${renderModelingMetric(training.test_sample_count)}</dd>
+          <dt>类别平衡比</dt><dd>${renderModelingMetric(training.class_balance_ratio)}</dd><dt>剔除样本</dt><dd>${renderModelingMetric(training.excluded_sample_count)}</dd>
+        </dl>
+        <div class="modeling-distribution"><strong>标签分布</strong>${renderModelingDistribution(training.label_distribution || metrics.label_distribution)}</div>
+        <div class="modeling-distribution"><strong>地区分布</strong>${renderModelingDistribution(training.region_distribution)}</div>
+        <div class="modeling-distribution"><strong>样本类型分布</strong>${renderModelingDistribution(training.sample_type_distribution)}</div>
+        <div class="modeling-distribution"><strong>缺失值统计</strong>${renderModelingDistribution(training.missing_values)}</div></section>
+        <section><h4>特征信息</h4><dl>
+          <dt>特征集</dt><dd>${escapeHtml(schema.feature_set_name || model.feature_set_id || "-")} v${escapeHtml(schema.feature_set_version || model.feature_set_version || "-")}</dd>
+          <dt>输入特征总数</dt><dd>${renderModelingMetric(schema.feature_count)}</dd><dt>Meta / 分型</dt><dd>${renderModelingMetric(schema.meta_count)} / ${renderModelingMetric(schema.typing_count)}</dd>
+          <dt>耐药 / 毒力</dt><dd>${renderModelingMetric(schema.amr_feature_count)} / ${renderModelingMetric(schema.vf_feature_count)}</dd>
+          <dt>缺失处理</dt><dd>${escapeHtml(schema.missing_policy || "warn")}</dd><dt>编码方式</dt><dd>${escapeHtml(schema.categorical_encoding || "-")}</dd>
+        </dl></section>
+        <section><h4>训练参数</h4><dl>
+          <dt>切分方式</dt><dd>${escapeHtml(modelingParameterValue("split_mode", split.mode || metrics.split_mode || ""))}</dd><dt>时间切分</dt><dd>${split.time_split ? "是" : "否"}</dd>
+          <dt>随机种子</dt><dd>${renderModelingMetric(split.random_state)}</dd><dt>测试集比例</dt><dd>${renderModelingMetric(split.test_size)}</dd>
+          <dt>交叉验证</dt><dd>${escapeHtml(modelingParameterValue("cross_validation", split.cross_validation || "none"))}</dd><dt>训练耗时</dt><dd>${renderModelingMetric(validation.training_seconds)} 秒</dd>
+        </dl>${renderModelingParameterList(model.train_params, ["split_mode", "random_state", "test_size"])}</section>
+      </div>
+      <h4 class="modeling-section-title">核心评估指标</h4>
+      <div class="modeling-metric-grid">
+        ${[["Accuracy", metrics.accuracy], ["Precision", metrics.precision], ["Recall", metrics.recall], ["F1", metrics.f1], ["Macro F1", metrics.macro_f1], ["Weighted F1", metrics.weighted_f1], ["ROC-AUC", metrics.roc_auc], ["PR-AUC", metrics.pr_auc]].map(([label, value]) => `<article><span>${label}</span><strong>${renderModelingMetric(value)}</strong></article>`).join("")}
+      </div>
+      <h4 class="modeling-section-title">评估可视化</h4>
+      <div class="modeling-evaluation-charts">
+        ${renderModelingCurveChart("ROC 曲线", metrics.roc_curve, "AUC", metrics.roc_auc, { baseline: "diagonal", xLabel: "假阳性率 FPR", yLabel: "真阳性率 TPR" })}
+        ${renderModelingCurveChart("Precision-Recall 曲线", metrics.pr_curve, "PR-AUC", metrics.pr_auc, { baseline: metrics.positive_prevalence || 0, xLabel: "Recall", yLabel: "Precision" })}
+      </div>
+      <div class="modeling-detail-grid">
+        <section><h4>分类报告</h4><div class="modeling-table-wrap"><table class="modeling-table"><thead><tr><th>类别</th><th>Precision</th><th>Recall</th><th>F1</th><th>Support</th></tr></thead><tbody>
+          ${Object.entries(classMetrics).map(([label, values]) => `<tr><td>${escapeHtml(label)}</td><td>${renderModelingMetric(values.precision)}</td><td>${renderModelingMetric(values.recall)}</td><td>${renderModelingMetric(values.f1)}</td><td>${renderModelingMetric(values.support)}</td></tr>`).join("") || `<tr><td colspan="5">旧模型未保存逐类别指标，重新训练后可查看。</td></tr>`}
+        </tbody></table></div></section>
+        <section><h4>混淆矩阵</h4><div class="modeling-table-wrap"><table class="modeling-table modeling-confusion-matrix"><thead><tr><th>真实 \\ 预测</th>${matrixLabels.map((label) => `<th>${escapeHtml(label)}</th>`).join("")}</tr></thead><tbody>
+          ${matrixRows.map((row, index) => `<tr><th>${escapeHtml(matrixLabels[index] || index)}</th>${row.map((value) => `<td class="${modelingHeatClass(value, matrixMax)}">${escapeHtml(value)}</td>`).join("")}</tr>`).join("") || `<tr><td>旧模型未保存混淆矩阵，重新训练后可查看。</td></tr>`}
+        </tbody></table></div></section>
+      </div>
+      <div class="modeling-detail-grid">
+        <section><h4>特征重要性 Top 10</h4>${importance.length ? `<ol class="modeling-importance-list">${importance.slice(0, 10).map((item) => `<li><span>${escapeHtml(item.feature || "")}</span><span class="modeling-importance-track"><i style="width:${Math.max(2, (Number(item.importance || 0) / Number(importance[0]?.importance || 1)) * 100).toFixed(2)}%"></i></span><strong>${renderModelingMetric(item.importance)}</strong></li>`).join("")}</ol>` : `<p class="field-note">当前算法不支持特征重要性解释，或旧模型未保存该信息。</p>`}</section>
+        <section><h4>可靠性与风险提示</h4><div class="modeling-warning-list">${warnings.map((item) => `<p class="${escapeHtml(item.level || "info")}">${escapeHtml(item.message || item)}</p>`).join("") || `<p class="warning">旧模型缺少完整可靠性评估，建议重新训练后再用于预测。</p>`}</div></section>
+      </div>
+      <p class="modeling-notice">本模型输出仅用于数据趋势分析与人工复核参考，不作为最终业务处置依据。</p>
+    </div>
+  `;
+}
+
+function renderModelingPrediction() {
+  const activeModels = state.modeling.models.filter((item) => item.status === "active");
+  const availableModels = activeModels.length ? activeModels : state.modeling.models;
+  const selectedModel = availableModels.find((item) => item.model_id === state.modeling.selectedModelId) || availableModels[0];
+  const isTrendModel = selectedModel?.target_type === "trend_regular_change" || selectedModel?.target_type === "trend_signal_scan";
+  return `
+    <form class="modeling-card modeling-form" data-modeling-form="predict">
+      <div class="modeling-form-grid">
+        <label><span>模型</span><select name="model_id" required>${renderModelingSelectOptions(availableModels, "model_id", "model_name", state.modeling.selectedModelId)}</select></label>
+        <label><span>病原名称</span><input name="pathogen" placeholder="筛选待预测样本"></label>
+        <label><span>地区</span><input name="region"></label>
+        <label><span>来源类型</span><input name="source_category"></label>
+        <label><span>采样开始</span><input name="collection_start" type="date"></label>
+        <label><span>采样结束</span><input name="collection_end" type="date"></label>
+      </div>
+      <div class="modeling-prediction-model-capability ${isTrendModel ? "trend" : "classification"}">
+        <strong>${isTrendModel ? "趋势研判模型" : "样本分类模型"}</strong>
+        <span>${isTrendModel ? "可输出指标变化、历史常规区间、偏移点和显著偏移点。" : "只能判断单个样本类别，无法解释哪些时间指标发生变化或哪些月份出现显著偏移。需要改用“自动发现偏移信号”模型。"}</span>
+      </div>
+      <div class="modeling-actions"><button class="primary-button" type="submit">执行预测</button></div>
+    </form>
+    <div class="modeling-card">
+      <div class="modeling-card-head"><strong>预测记录</strong><span>${state.modeling.predictions.length} 批</span></div>
+      ${renderModelingPredictionList()}
+      <p class="field-note">${escapeHtml(state.modeling.options.disclaimer || "")}</p>
+    </div>
+  `;
+}
+
+function modelingPredictionRiskMeta(level) {
+  return {
+    high: { label: "重点复核", note: "建议优先复核", tone: "high" },
+    focus: { label: "持续关注", note: "建议持续跟踪", tone: "focus" },
+    routine: { label: "常规", note: "处于常规范围", tone: "routine" },
+    low: { label: "低关注", note: "暂未进入关注范围", tone: "low" },
+    review: { label: "待复核", note: "需要人工确认", tone: "review" },
+    undefined: { label: "未分级", note: "尚未配置判定规则", tone: "undefined" },
+  }[String(level || "undefined")] || { label: "未分级", note: "尚未配置判定规则", tone: "undefined" };
+}
+
+function modelingPredictionConfidence(level, probability) {
+  const labels = { high: "高", medium: "中", low: "低", unknown: "未提供" };
+  const numeric = Number(probability);
+  const value = Number.isFinite(numeric) ? `${(numeric * 100).toFixed(1)}%` : "-";
+  return { label: labels[String(level || "unknown")] || "未提供", value };
+}
+
+function renderModelingPredictionDrivers(features) {
+  if (Array.isArray(features)) {
+    return features.length ? features.slice(0, 4).map((item) => `<span>${escapeHtml(item)}</span>`).join("") : "未提供";
+  }
+  if (!features || typeof features !== "object") return "未提供";
+  const labels = {
+    historical_rate: "历史检出率",
+    previous_rate: "上一窗口检出率",
+    rate_change: "近期变化",
+    historical_sample_count: "历史样本数",
+  };
+  return Object.entries(features).slice(0, 4).map(([key, value]) => `<span>${escapeHtml(labels[key] || key)} ${Number.isFinite(Number(value)) ? escapeHtml(Number(value).toFixed(key.includes("rate") ? 3 : 0)) : escapeHtml(value)}</span>`).join("");
+}
+
+function renderModelingTrendEvidenceChart(evidence) {
+  const series = Array.isArray(evidence?.series) ? evidence.series.slice(-24) : [];
+  if (series.length < 2) return `<p class="field-note">月度序列不足，暂时无法绘制偏离趋势图。</p>`;
+  const width = 760;
+  const height = 250;
+  const plot = { left: 48, right: 18, top: 18, bottom: 36 };
+  const innerWidth = width - plot.left - plot.right;
+  const innerHeight = height - plot.top - plot.bottom;
+  const x = (index) => plot.left + (index / Math.max(1, series.length - 1)) * innerWidth;
+  const y = (value) => plot.top + (1 - Math.max(0, Math.min(1, Number(value) || 0))) * innerHeight;
+  const line = (key) => series.map((item, index) => `${index ? "L" : "M"}${x(index).toFixed(1)},${y(item[key]).toFixed(1)}`).join(" ");
+  const upper = series.map((item, index) => `${x(index).toFixed(1)},${y(item.normal_upper).toFixed(1)}`);
+  const lower = series.map((item, index) => `${x(series.length - 1 - index).toFixed(1)},${y(series[series.length - 1 - index].normal_lower).toFixed(1)}`);
+  const labelIndexes = Array.from(new Set([0, Math.floor((series.length - 1) / 2), series.length - 1]));
+  return `
+    <div class="modeling-trend-chart">
+      <div class="modeling-trend-chart-legend"><span class="actual">实际检出率</span><span class="band">历史常规区间</span><span class="warning">偏移点</span><span class="severe">显著偏移</span></div>
+      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="实际检出率与历史常规区间趋势图">
+        ${[0, 0.25, 0.5, 0.75, 1].map((value) => `<line class="modeling-chart-grid" x1="${plot.left}" y1="${y(value)}" x2="${width - plot.right}" y2="${y(value)}"></line><text x="5" y="${y(value) + 4}">${Math.round(value * 100)}%</text>`).join("")}
+        <polygon class="modeling-trend-normal-band" points="${upper.concat(lower).join(" ")}"></polygon>
+        <path class="modeling-trend-baseline" d="${line("baseline_mean")}"></path>
+        <path class="modeling-trend-actual-line" d="${line("rate")}"></path>
+        ${series.map((item, index) => `<circle class="modeling-trend-point ${escapeHtml(item.severity || "normal")}" cx="${x(index)}" cy="${y(item.rate)}" r="${item.severity === "severe" ? 5 : item.severity === "warning" ? 4 : 2.8}"><title>${escapeHtml(item.month)}：实际 ${(Number(item.rate) * 100).toFixed(1)}%，常规 ${(Number(item.normal_lower) * 100).toFixed(1)}%-${(Number(item.normal_upper) * 100).toFixed(1)}%</title></circle>`).join("")}
+        ${labelIndexes.map((index) => `<text class="modeling-trend-x-label" x="${x(index)}" y="${height - 10}" text-anchor="${index === 0 ? "start" : index === series.length - 1 ? "end" : "middle"}">${escapeHtml(series[index].month)}</text>`).join("")}
+      </svg>
+    </div>
+  `;
+}
+
+function renderModelingTrendIndicator(item) {
+  const change = Number(item?.change) || 0;
+  const tone = change > 0 ? "up" : change < 0 ? "down" : "flat";
+  const sign = change > 0 ? "+" : "";
+  return `<article class="${tone}"><span>${escapeHtml(item.name || "-")}</span><strong>${sign}${escapeHtml(change.toFixed(1))} ${escapeHtml(item.unit || "")}</strong><small>${escapeHtml(item.previous)} → ${escapeHtml(item.current)} ${escapeHtml(item.unit || "")}</small></article>`;
+}
+
+function renderModelingTrendPrediction(item) {
+  if (!item?.signal_type) return "";
+  const evidence = item.trend_evidence && typeof item.trend_evidence === "object" ? item.trend_evidence : null;
+  const topFeatures = item.top_features && !Array.isArray(item.top_features) && typeof item.top_features === "object" ? item.top_features : {};
+  const previousRate = Math.max(0, Math.min(1, Number(item.previous_rate ?? topFeatures.previous_rate) || 0));
+  const historicalRate = Math.max(0, Math.min(1, Number(item.current_rate ?? topFeatures.historical_rate) || 0));
+  const rateChange = Number(item.rate_change ?? topFeatures.rate_change) || 0;
+  const direction = rateChange > 0 ? "近期上升" : rateChange < 0 ? "近期下降" : "近期平稳";
+  const indicators = Array.isArray(evidence?.indicator_changes) ? evidence.indicator_changes : [];
+  const deviationPoints = Array.isArray(evidence?.deviation_points) ? evidence.deviation_points : [];
+  const severePoints = Array.isArray(evidence?.severe_points) ? evidence.severe_points : [];
+  return `
+    <section class="modeling-trend-interpretation">
+      <div class="modeling-card-head"><div><strong>${escapeHtml(item.signal_name || item.target_name || item.sample_name || "趋势预测")}</strong><span>${escapeHtml(item.signal_type_label || "")} · ${escapeHtml(item.history_window_months || "-")} 个月历史窗口 → 后续 ${escapeHtml(item.forecast_window_months || "-")} 个月</span></div><span class="status-chip ${escapeHtml(item.risk_level || "undefined")}">${escapeHtml(item.risk_label || modelingPredictionRiskMeta(item.risk_level).label)}</span></div>
+      <div class="modeling-trend-verdict"><span>${escapeHtml(direction)} · 变化 ${(rateChange * 100).toFixed(1)} 个百分点</span><strong>后续研判：${escapeHtml(item.predicted_label || "-")}</strong><p>${escapeHtml(item.prediction_explanation || item.risk_reason || "")}</p></div>
+      ${evidence ? `
+        <div class="modeling-trend-evidence-head"><div><strong>变化证据</strong><span>${escapeHtml(evidence.method || "")}</span></div><div><strong>${severePoints.length}</strong><span>显著偏移点</span></div><div><strong>${deviationPoints.length}</strong><span>全部偏移点</span></div></div>
+        <div class="modeling-trend-indicators">${indicators.map(renderModelingTrendIndicator).join("")}</div>
+        ${renderModelingTrendEvidenceChart(evidence)}
+        <div class="modeling-card-head modeling-trend-deviation-head"><strong>偏移点明细</strong><span>按偏移程度排序</span></div>
+        <div class="modeling-table-wrap"><table class="modeling-table modeling-trend-deviation-table"><thead><tr><th>月份</th><th>实际检出率</th><th>历史常规区间</th><th>偏离方向</th><th>偏离程度</th><th>样本 / 阳性数</th></tr></thead><tbody>
+          ${deviationPoints.map((point) => `<tr class="${escapeHtml(point.severity || "")}"><td><strong>${escapeHtml(point.month || "-")}</strong></td><td>${(Number(point.rate) * 100).toFixed(1)}%</td><td>${(Number(point.normal_lower) * 100).toFixed(1)}%-${(Number(point.normal_upper) * 100).toFixed(1)}%</td><td>${escapeHtml(point.direction || "-")} ${Number(point.deviation) > 0 ? "+" : ""}${(Number(point.deviation) * 100).toFixed(1)} 个百分点</td><td><span class="status-chip ${point.severity === "severe" ? "high" : "review"}">${point.severity === "severe" ? "显著偏移" : "偏移"}</span><br><small>${escapeHtml(point.deviation_score)}σ</small></td><td>${escapeHtml(point.sample_count)} / ${escapeHtml(point.hit_count)}${point.sample_size_warning ? `<br><small class="modeling-trend-sample-warning">样本量偏少，谨慎解释</small>` : ""}</td></tr>`).join("") || `<tr><td colspan="6">当前月度序列未发现超出常规区间的偏移点。</td></tr>`}
+        </tbody></table></div>
+      ` : `
+        <div class="modeling-trend-comparison">
+          <div><span>上一历史窗口</span><div><i style="width:${(previousRate * 100).toFixed(1)}%"></i></div><strong>${(previousRate * 100).toFixed(1)}%</strong></div>
+          <div><span>当前历史窗口</span><div><i style="width:${(historicalRate * 100).toFixed(1)}%"></i></div><strong>${(historicalRate * 100).toFixed(1)}%</strong></div>
+        </div>
+        <p class="field-note">该记录生成于证据链功能上线前，请重新执行预测以查看指标变化、常规区间和偏移点。</p>
+      `}
+    </section>
+  `;
+}
+
+function renderModelingSignalRadar(prediction, results) {
+  const signalResults = results.filter((item) => item.signal_id && item.signal_id !== "none");
+  const highRiskCount = signalResults.filter((item) => item.risk_level === "high").length;
+  const focusCount = signalResults.filter((item) => item.risk_level === "focus").length;
+  const severePointCount = signalResults.reduce((sum, item) => sum + (Array.isArray(item.severe_points) ? item.severe_points.length : 0), 0);
+  const lowSampleCount = signalResults.filter((item) => Number(item.trend_evidence?.summary?.low_sample_months || 0) > 0).length;
+  const sortedSignals = signalResults.slice().sort((left, right) => {
+    const rightScore = (Array.isArray(right.severe_points) ? right.severe_points.length : 0) * 10 + Math.abs(Number(right.rate_change) || 0);
+    const leftScore = (Array.isArray(left.severe_points) ? left.severe_points.length : 0) * 10 + Math.abs(Number(left.rate_change) || 0);
+    return rightScore - leftScore;
+  });
+  return `
+    <div class="modeling-prediction-toolbar">
+      <label><span>预测批次</span><select name="modeling-prediction-id">${state.modeling.predictions.map((item) => `<option value="${escapeHtml(item.prediction_id)}" ${item.prediction_id === prediction.prediction_id ? "selected" : ""}>${escapeHtml(formatDate(item.created_at || ""))} · ${escapeHtml(item.model_version || "")}</option>`).join("")}</select></label>
+      <div><strong>${escapeHtml(prediction.model_name || prediction.prediction_id)}</strong><span>自动偏移扫描 · ${signalResults.length} 个偏移信号 · ${escapeHtml(prediction.created_by || "-")}</span></div>
+    </div>
+    <section class="modeling-prediction-conclusion ${highRiskCount ? "high" : focusCount ? "focus" : "routine"}">
+      <div><span>偏移信号雷达</span><strong>${signalResults.length ? `发现 ${signalResults.length} 个候选偏移信号` : "未发现明显偏移信号"}</strong></div>
+      <p>系统自动扫描耐药基因、毒力基因、ST/MLST 和血清型；结果按显著偏移点、变化幅度和样本量稳定性排序。</p>
+    </section>
+    <div class="modeling-metric-grid modeling-prediction-metrics">
+      <article><span>重点复核信号</span><strong>${highRiskCount}</strong></article>
+      <article><span>重点关注信号</span><strong>${focusCount}</strong></article>
+      <article><span>显著偏移月份</span><strong>${severePointCount}</strong></article>
+      <article><span>小样本需谨慎</span><strong>${lowSampleCount}</strong></article>
+    </div>
+    <div class="modeling-table-wrap"><table class="modeling-table modeling-signal-radar-table">
+      <thead><tr><th>信号</th><th>类型</th><th>方向</th><th>当前检出率</th><th>前期检出率</th><th>变化</th><th>显著偏移点</th><th>关注级别</th></tr></thead>
+      <tbody>${sortedSignals.map((item) => {
+        const risk = modelingPredictionRiskMeta(item.risk_level);
+        const change = Number(item.rate_change) || 0;
+        return `<tr>
+          <td><strong>${escapeHtml(item.signal_name || item.sample_name || "-")}</strong><br><span>${escapeHtml(item.signal_id || "")}</span></td>
+          <td>${escapeHtml(item.signal_type_label || item.signal_type || "-")}</td>
+          <td>${escapeHtml(item.predicted_label || "-")}</td>
+          <td>${(Number(item.current_rate || 0) * 100).toFixed(1)}%</td>
+          <td>${(Number(item.previous_rate || 0) * 100).toFixed(1)}%</td>
+          <td class="${change > 0 ? "trend-up" : change < 0 ? "trend-down" : ""}">${change > 0 ? "+" : ""}${(change * 100).toFixed(1)} 个百分点</td>
+          <td>${Array.isArray(item.severe_points) ? item.severe_points.length : 0}</td>
+          <td><span class="status-chip ${escapeHtml(risk.tone)}">${escapeHtml(item.risk_label || risk.label)}</span></td>
+        </tr>
+        <tr class="modeling-signal-detail-row"><td colspan="8">
+          <details>
+            <summary>查看趋势证据、偏移点和解释</summary>
+            ${renderModelingTrendPrediction(item)}
+          </details>
+        </td></tr>`;
+      }).join("") || `<tr><td colspan="8">当前筛选样本未发现满足阈值的偏移信号。</td></tr>`}</tbody>
+    </table></div>
+  `;
+}
+
+function renderModelingPredictionList() {
+  if (!state.modeling.predictions.length) return `<p class="field-note">还没有预测记录。</p>`;
+  const prediction = state.modeling.predictions.find((item) => item.prediction_id === state.modeling.selectedPredictionId) || state.modeling.predictions[0];
+  state.modeling.selectedPredictionId = prediction.prediction_id;
+  const results = Array.isArray(prediction.results) ? prediction.results : [];
+  if (results.some((item) => item.signal_id)) {
+    return renderModelingSignalRadar(prediction, results);
+  }
+  const labelDistribution = results.reduce((accumulator, item) => {
+    const label = String(item.predicted_label || "未分类");
+    accumulator[label] = (accumulator[label] || 0) + 1;
+    return accumulator;
+  }, {});
+  const riskDistribution = results.reduce((accumulator, item) => {
+    const risk = String(item.risk_level || "undefined");
+    accumulator[risk] = (accumulator[risk] || 0) + 1;
+    return accumulator;
+  }, {});
+  const probabilities = results.map((item) => Number(item.predicted_probability)).filter(Number.isFinite);
+  const missingCount = results.filter((item) => Array.isArray(item.missing_features) && item.missing_features.length).length;
+  const warningCount = results.filter((item) => Array.isArray(item.applicability_warnings) && item.applicability_warnings.length).length;
+  const pageSize = Number(state.modeling.predictionPageSize || 20);
+  const pageCount = Math.max(1, Math.ceil(results.length / pageSize));
+  const page = Math.max(1, Math.min(Number(state.modeling.predictionPage || 1), pageCount));
+  state.modeling.predictionPage = page;
+  const pageStart = (page - 1) * pageSize;
+  const pageRows = results.slice(pageStart, pageStart + pageSize);
+  const maxLabelCount = Math.max(1, ...Object.values(labelDistribution));
+  const highRiskCount = Number(riskDistribution.high || 0);
+  const focusCount = Number(riskDistribution.focus || 0);
+  const reviewCount = Number(riskDistribution.review || 0);
+  const undefinedCount = Number(riskDistribution.undefined || 0);
+  const primaryConclusion = highRiskCount
+    ? `发现 ${highRiskCount} 项重点复核信号，建议优先复核。`
+    : focusCount
+      ? `发现 ${focusCount} 项持续关注信号，建议持续跟踪。`
+      : reviewCount
+        ? `有 ${reviewCount} 项结论需要人工复核。`
+        : "本批次未发现明确重点复核信号。";
+  return `
+    <div class="modeling-prediction-toolbar">
+      <label><span>预测批次</span><select name="modeling-prediction-id">${state.modeling.predictions.map((item) => `<option value="${escapeHtml(item.prediction_id)}" ${item.prediction_id === prediction.prediction_id ? "selected" : ""}>${escapeHtml(formatDate(item.created_at || ""))} · ${escapeHtml(item.model_version || "")}</option>`).join("")}</select></label>
+      <div><strong>${escapeHtml(prediction.model_name || prediction.prediction_id)}</strong><span>${escapeHtml(prediction.target_name || prediction.target_type || "未注明预测目标")} · ${results.length} 个结果 · ${escapeHtml(prediction.created_by || "-")}</span></div>
+    </div>
+    <section class="modeling-prediction-conclusion ${highRiskCount ? "high" : focusCount || reviewCount ? "focus" : "routine"}">
+      <div><span>本批次研判结论</span><strong>${escapeHtml(primaryConclusion)}</strong></div>
+      <p>关注级别来自预测目标对应的业务规则；置信度只表示模型对结论的确定程度，两者不可互相替代。</p>
+    </section>
+    <div class="modeling-metric-grid modeling-prediction-metrics">
+      <article><span>预测样本数</span><strong>${results.length}</strong></article>
+      <article><span>平均置信度</span><strong>${probabilities.length ? `${(probabilities.reduce((sum, value) => sum + value, 0) / probabilities.length * 100).toFixed(1)}%` : "-"}</strong></article>
+      <article><span>重点复核 / 持续关注</span><strong>${highRiskCount} / ${focusCount}</strong></article>
+      <article><span>待复核 / 未分级</span><strong>${reviewCount} / ${undefinedCount}</strong></article>
+    </div>
+    <div class="modeling-detail-grid">
+      <section>
+        <h4>预测标签分布</h4>
+        <div class="modeling-prediction-bars">${Object.entries(labelDistribution).sort((left, right) => right[1] - left[1]).map(([label, count]) => `
+          <div><span>${escapeHtml(label)}</span><div><i style="width:${(count / maxLabelCount * 100).toFixed(2)}%"></i></div><strong>${count}</strong></div>
+        `).join("")}</div>
+      </section>
+      <section>
+        <h4>关注级别分布</h4>
+        <div class="modeling-prediction-risk">${Object.entries(riskDistribution).map(([risk, count]) => {
+          const meta = modelingPredictionRiskMeta(risk);
+          return `<article class="${escapeHtml(meta.tone)}"><span>${escapeHtml(meta.label)}</span><strong>${count}</strong><small>${escapeHtml(meta.note)} · ${results.length ? (count / results.length * 100).toFixed(1) : 0}%</small></article>`;
+        }).join("")}</div>
+      </section>
+    </div>
+    ${(missingCount || warningCount) ? `<div class="modeling-prediction-quality"><strong>预测前校验</strong><span>${missingCount} 项存在缺失特征，${warningCount} 项存在适用性提示。请先处理这些问题，再将结果用于后续研判。</span></div>` : ""}
+    ${renderModelingTrendPrediction(results.find((item) => item.signal_type))}
+    <div class="modeling-card-head modeling-prediction-detail-head"><strong>预测结果明细</strong><span>第 ${pageStart + 1}-${Math.min(pageStart + pageSize, results.length)} 条，共 ${results.length} 条</span></div>
+    <div class="modeling-table-wrap"><table class="modeling-table modeling-prediction-table">
+      <thead><tr><th>对象</th><th>预测结论</th><th>模型置信度</th><th>关注级别</th><th>主要依据</th><th>解释与校验</th></tr></thead>
+      <tbody>${pageRows.map((item) => {
+        const risk = modelingPredictionRiskMeta(item.risk_level);
+        const confidence = modelingPredictionConfidence(item.confidence_level, item.predicted_probability);
+        const validation = [
+          Array.isArray(item.missing_features) && item.missing_features.length ? `缺失特征：${item.missing_features.join("、")}` : "",
+          Array.isArray(item.applicability_warnings) && item.applicability_warnings.length ? item.applicability_warnings.join("；") : "",
+        ].filter(Boolean).join("；");
+        return `<tr>
+        <td><strong>${escapeHtml(item.sample_id || "-")}</strong><br><span>${escapeHtml(item.sample_name || "")}</span></td>
+        <td><span class="modeling-prediction-label">${escapeHtml(item.predicted_label || "-")}</span></td>
+        <td><strong>${escapeHtml(confidence.value)}</strong><br><span>${escapeHtml(confidence.label)}置信度</span></td>
+        <td><span class="status-chip ${escapeHtml(risk.tone)}">${escapeHtml(item.risk_label || risk.label)}</span><br><span>${escapeHtml(risk.note)}</span></td>
+        <td><div class="modeling-prediction-drivers">${renderModelingPredictionDrivers(item.top_features)}</div></td>
+        <td><strong>${escapeHtml(item.risk_reason || item.prediction_explanation || "暂无解释")}</strong><br><span>${escapeHtml(validation || "特征与适用范围校验通过")}</span></td>
+      </tr>`;
+      }).join("")}</tbody>
+    </table></div>
+    <div class="modeling-pagination">
+      <span>模型输出仅用于数据趋势分析与人工复核参考</span>
+      <div class="modeling-pagination-actions">
+        <label><span>每页</span><select name="modeling-prediction-page-size"><option value="20" ${pageSize === 20 ? "selected" : ""}>20</option><option value="50" ${pageSize === 50 ? "selected" : ""}>50</option><option value="100" ${pageSize === 100 ? "selected" : ""}>100</option></select></label>
+        <button class="ghost-button compact-button" type="button" data-modeling-action="prediction-page-prev" ${page <= 1 ? "disabled" : ""}>上一页</button>
+        <strong>${page} / ${pageCount}</strong>
+        <button class="ghost-button compact-button" type="button" data-modeling-action="prediction-page-next" ${page >= pageCount ? "disabled" : ""}>下一页</button>
+      </div>
+    </div>
+  `;
+}
+
+function modelingFormData(form) {
+  return Object.fromEntries(new FormData(form).entries());
+}
+
+async function onModelingSubmit(event) {
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement) || !form.dataset.modelingForm) return;
+  event.preventDefault();
+  const type = form.dataset.modelingForm;
+  const submitButton = form.querySelector('button[type="submit"]');
+  await withSubmittingState(submitButton, "处理中...", async () => {
+    if (type === "sample-search") {
+      const data = await requestJson("/api/modeling/samples/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filters: modelingFormData(form) }),
+      });
+      state.modeling.sampleSearch = data;
+      state.modeling.samplePage = 1;
+      renderModelingPlatform();
+      return;
+    }
+    if (type === "feature-set") {
+      const values = modelingFormData(form);
+      const features = Array.from(form.querySelectorAll('input[name="features"]:checked')).map((item) => item.value);
+      await requestJson("/api/modeling/feature-sets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ feature_set_name: values.feature_set_name, version: values.version, feature_schema: { features, missing_policy: "warn" } }),
+      });
+      await refreshModelingLists();
+      showToast("特征方案已保存");
+      return;
+    }
+    if (type === "train") {
+      const values = modelingFormData(form);
+      const scanSignalTypes = Array.from(form.querySelectorAll('input[name="scan_signal_types"]:checked')).map((item) => item.value);
+      const result = await requestJson("/api/modeling/train", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...values, scan_signal_types: scanSignalTypes, params: { test_size: values.test_size, split_mode: values.split_mode, random_state: values.random_state, class_weight: values.class_weight } }),
+      });
+      await refreshModelingLists();
+      state.modeling.activeSection = "modeling-library-section";
+      renderModelingPlatform();
+      showToast(result?.model ? "模型训练完成" : "训练任务已提交");
+      return;
+    }
+    if (type === "predict") {
+      const values = modelingFormData(form);
+      const { model_id: modelId, ...filters } = values;
+      await requestJson(`/api/modeling/models/${encodeURIComponent(modelId)}/predict`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filters }),
+      });
+      await refreshModelingLists();
+      showToast("预测完成，结果已保存");
+    }
+  });
+}
+
+async function refreshModelingLists() {
+  state.modeling.loaded = false;
+  await loadModelingPlatform({ force: true });
+}
+
+async function onModelingClick(event) {
+  const button = event.target?.closest?.("[data-modeling-action]");
+  if (!button) return;
+  const action = button.dataset.modelingAction;
+  const modelId = button.dataset.modelId || "";
+  const datasetId = button.dataset.datasetId || "";
+  if (action === "create-dataset") {
+    const filters = state.modeling.sampleSearch?.filters || {};
+    if (!state.modeling.sampleSearch?.sample_ids?.length) {
+      showToast("请先筛选出训练样本。", "warning");
+      return;
+    }
+    const dataset = await requestJson("/api/modeling/datasets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset_name: `训练集 ${new Date().toLocaleString()}`, filters }),
+    });
+    state.modeling.selectedDatasetId = dataset?.dataset_id || state.modeling.selectedDatasetId;
+    await refreshModelingLists();
+    showToast("训练集快照已保存");
+  }
+  if (action === "view-dataset") {
+    state.modeling.selectedDatasetId = datasetId;
+    renderModelingPlatform();
+  }
+  if (action === "train-dataset") {
+    state.modeling.selectedDatasetId = datasetId;
+    setActiveModelingSection("modeling-training-section");
+  }
+  if (action === "feature-group-select" || action === "feature-group-clear") {
+    const form = button.closest('form[data-modeling-form="feature-set"]');
+    const group = button.dataset.featureGroup || "";
+    if (form instanceof HTMLFormElement) {
+      form.querySelectorAll(`input[name="features"][data-feature-group="${group}"]`).forEach((input) => {
+        input.checked = action === "feature-group-select";
+      });
+      updateModelingFeatureSelection(form);
+    }
+  }
+  if (action === "sample-page-prev") {
+    state.modeling.samplePage = Math.max(1, Number(state.modeling.samplePage || 1) - 1);
+    renderModelingPlatform();
+  }
+  if (action === "sample-page-next") {
+    state.modeling.samplePage = Number(state.modeling.samplePage || 1) + 1;
+    renderModelingPlatform();
+  }
+  if (action === "prediction-page-prev") {
+    state.modeling.predictionPage = Math.max(1, Number(state.modeling.predictionPage || 1) - 1);
+    renderModelingPlatform();
+  }
+  if (action === "prediction-page-next") {
+    state.modeling.predictionPage = Number(state.modeling.predictionPage || 1) + 1;
+    renderModelingPlatform();
+  }
+  if (action === "select-model") {
+    state.modeling.selectedModelId = modelId;
+    setActiveModelingSection("modeling-prediction-section");
+  }
+  if (action === "view-model") {
+    state.modeling.selectedModelId = modelId;
+    renderModelingPlatform();
+  }
+  if (action === "export-model-report") {
+    window.open(`/api/modeling/models/${encodeURIComponent(modelId)}/report`, "_blank", "noopener");
+  }
+  if (action === "activate-model" || action === "deactivate-model") {
+    await requestJson(`/api/modeling/models/${encodeURIComponent(modelId)}/${action === "activate-model" ? "activate" : "deactivate"}`, { method: "POST", body: JSON.stringify({}) });
+    await refreshModelingLists();
+  }
+}
+
+function onModelingChange(event) {
+  const target = event.target;
+  if (target instanceof HTMLInputElement && target.name === "features") {
+    updateModelingFeatureSelection(target.form);
+    return;
+  }
+  if (target instanceof HTMLInputElement && target.name === "modeling-compare-model") {
+    const selected = new Set(state.modeling.compareModelIds);
+    if (target.checked) selected.add(target.value);
+    else selected.delete(target.value);
+    state.modeling.compareModelIds = Array.from(selected);
+    renderModelingPlatform();
+    return;
+  }
+  if (!(target instanceof HTMLSelectElement)) return;
+  if (target.name === "dataset_id") state.modeling.selectedDatasetId = target.value;
+  if (target.name === "feature_set_id") state.modeling.selectedFeatureSetId = target.value;
+  if (target.name === "model_id") {
+    state.modeling.selectedModelId = target.value;
+    renderModelingPlatform();
+    return;
+  }
+  if (target.name === "modeling-sample-page-size") {
+    state.modeling.samplePageSize = Number(target.value || 20);
+    state.modeling.samplePage = 1;
+    renderModelingPlatform();
+  }
+  if (target.name === "modeling-prediction-id") {
+    state.modeling.selectedPredictionId = target.value;
+    state.modeling.predictionPage = 1;
+    renderModelingPlatform();
+  }
+  if (target.name === "modeling-prediction-page-size") {
+    state.modeling.predictionPageSize = Number(target.value || 20);
+    state.modeling.predictionPage = 1;
+    renderModelingPlatform();
+  }
+  if (target.name === "target_type" && (target.value === "trend_regular_change" || target.value === "trend_signal_scan")) {
+    const splitMode = target.form?.querySelector?.('select[name="split_mode"]');
+    if (splitMode instanceof HTMLSelectElement) {
+      splitMode.value = "time";
+    }
+  }
 }

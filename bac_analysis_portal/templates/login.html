@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>黄浦区公共卫生病原基因数据库和生物信息学分析系统</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -31,13 +32,16 @@
           </label>
           <button class="primary-button" type="submit">登录</button>
         </form>
+        {% if config.PORTAL_MODE != "production" %}
         <div class="login-note">
           <span>默认管理员</span>
           <code>admin / admin123</code>
         </div>
+        {% endif %}
       </section>
     </main>
     <div id="toast" class="toast hidden"></div>
+    <script src="{{ url_for('static', filename='csrf.js') }}"></script>
     <script>
       const toast = document.getElementById("toast");
       const showToast = (message, isError = false) => {

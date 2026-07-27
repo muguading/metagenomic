@@ -25,6 +25,13 @@ sample_table <- normalizePath(args[[3]], mustWork = TRUE)
 group_column <- args[[4]]
 output_dir <- normalizePath(args[[5]], mustWork = FALSE)
 measure <- if (length(args) >= 6) args[[6]] else "bray"
+measure <- switch(
+  tolower(measure),
+  "braycurtis" = "bray",
+  "bray_curtis" = "bray",
+  "bray-curtis" = "bray",
+  measure
+)
 
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +57,42 @@ precheck_json, result_json, imported_count, skipped_count, issue_count, content_
 created_at, updated_at, completed_at
 """
 
+SAMPLE_MODELING_RUN_COLUMNS = """
+run_id, run_type, algorithm, label_field, sample_count, labeled_count, feature_columns_json,
+metrics_json, dataset_preview_json, status, message, created_by, created_at
+"""
+
+SAMPLE_MODELING_SCORE_COLUMNS = """
+score_id, run_id, sample_key, sample_name, risk_score, risk_level, risk_label,
+explanation_json, feature_snapshot_json, created_at
+"""
+
+MODELING_DATASET_COLUMNS = """
+dataset_id, dataset_name, scope, filters_json, sample_ids_json, summary_json,
+created_by, created_at
+"""
+
+MODELING_FEATURE_SET_COLUMNS = """
+feature_set_id, feature_set_name, version, feature_schema_json, created_by, created_at
+"""
+
+MODELING_TRAIN_JOB_COLUMNS = """
+job_id, model_id, status, logs_json, config_json, created_by, created_at, updated_at
+"""
+
+MODELING_MODEL_COLUMNS = """
+model_id, model_name, version, pathogen, target_type, target_name, algorithm,
+feature_set_id, feature_set_version, dataset_id, dataset_snapshot_json, config_json,
+metrics_json, class_metrics_json, confusion_matrix_json, feature_importance_json,
+training_summary_json, validation_summary_json, reliability_warnings_json,
+feature_schema_json, train_params_json, split_strategy_json,
+artifact_path, status, created_by, created_at, updated_at
+"""
+
+MODELING_PREDICTION_COLUMNS = """
+prediction_id, model_id, model_version, sample_ids_json, results_json, created_by, created_at
+"""
+
 DEFAULT_ALLOWED_MODULES = ["bacteria", "virus", "metagenome", "community", "pathosource"]
 DEFAULT_ALLOWED_VIRUSES = [
     "ncov",
@@ -92,13 +130,23 @@ class PortalStore:
     project_root: Path
 
     @classmethod
-    def from_project_root(cls, project_root: Path) -> "PortalStore":
-        db_path = project_root / "bac_analysis_portal.sqlite3"
+    def from_project_root(
+        cls,
+        project_root: Path,
+        *,
+        initial_admin_password: str = "admin123",
+        rotate_weak_admin: bool = False,
+    ) -> "PortalStore":
+        configured_db_path = str(os.environ.get("PORTAL_DB_PATH", "") or "").strip()
+        db_path = Path(configured_db_path).expanduser() if configured_db_path else project_root / "bac_analysis_portal.sqlite3"
+        if not db_path.is_absolute():
+            db_path = project_root / db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         store = cls(db_path=db_path, project_root=project_root)
-        store.initialize()
+        store.initialize(initial_admin_password=initial_admin_password, rotate_weak_admin=rotate_weak_admin)
         return store
 
-    def initialize(self) -> None:
+    def initialize(self, *, initial_admin_password: str = "admin123", rotate_weak_admin: bool = False) -> None:
         with self.connect() as conn:
             conn.execute(
                 """
@@ -134,6 +182,16 @@ class PortalStore:
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS service_leases (
+                    name TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    expires_at REAL NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
@@ -270,6 +328,152 @@ class PortalStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sample_modeling_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL UNIQUE,
+                    run_type TEXT NOT NULL DEFAULT 'baseline',
+                    algorithm TEXT NOT NULL DEFAULT '',
+                    label_field TEXT NOT NULL DEFAULT '',
+                    sample_count INTEGER NOT NULL DEFAULT 0,
+                    labeled_count INTEGER NOT NULL DEFAULT 0,
+                    feature_columns_json TEXT NOT NULL DEFAULT '[]',
+                    metrics_json TEXT NOT NULL DEFAULT '{}',
+                    dataset_preview_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'completed',
+                    message TEXT NOT NULL DEFAULT '',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sample_modeling_scores (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    score_id TEXT NOT NULL UNIQUE,
+                    run_id TEXT NOT NULL,
+                    sample_key TEXT NOT NULL,
+                    sample_name TEXT NOT NULL DEFAULT '',
+                    risk_score REAL NOT NULL DEFAULT 0,
+                    risk_level TEXT NOT NULL DEFAULT 'routine',
+                    risk_label TEXT NOT NULL DEFAULT '',
+                    explanation_json TEXT NOT NULL DEFAULT '[]',
+                    feature_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sample_modeling_scores_sample_key ON sample_modeling_scores(sample_key, created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sample_modeling_scores_run_id ON sample_modeling_scores(run_id)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS modeling_datasets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dataset_id TEXT NOT NULL UNIQUE,
+                    dataset_name TEXT NOT NULL DEFAULT '',
+                    scope TEXT NOT NULL DEFAULT 'main',
+                    filters_json TEXT NOT NULL DEFAULT '{}',
+                    sample_ids_json TEXT NOT NULL DEFAULT '[]',
+                    summary_json TEXT NOT NULL DEFAULT '{}',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS modeling_feature_sets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    feature_set_id TEXT NOT NULL UNIQUE,
+                    feature_set_name TEXT NOT NULL DEFAULT '',
+                    version TEXT NOT NULL DEFAULT '1',
+                    feature_schema_json TEXT NOT NULL DEFAULT '{}',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS modeling_train_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL UNIQUE,
+                    model_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    logs_json TEXT NOT NULL DEFAULT '[]',
+                    config_json TEXT NOT NULL DEFAULT '{}',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS modeling_models (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    model_id TEXT NOT NULL UNIQUE,
+                    model_name TEXT NOT NULL DEFAULT '',
+                    version TEXT NOT NULL DEFAULT '1',
+                    pathogen TEXT NOT NULL DEFAULT '',
+                    target_type TEXT NOT NULL DEFAULT '',
+                    target_name TEXT NOT NULL DEFAULT '',
+                    algorithm TEXT NOT NULL DEFAULT '',
+                    feature_set_id TEXT NOT NULL DEFAULT '',
+                    feature_set_version TEXT NOT NULL DEFAULT '',
+                    dataset_id TEXT NOT NULL DEFAULT '',
+                    dataset_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    config_json TEXT NOT NULL DEFAULT '{}',
+                    metrics_json TEXT NOT NULL DEFAULT '{}',
+                    class_metrics_json TEXT NOT NULL DEFAULT '{}',
+                    confusion_matrix_json TEXT NOT NULL DEFAULT '[]',
+                    feature_importance_json TEXT NOT NULL DEFAULT '[]',
+                    training_summary_json TEXT NOT NULL DEFAULT '{}',
+                    validation_summary_json TEXT NOT NULL DEFAULT '{}',
+                    reliability_warnings_json TEXT NOT NULL DEFAULT '[]',
+                    feature_schema_json TEXT NOT NULL DEFAULT '{}',
+                    train_params_json TEXT NOT NULL DEFAULT '{}',
+                    split_strategy_json TEXT NOT NULL DEFAULT '{}',
+                    artifact_path TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'inactive',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS modeling_predictions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    prediction_id TEXT NOT NULL UNIQUE,
+                    model_id TEXT NOT NULL,
+                    model_version TEXT NOT NULL DEFAULT '',
+                    sample_ids_json TEXT NOT NULL DEFAULT '[]',
+                    results_json TEXT NOT NULL DEFAULT '[]',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_modeling_models_status ON modeling_models(status, created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_modeling_predictions_model_id ON modeling_predictions(model_id, created_at DESC)")
+            modeling_model_columns = {row["name"] for row in conn.execute("PRAGMA table_info(modeling_models)").fetchall()}
+            for column_name, column_type in {
+                "class_metrics_json": "TEXT NOT NULL DEFAULT '{}'",
+                "confusion_matrix_json": "TEXT NOT NULL DEFAULT '[]'",
+                "feature_importance_json": "TEXT NOT NULL DEFAULT '[]'",
+                "training_summary_json": "TEXT NOT NULL DEFAULT '{}'",
+                "validation_summary_json": "TEXT NOT NULL DEFAULT '{}'",
+                "reliability_warnings_json": "TEXT NOT NULL DEFAULT '[]'",
+                "feature_schema_json": "TEXT NOT NULL DEFAULT '{}'",
+                "train_params_json": "TEXT NOT NULL DEFAULT '{}'",
+                "split_strategy_json": "TEXT NOT NULL DEFAULT '{}'",
+            }.items():
+                if column_name not in modeling_model_columns:
+                    conn.execute(f"ALTER TABLE modeling_models ADD COLUMN {column_name} {column_type}")
             metadata_template_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sample_library_metadata_templates)").fetchall()}
             if "config_json" not in metadata_template_columns:
                 conn.execute("ALTER TABLE sample_library_metadata_templates ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'")
@@ -445,8 +649,18 @@ class PortalStore:
                     INSERT INTO users (username, password_hash, role, display_name, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    ("admin", generate_password_hash("admin123"), "admin", "System Admin", now, now),
+                    ("admin", generate_password_hash(initial_admin_password), "admin", "System Admin", now, now),
                 )
+            elif rotate_weak_admin:
+                admin_hash = conn.execute(
+                    "SELECT password_hash FROM users WHERE username = ? AND role = 'admin'",
+                    ("admin",),
+                ).fetchone()
+                if admin_hash is not None and check_password_hash(admin_hash["password_hash"], "admin123"):
+                    conn.execute(
+                        "UPDATE users SET password_hash = ?, updated_at = ? WHERE username = ?",
+                        (generate_password_hash(initial_admin_password), utc_now_iso(), "admin"),
+                    )
             default_workspace_root = str(self.project_root)
             default_script = "Bac_assemble_260112_newformat.py"
             conn.execute(
@@ -656,6 +870,43 @@ class PortalStore:
                 (key, value, utc_now_iso()),
             )
 
+    def acquire_service_lease(self, name: str, owner_id: str, ttl_seconds: int) -> bool:
+        now = time.time()
+        expires_at = now + max(1, int(ttl_seconds))
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT owner_id, expires_at FROM service_leases WHERE name = ?", (name,)).fetchone()
+            if row is not None and row["owner_id"] != owner_id and float(row["expires_at"]) > now:
+                return False
+            conn.execute(
+                """
+                INSERT INTO service_leases (name, owner_id, expires_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    owner_id = excluded.owner_id,
+                    expires_at = excluded.expires_at,
+                    updated_at = excluded.updated_at
+                """,
+                (name, owner_id, expires_at, utc_now_iso()),
+            )
+        return True
+
+    def renew_service_lease(self, name: str, owner_id: str, ttl_seconds: int) -> bool:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE service_leases
+                SET expires_at = ?, updated_at = ?
+                WHERE name = ? AND owner_id = ?
+                """,
+                (time.time() + max(1, int(ttl_seconds)), utc_now_iso(), name, owner_id),
+            )
+        return cursor.rowcount == 1
+
+    def release_service_lease(self, name: str, owner_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM service_leases WHERE name = ? AND owner_id = ?", (name, owner_id))
+
     def record_audit_log(self, payload: dict[str, Any]) -> dict[str, Any]:
         now = payload.get("created_at") or utc_now_iso()
         event_id = str(payload.get("event_id") or f"audit-{now}-{hash(json.dumps(payload, ensure_ascii=False, sort_keys=True))}").strip()
@@ -750,6 +1001,25 @@ class PortalStore:
                 LIMIT ?
                 """,
                 (*params, capped_limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_audit_logs_for_target(self, target_type: str, target_id: str, *, limit: int = 5) -> list[dict[str, Any]]:
+        target_type = str(target_type or "").strip()
+        target_id = str(target_id or "").strip()
+        if not target_type or not target_id:
+            return []
+        capped_limit = max(1, min(int(limit or 5), 50))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {AUDIT_LOG_COLUMNS}
+                FROM audit_logs
+                WHERE target_type = ? AND target_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (target_type, target_id, capped_limit),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -1174,6 +1444,17 @@ class PortalStore:
                 (scope,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def count_sample_library_records_by_task_id(self, task_id: str) -> int:
+        task_id = str(task_id or "").strip()
+        if not task_id:
+            return 0
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM sample_library WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return int(row["count"] if row else 0)
 
     def list_sample_library_metadata_templates(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -1625,6 +1906,25 @@ class PortalStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_sample_library_version_logs_for_sample(self, sample_key: str, *, limit: int = 5) -> list[dict[str, Any]]:
+        sample_key = str(sample_key or "").strip()
+        if not sample_key:
+            return []
+        safe_limit = max(1, min(int(limit or 5), 50))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    {VERSION_LOG_COLUMNS}
+                FROM sample_library_version_logs
+                WHERE sample_key = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (sample_key, safe_limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def create_sample_library_version_log(self, payload: dict[str, Any]) -> dict[str, Any]:
         event_id = str(payload.get("event_id") or "").strip()
         if not event_id:
@@ -1750,6 +2050,193 @@ class PortalStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    def create_sample_modeling_run(self, record: dict[str, Any]) -> dict[str, Any]:
+        run_id = str(record.get("run_id") or "").strip()
+        if not run_id:
+            raise ValueError("run_id 不能为空")
+        payload = {
+            "run_id": run_id,
+            "run_type": str(record.get("run_type") or "baseline").strip() or "baseline",
+            "algorithm": str(record.get("algorithm") or "").strip(),
+            "label_field": str(record.get("label_field") or "").strip(),
+            "sample_count": int(record.get("sample_count") or 0),
+            "labeled_count": int(record.get("labeled_count") or 0),
+            "feature_columns_json": str(record.get("feature_columns_json") or "[]"),
+            "metrics_json": str(record.get("metrics_json") or "{}"),
+            "dataset_preview_json": str(record.get("dataset_preview_json") or "[]"),
+            "status": str(record.get("status") or "completed").strip() or "completed",
+            "message": str(record.get("message") or "").strip(),
+            "created_by": str(record.get("created_by") or "").strip(),
+            "created_at": str(record.get("created_at") or utc_now_iso()),
+        }
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO sample_modeling_runs (
+                    run_id, run_type, algorithm, label_field, sample_count, labeled_count, feature_columns_json,
+                    metrics_json, dataset_preview_json, status, message, created_by, created_at
+                )
+                VALUES (
+                    :run_id, :run_type, :algorithm, :label_field, :sample_count, :labeled_count, :feature_columns_json,
+                    :metrics_json, :dataset_preview_json, :status, :message, :created_by, :created_at
+                )
+                ON CONFLICT(run_id) DO UPDATE SET
+                    run_type=excluded.run_type,
+                    algorithm=excluded.algorithm,
+                    label_field=excluded.label_field,
+                    sample_count=excluded.sample_count,
+                    labeled_count=excluded.labeled_count,
+                    feature_columns_json=excluded.feature_columns_json,
+                    metrics_json=excluded.metrics_json,
+                    dataset_preview_json=excluded.dataset_preview_json,
+                    status=excluded.status,
+                    message=excluded.message,
+                    created_by=excluded.created_by,
+                    created_at=excluded.created_at
+                """,
+                payload,
+            )
+        return self.get_sample_modeling_run(run_id)
+
+    def get_sample_modeling_run(self, run_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT {SAMPLE_MODELING_RUN_COLUMNS}
+                FROM sample_modeling_runs
+                WHERE run_id = ?
+                """,
+                (str(run_id or "").strip(),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"建模运行不存在: {run_id}")
+        return dict(row)
+
+    def list_sample_modeling_runs(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit or 20), 100))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {SAMPLE_MODELING_RUN_COLUMNS}
+                FROM sample_modeling_runs
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def replace_sample_modeling_scores(self, run_id: str, scores: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            raise ValueError("run_id 不能为空")
+        rows: list[dict[str, Any]] = []
+        now = utc_now_iso()
+        for score in scores:
+            sample_key = str(score.get("sample_key") or "").strip()
+            if not sample_key:
+                continue
+            rows.append(
+                {
+                    "score_id": str(score.get("score_id") or f"score::{normalized_run_id}::{sample_key}").strip(),
+                    "run_id": normalized_run_id,
+                    "sample_key": sample_key,
+                    "sample_name": str(score.get("sample_name") or "").strip(),
+                    "risk_score": float(score.get("risk_score") or 0),
+                    "risk_level": str(score.get("risk_level") or "routine").strip() or "routine",
+                    "risk_label": str(score.get("risk_label") or "").strip(),
+                    "explanation_json": str(score.get("explanation_json") or "[]"),
+                    "feature_snapshot_json": str(score.get("feature_snapshot_json") or "{}"),
+                    "created_at": str(score.get("created_at") or now),
+                }
+            )
+        with self.connect() as conn:
+            conn.execute("DELETE FROM sample_modeling_scores WHERE run_id = ?", (normalized_run_id,))
+            conn.executemany(
+                """
+                INSERT INTO sample_modeling_scores (
+                    score_id, run_id, sample_key, sample_name, risk_score, risk_level, risk_label,
+                    explanation_json, feature_snapshot_json, created_at
+                )
+                VALUES (
+                    :score_id, :run_id, :sample_key, :sample_name, :risk_score, :risk_level, :risk_label,
+                    :explanation_json, :feature_snapshot_json, :created_at
+                )
+                ON CONFLICT(score_id) DO UPDATE SET
+                    run_id=excluded.run_id,
+                    sample_key=excluded.sample_key,
+                    sample_name=excluded.sample_name,
+                    risk_score=excluded.risk_score,
+                    risk_level=excluded.risk_level,
+                    risk_label=excluded.risk_label,
+                    explanation_json=excluded.explanation_json,
+                    feature_snapshot_json=excluded.feature_snapshot_json,
+                    created_at=excluded.created_at
+                """,
+                rows,
+            )
+        return self.list_sample_modeling_scores(run_id=normalized_run_id, limit=max(len(rows), 1))
+
+    def list_sample_modeling_scores(self, *, run_id: str = "", limit: int = 200) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit or 200), 1000))
+        params: list[Any] = []
+        where_clause = ""
+        if str(run_id or "").strip():
+            where_clause = "WHERE run_id = ?"
+            params.append(str(run_id or "").strip())
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {SAMPLE_MODELING_SCORE_COLUMNS}
+                FROM sample_modeling_scores
+                {where_clause}
+                ORDER BY created_at DESC, risk_score DESC, sample_name ASC
+                LIMIT ?
+                """,
+                (*params, safe_limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_latest_sample_modeling_score(self, sample_key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT {SAMPLE_MODELING_SCORE_COLUMNS}
+                FROM sample_modeling_scores
+                WHERE sample_key = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (str(sample_key or "").strip(),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def find_latest_sample_modeling_score_for_report(self, *, sample_name: str = "", report_dir: str = "") -> dict[str, Any] | None:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if str(sample_name or "").strip():
+            conditions.append("s.sample_name = ?")
+            params.append(str(sample_name or "").strip())
+        if str(report_dir or "").strip():
+            conditions.append("s.report_dir = ?")
+            params.append(str(report_dir or "").strip())
+        if not conditions:
+            return None
+        score_columns = ", ".join(f"m.{column.strip()}" for column in SAMPLE_MODELING_SCORE_COLUMNS.strip().split(","))
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT {score_columns}
+                FROM sample_modeling_scores m
+                JOIN sample_library s ON s.sample_key = m.sample_key
+                WHERE {' OR '.join(conditions)}
+                ORDER BY m.created_at DESC, m.id DESC
+                LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+        return dict(row) if row else None
 
     def _normalize_role(self, role: str) -> str:
         text = str(role or "").strip()
@@ -1910,3 +2397,214 @@ class PortalStore:
             if module not in active:
                 active.append(module)
         return active
+
+    def create_modeling_dataset(self, record: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO modeling_datasets (
+                    dataset_id, dataset_name, scope, filters_json, sample_ids_json,
+                    summary_json, created_by, created_at
+                )
+                VALUES (
+                    :dataset_id, :dataset_name, :scope, :filters_json, :sample_ids_json,
+                    :summary_json, :created_by, :created_at
+                )
+                """,
+                record,
+            )
+        return self.get_modeling_dataset(str(record.get("dataset_id") or ""))
+
+    def list_modeling_datasets(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {MODELING_DATASET_COLUMNS}
+                FROM modeling_datasets
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_modeling_dataset(self, dataset_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                f"SELECT {MODELING_DATASET_COLUMNS} FROM modeling_datasets WHERE dataset_id = ?",
+                (dataset_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"建模数据集不存在: {dataset_id}")
+        return dict(row)
+
+    def create_modeling_feature_set(self, record: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO modeling_feature_sets (
+                    feature_set_id, feature_set_name, version, feature_schema_json,
+                    created_by, created_at
+                )
+                VALUES (
+                    :feature_set_id, :feature_set_name, :version, :feature_schema_json,
+                    :created_by, :created_at
+                )
+                """,
+                record,
+            )
+        return self.get_modeling_feature_set(str(record.get("feature_set_id") or ""))
+
+    def list_modeling_feature_sets(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {MODELING_FEATURE_SET_COLUMNS}
+                FROM modeling_feature_sets
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_modeling_feature_set(self, feature_set_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                f"SELECT {MODELING_FEATURE_SET_COLUMNS} FROM modeling_feature_sets WHERE feature_set_id = ?",
+                (feature_set_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"特征方案不存在: {feature_set_id}")
+        return dict(row)
+
+    def upsert_modeling_train_job(self, record: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO modeling_train_jobs (
+                    job_id, model_id, status, logs_json, config_json, created_by, created_at, updated_at
+                )
+                VALUES (
+                    :job_id, :model_id, :status, :logs_json, :config_json, :created_by, :created_at, :updated_at
+                )
+                ON CONFLICT(job_id) DO UPDATE SET
+                    model_id=excluded.model_id,
+                    status=excluded.status,
+                    logs_json=excluded.logs_json,
+                    config_json=excluded.config_json,
+                    updated_at=excluded.updated_at
+                """,
+                record,
+            )
+        return self.get_modeling_train_job(str(record.get("job_id") or ""))
+
+    def get_modeling_train_job(self, job_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                f"SELECT {MODELING_TRAIN_JOB_COLUMNS} FROM modeling_train_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"训练任务不存在: {job_id}")
+        return dict(row)
+
+    def create_modeling_model(self, record: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO modeling_models (
+                    model_id, model_name, version, pathogen, target_type, target_name, algorithm,
+                    feature_set_id, feature_set_version, dataset_id, dataset_snapshot_json, config_json,
+                    metrics_json, class_metrics_json, confusion_matrix_json, feature_importance_json,
+                    training_summary_json, validation_summary_json, reliability_warnings_json,
+                    feature_schema_json, train_params_json, split_strategy_json,
+                    artifact_path, status, created_by, created_at, updated_at
+                )
+                VALUES (
+                    :model_id, :model_name, :version, :pathogen, :target_type, :target_name, :algorithm,
+                    :feature_set_id, :feature_set_version, :dataset_id, :dataset_snapshot_json, :config_json,
+                    :metrics_json, :class_metrics_json, :confusion_matrix_json, :feature_importance_json,
+                    :training_summary_json, :validation_summary_json, :reliability_warnings_json,
+                    :feature_schema_json, :train_params_json, :split_strategy_json,
+                    :artifact_path, :status, :created_by, :created_at, :updated_at
+                )
+                """,
+                record,
+            )
+        return self.get_modeling_model(str(record.get("model_id") or ""))
+
+    def list_modeling_models(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {MODELING_MODEL_COLUMNS}
+                FROM modeling_models
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_modeling_model(self, model_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                f"SELECT {MODELING_MODEL_COLUMNS} FROM modeling_models WHERE model_id = ?",
+                (model_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"模型不存在: {model_id}")
+        return dict(row)
+
+    def update_modeling_model_status(self, model_id: str, status: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE modeling_models SET status = ?, updated_at = ? WHERE model_id = ?",
+                (status, utc_now_iso(), model_id),
+            )
+        return self.get_modeling_model(model_id)
+
+    def delete_modeling_model(self, model_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM modeling_models WHERE model_id = ?", (model_id,))
+
+    def create_modeling_prediction(self, record: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO modeling_predictions (
+                    prediction_id, model_id, model_version, sample_ids_json,
+                    results_json, created_by, created_at
+                )
+                VALUES (
+                    :prediction_id, :model_id, :model_version, :sample_ids_json,
+                    :results_json, :created_by, :created_at
+                )
+                """,
+                record,
+            )
+        return self.get_modeling_prediction(str(record.get("prediction_id") or ""))
+
+    def list_modeling_predictions(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {MODELING_PREDICTION_COLUMNS}
+                FROM modeling_predictions
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_modeling_prediction(self, prediction_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                f"SELECT {MODELING_PREDICTION_COLUMNS} FROM modeling_predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"预测记录不存在: {prediction_id}")
+        return dict(row)

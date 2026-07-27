@@ -40,7 +40,7 @@
 python -m venv .venv_web
 ./.venv_web/bin/python -m pip install -U pip
 ./.venv_web/bin/python -m pip install -r requirements-web.txt
-./.venv_web/bin/python -m bac_analysis_portal.app
+PORTAL_MODE=development ./.venv_web/bin/python -m bac_analysis_portal.app
 ```
 
 启动后访问：
@@ -54,6 +54,25 @@ http://127.0.0.1:5055
 ```text
 admin / admin123
 ```
+
+`admin / admin123` 只允许用于 `development`、`demo` 和 `test` 模式。生产部署必须显式提供安全配置：
+
+```bash
+export PORTAL_MODE=production
+export PORTAL_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+export PORTAL_INITIAL_ADMIN_PASSWORD="请替换为强密码"
+export PORTAL_COOKIE_SECURE=1
+./.venv_web/bin/python -m bac_analysis_portal.app
+```
+
+支持的运行模式：
+
+- `production`：默认模式；强制要求安全密钥和初始管理员密码，启用安全 Cookie。
+- `development`：本地开发模式，允许演示管理员账号。
+- `demo`：只读客户演示入口使用的模式。
+- `test`：自动化测试模式。
+
+生产环境首次初始化使用 `PORTAL_INITIAL_ADMIN_PASSWORD` 创建管理员；如果已有 `admin` 仍使用演示密码，启动时会自动轮换为该密码。应用启动后应从进程环境中移除或通过部署平台安全管理这些变量。
 
 如果只是查看界面、任务创建逻辑、报告页和群落分析演示，这一步已经够了。提交真实测序数据前，请先完成下面的生信运行环境配置。
 
@@ -142,7 +161,60 @@ export META_MOBILEOG_META=/path/to/mobileOG-db-beatrix.csv
 ./.venv_web/bin/python -m pytest tests
 ```
 
+运行包含可选部署资产的集成测试：
+
+```bash
+./.venv_web/bin/python -m pytest tests -m optional_integration
+```
+
+默认测试套件不依赖本机 Conda 路径、真实生信工具链或可选 `genome_db` 源码包；缺失的可选资产会给出明确 skip 原因。GitHub Actions 会执行 Python 编译检查、Ruff 致命错误检查和默认测试套件。
+
 当前测试主要覆盖重构模块、流程分支、数据库导入预检查、病毒分型知识库和若干回归问题。外部生信工具链的端到端运行需要在配置完整数据库与 conda 环境后单独验证。
+
+## 部署
+
+推荐先阅读 `docs/easy-deployment-plan.md`。当前默认交付路线是：Portal 应用一键启动，Conda 运行环境独立安装，数据库和参考资产通过固定目录挂载。
+
+快速体检：
+
+```bash
+cp deployment/portal.env.example deployment/portal.env
+python3.10 -c 'import secrets; print(secrets.token_urlsafe(48))'
+python3.10 scripts/check_deployment.py --env-file deployment/portal.env
+```
+
+Docker Compose：
+
+```bash
+docker compose -f deployment/docker-compose.portal.yml --env-file deployment/portal.env up -d --build
+```
+
+完整离线包构建：
+
+```bash
+bash scripts/build_linux_full_bundle.sh \
+  --version 2026.06 \
+  --source-root /path/to/metagenomic \
+  --conda-root /opt/miniconda3 \
+  --database-root /data/pathogen-db \
+  --output /mnt/usb/pathogen-workbench-full-linux \
+  --archive
+```
+
+完整离线包安装：
+
+```bash
+cd /mnt/usb
+sudo bash pathogen-workbench-full-linux/install.sh --yes
+```
+
+Ubuntu systemd/nginx：
+
+```bash
+bash deploy_bac_analysis_portal_ubuntu.sh
+```
+
+生产部署前必须替换 `PORTAL_SECRET_KEY` 和 `PORTAL_INITIAL_ADMIN_PASSWORD`。不要把 `admin / admin123` 带进生产环境。
 
 ## 打包
 

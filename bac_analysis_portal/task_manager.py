@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from metagenomic_refactor.common import resolve_conda_env_name
 
+from .failure_diagnosis import build_failure_diagnosis
 from .task_analytics import read_task_analytics_snapshot
 
 ASM_METHOD_OPTIONS: dict[str, list[str]] = {
@@ -28,6 +29,7 @@ ASM_METHOD_OPTIONS: dict[str, list[str]] = {
 }
 
 ANALYSIS_TARGET_OPTIONS = {"bacteria", "virus"}
+MAX_TASK_THREADS = 256
 
 MONITOR_INPUT_EXTENSIONS = (
     ".fastq", ".fq", ".fastq.gz", ".fq.gz",
@@ -1425,7 +1427,7 @@ class AnalysisTaskManager:
             "task_name": task_name,
             "input_path": input_path,
             "output_dir": str(output_dir),
-            "thread": self._clean_int(payload.get("thread"), default=10, minimum=1),
+            "thread": self._clean_int(payload.get("thread"), default=10, minimum=1, maximum=MAX_TASK_THREADS),
             "species": self._clean_str(payload.get("species")) or "salmonella",
             "ref": self._resolve_optional_path(ref, "False") if ref else "False",
             "meta": self._resolve_optional_path(meta, "") if meta else "",
@@ -1476,7 +1478,7 @@ class AnalysisTaskManager:
             "analysis_target": "bacteria",
             "inputtype": "directory",
             "output_dir": str(output_dir),
-            "thread": self._clean_int(payload.get("thread"), default=8, minimum=1),
+            "thread": self._clean_int(payload.get("thread"), default=8, minimum=1, maximum=MAX_TASK_THREADS),
             "method": "community",
             "metadata": str(metadata_path),
             "taxonomy": str(taxonomy_path) if taxonomy_path else "",
@@ -1543,7 +1545,7 @@ class AnalysisTaskManager:
             "analysis_target": analysis_target,
             "inputtype": inputtype,
             "output_dir": str(output_dir),
-            "thread": self._clean_int(payload.get("thread"), default=10, minimum=1),
+            "thread": self._clean_int(payload.get("thread"), default=10, minimum=1, maximum=MAX_TASK_THREADS),
             "minlongfilt": self._clean_str(payload.get("minlongfilt")) or "500",
             "Qfilt": self._clean_str(payload.get("Qfilt")) or "10",
             "barcodekit": self._clean_str(payload.get("barcodekit")) or "none",
@@ -1729,6 +1731,8 @@ class AnalysisTaskManager:
             "log_path": task.get("log_path"),
             "pipeline_script": task.get("pipeline_script", ""),
             "conda_root": task.get("conda_root", ""),
+            "task_type": str(task.get("task_type") or ""),
+            "nextstrain_cli": str(task.get("nextstrain_cli") or ""),
             "is_demo": bool(task.get("is_demo")),
             "demo_type": str(task.get("demo_type") or ""),
             "progress": progress,
@@ -1739,6 +1743,7 @@ class AnalysisTaskManager:
             "trigger_context": task.get("trigger_context", {}),
             "auto_pathosource": task.get("auto_pathosource", {}),
             "analytics_snapshot": read_task_analytics_snapshot(task_dir),
+            "failure_diagnosis": build_failure_diagnosis(task, log_path),
         }
         if include_log:
             payload["log_tail"] = self._read_log_tail(log_path, log_lines)
@@ -2246,7 +2251,7 @@ class AnalysisTaskManager:
             raise ValidationError(f"{asm_type} 不支持组装方法 {text}，可选: {', '.join(options)}")
         return text
 
-    def _clean_int(self, value: Any, *, default: int, minimum: int) -> int:
+    def _clean_int(self, value: Any, *, default: int, minimum: int, maximum: int | None = None) -> int:
         if value in (None, ""):
             return default
         try:
@@ -2255,4 +2260,6 @@ class AnalysisTaskManager:
             raise ValidationError(f"整数参数格式错误: {value}") from exc
         if parsed < minimum:
             raise ValidationError(f"整数参数必须 >= {minimum}")
+        if maximum is not None and parsed > maximum:
+            raise ValidationError(f"整数参数必须 <= {maximum}")
         return parsed

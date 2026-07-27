@@ -7,6 +7,53 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+const CLOSURE_SYNC_STORAGE_KEY = "bac-closure-sync-event";
+
+function notifyPortalClosureSync(taskId, action, payload = {}) {
+  const normalizedTaskId = String(taskId || "").trim();
+  if (!normalizedTaskId || typeof window === "undefined" || !window.localStorage) return;
+  try {
+    window.localStorage.setItem(CLOSURE_SYNC_STORAGE_KEY, JSON.stringify({
+      id: `${Date.now()}-${Math.random()}`,
+      task_id: normalizedTaskId,
+      action,
+      ...payload,
+      at: new Date().toISOString(),
+    }));
+  } catch (error) {
+    console.warn("无法同步工作台闭环状态", error);
+  }
+}
+
+function showReportToast(message, kind = "success") {
+  const text = String(message || "").trim();
+  if (!text || typeof document === "undefined") return;
+  let node = document.getElementById("report-runtime-toast");
+  if (!node) {
+    node = document.createElement("div");
+    node.id = "report-runtime-toast";
+    node.style.position = "fixed";
+    node.style.right = "24px";
+    node.style.bottom = "24px";
+    node.style.zIndex = "9999";
+    node.style.maxWidth = "360px";
+    node.style.padding = "12px 14px";
+    node.style.borderRadius = "14px";
+    node.style.boxShadow = "0 18px 45px rgba(15, 23, 42, 0.18)";
+    node.style.fontSize = "14px";
+    node.style.lineHeight = "1.5";
+    node.style.color = "#0f172a";
+    document.body.appendChild(node);
+  }
+  node.textContent = text;
+  node.style.background = kind === "error" ? "#fee2e2" : "#dcfce7";
+  node.style.border = kind === "error" ? "1px solid #fecaca" : "1px solid #bbf7d0";
+  window.clearTimeout(showReportToast.timer);
+  showReportToast.timer = window.setTimeout(() => {
+    node.remove();
+  }, 4200);
+}
+
 function getTaskMethod(task) {
   return String(task?.params?.method || task?.method || "").trim();
 }
@@ -1754,6 +1801,8 @@ function buildCdcScene(data) {
           <strong>${escapeHtml(meta.transmissionRisk)}</strong>
         </div>
       </header>
+      ${renderWorkflowClosurePanel(data)}
+      ${renderExportChecklistPanel(data)}
       <section class="cdc-document-grid">
         <section>
           <h4>一、检测结果概述</h4>
@@ -2659,6 +2708,8 @@ function buildVirusCdcScene(data) {
           <strong>${escapeHtml(riskLabel)}</strong>
         </div>
       </header>
+      ${renderWorkflowClosurePanel(data)}
+      ${renderExportChecklistPanel(data)}
       <section class="cdc-document-grid">
         <section>
           <h4>一、检测结果概述</h4>
@@ -2682,6 +2733,246 @@ function buildVirusCdcScene(data) {
         </section>
       </section>
     </article>
+  `;
+}
+
+function renderWorkflowClosurePanel(data) {
+  const closure = data?.sections?.workflow_closure;
+  if (!closure || closure.status !== "ready") return "";
+  const evidence = Array.isArray(closure.evidence) ? closure.evidence : [];
+  const actions = Array.isArray(closure.actions) ? closure.actions : [];
+  const riskLevel = String(closure.risk_level || "待评估").trim() || "待评估";
+  const actionMarkup = actions.length
+    ? actions.map((item, index) => {
+        const priority = String(item?.priority || "recommended").trim();
+        const href = String(item?.href || "").trim();
+        const content = `
+          <div class="closure-action-index">${index + 1}</div>
+          <div class="closure-action-copy">
+            <strong>${escapeHtml(item?.label || "下一步动作")}</strong>
+            <span>${escapeHtml(item?.reason || "")}</span>
+          </div>
+          <span class="closure-action-priority">${priority === "required" ? "必做" : "建议"}</span>
+        `;
+        return href
+          ? `<a class="closure-action closure-action-${escapeHtml(priority)}" href="${escapeHtml(href)}">${content}</a>`
+          : `<div class="closure-action closure-action-${escapeHtml(priority)}">${content}</div>`;
+      }).join("")
+    : `<div class="empty-box"><p>暂无可推荐的闭环动作。</p></div>`;
+  return `
+    <section class="workflow-closure-panel risk-${escapeHtml(riskLevel)}">
+      <div class="workflow-closure-head">
+        <div>
+          <span class="workflow-closure-kicker">Closed-loop Workflow</span>
+          <h4>${escapeHtml(closure.title || "疾控处置闭环")}</h4>
+          <p>${escapeHtml(closure.summary || "")}</p>
+        </div>
+        <div class="workflow-closure-risk">
+          <span>处置优先级</span>
+          <strong>${escapeHtml(riskLevel)}</strong>
+        </div>
+      </div>
+      <div class="workflow-closure-reason">${escapeHtml(closure.risk_reason || "")}</div>
+      <div class="workflow-closure-evidence">
+        ${evidence.map((item) => `
+          <div class="closure-evidence-item">
+            <span>${escapeHtml(item?.label || "--")}</span>
+            <strong>${escapeHtml(item?.value || "--")}</strong>
+          </div>
+        `).join("")}
+      </div>
+      <div class="workflow-closure-actions">
+        ${actionMarkup}
+      </div>
+      ${closure.audit_hint ? `<p class="workflow-closure-audit">${escapeHtml(closure.audit_hint)}</p>` : ""}
+    </section>
+  `;
+}
+
+function renderAutoPathosourceTriggerPanel(data) {
+  const trigger = data?.auto_pathosource_trigger;
+  const target = document.getElementById("auto-pathosource-trigger-panel");
+  if (!target) return;
+  if (!trigger || typeof trigger !== "object") {
+    target.innerHTML = "";
+    return;
+  }
+  const status = String(trigger.status || "").trim() || "unknown";
+  const visibleStatuses = new Set(["disabled", "not_triggered", "would_trigger", "blocked", "failed", "created", "linked", "pending"]);
+  if (!visibleStatuses.has(status)) {
+    target.innerHTML = "";
+    return;
+  }
+  const statusMeta = {
+    disabled: { label: "未启用", tone: "muted" },
+    not_triggered: { label: "未触发", tone: "muted" },
+    would_trigger: { label: "建议触发", tone: "warn" },
+    blocked: { label: "触发受阻", tone: "warn" },
+    failed: { label: "创建失败", tone: "danger" },
+    created: { label: "已创建", tone: "success" },
+    linked: { label: "已关联", tone: "success" },
+    pending: { label: "创建中", tone: "warn" },
+  }[status] || { label: status, tone: "muted" };
+  const rules = trigger.rules && typeof trigger.rules === "object" ? trigger.rules : {};
+  const candidate = trigger.candidate && typeof trigger.candidate === "object" ? trigger.candidate : {};
+  const checks = Array.isArray(trigger.checks) ? trigger.checks : [];
+  const evaluatedCandidates = Array.isArray(trigger.evaluated_candidates) ? trigger.evaluated_candidates : [];
+  const childTask = trigger.child_task && typeof trigger.child_task === "object" ? trigger.child_task : {};
+  const metricItems = [
+    { label: "候选物种", value: candidate.species_name || trigger.trigger_species || "--" },
+    { label: "TaxID", value: candidate.taxid || trigger.trigger_taxid || "--" },
+    { label: "相对丰度", value: candidate.ratio == null ? "--" : `${candidate.ratio}%` },
+    { label: "支持 reads", value: candidate.reads == null ? "--" : candidate.reads },
+    { label: "覆盖度", value: trigger.coverage_percent == null ? (candidate.coverage_percent == null ? "--" : `${candidate.coverage_percent}%`) : `${trigger.coverage_percent}%` },
+    { label: "历史株", value: trigger.history_count == null ? "--" : trigger.history_count },
+  ];
+  const ruleItems = [
+    { label: "最小丰度", value: rules.min_abundance_percent == null ? "--" : `${rules.min_abundance_percent}%` },
+    { label: "最小 reads", value: rules.min_support_reads ?? "--" },
+    { label: "最小覆盖", value: rules.min_coverage_percent == null ? "--" : `${rules.min_coverage_percent}%` },
+    { label: "自动启动", value: rules.auto_start ? "开启" : "关闭" },
+  ];
+  const childTaskMarkup = childTask.id
+    ? `
+      <div class="auto-pathosource-child">
+        <div>
+          <span>PathoSource 子任务</span>
+          <strong>${escapeHtml(childTask.name || childTask.id)}</strong>
+          <small>${escapeHtml([childTask.status, childTask.output_dir].filter(Boolean).join(" · ") || "已写入任务队列")}</small>
+        </div>
+        <a href="/workstation?tab=queue&task=${encodeURIComponent(childTask.id)}" target="_blank" rel="noopener noreferrer">打开子任务</a>
+      </div>
+    `
+    : "";
+  const fileMarkup = [trigger.input_sheet, trigger.current_fasta, trigger.output_dir]
+    .filter(Boolean)
+    .map((item) => `<code>${escapeHtml(item)}</code>`)
+    .join("");
+  target.innerHTML = `
+    <article class="auto-pathosource-panel tone-${escapeHtml(statusMeta.tone)}">
+      <div class="auto-pathosource-head">
+        <div>
+          <span class="workflow-closure-kicker">Auto PathoSource</span>
+          <h3>宏基因组自动溯源触发判定</h3>
+          <p>${escapeHtml(trigger.reason || "当前没有触发说明。")}</p>
+        </div>
+        <strong class="auto-pathosource-status">${escapeHtml(statusMeta.label)}</strong>
+      </div>
+      <div class="auto-pathosource-grid">
+        ${metricItems.map((item) => `
+          <div>
+            <span>${escapeHtml(item.label)}</span>
+            <strong>${escapeHtml(item.value)}</strong>
+          </div>
+        `).join("")}
+      </div>
+      <div class="auto-pathosource-rules">
+        ${ruleItems.map((item) => `<span>${escapeHtml(item.label)}：<strong>${escapeHtml(item.value)}</strong></span>`).join("")}
+      </div>
+      ${checks.length ? `
+        <div class="auto-pathosource-checks">
+          ${checks.map((item) => `
+            <div class="auto-pathosource-check is-${escapeHtml(item?.status || "unknown")}">
+              <span>${escapeHtml(item?.label || "--")}</span>
+              <strong>${escapeHtml(item?.status === "passed" ? "通过" : item?.status === "failed" ? "未通过" : "提示")}</strong>
+              <p>${escapeHtml(item?.detail || "")}</p>
+              ${item?.value || item?.threshold ? `<small>${escapeHtml([item?.value ? `实际 ${item.value}` : "", item?.threshold ? `阈值 ${item.threshold}` : ""].filter(Boolean).join(" · "))}</small>` : ""}
+            </div>
+          `).join("")}
+        </div>
+      ` : ""}
+      ${evaluatedCandidates.length ? `
+        <details class="auto-pathosource-candidates">
+          <summary>查看候选物种判定</summary>
+          <div>
+            ${evaluatedCandidates.map((item) => `
+              <span class="auto-pathosource-candidate ${item?.decision === "selected" ? "is-selected" : ""}">
+                ${escapeHtml(item?.species_name || "--")} · ${escapeHtml(item?.ratio == null ? "--" : `${item.ratio}%`)} · ${escapeHtml(item?.reads == null ? "--" : `${item.reads} reads`)} · ${escapeHtml(item?.reason || "")}
+              </span>
+            `).join("")}
+          </div>
+        </details>
+      ` : ""}
+      ${childTaskMarkup}
+      ${fileMarkup ? `<div class="auto-pathosource-files">${fileMarkup}</div>` : ""}
+    </article>
+  `;
+}
+
+function renderExportChecklistPanel(data) {
+  const checklist = data?.sections?.export_checklist;
+  if (!checklist || checklist.status !== "ready") return "";
+  const items = Array.isArray(checklist.items) ? checklist.items : [];
+  const stateLabel = {
+    ready: "已具备",
+    manual: "待人工确认",
+    attention: "需重点确认",
+  };
+  return `
+    <section class="export-checklist-panel readiness-${escapeHtml(checklist.readiness || "ready")}">
+      <div class="export-checklist-head">
+        <div>
+          <span class="workflow-closure-kicker">Pre-export Review</span>
+          <h4>${escapeHtml(checklist.title || "导出前复核清单")}</h4>
+          <p>${escapeHtml(checklist.summary || "")}</p>
+        </div>
+        <div class="export-checklist-readiness">
+          <span>导出准备</span>
+          <strong>${Number(checklist.blocking_count || 0) ? `${Number(checklist.blocking_count || 0)} 项待确认` : "可导出"}</strong>
+        </div>
+      </div>
+      <div class="export-checklist-items">
+        ${items.map((item) => {
+          const state = String(item?.state || "manual").trim();
+          return `
+            <article class="export-checklist-item state-${escapeHtml(state)}">
+              <div class="export-checklist-mark">${state === "ready" ? "✓" : "!"}</div>
+              <div>
+                <strong>${escapeHtml(item?.label || "复核项目")}</strong>
+                <span>${escapeHtml(item?.detail || "")}</span>
+              </div>
+              <em>${escapeHtml(stateLabel[state] || "待确认")}</em>
+            </article>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function confirmReportExportReadiness() {
+  const checklist = currentReportData?.sections?.export_checklist;
+  const items = Array.isArray(checklist?.items) ? checklist.items : [];
+  const blockingItems = items.filter((item) => item?.required && ["manual", "attention"].includes(String(item?.state || "")));
+  if (!blockingItems.length) return true;
+  const labels = blockingItems.map((item) => `- ${item.label || "复核项目"}`).join("\n");
+  return window.confirm(`导出前仍有 ${blockingItems.length} 项需要人工确认：\n${labels}\n\n确认已线下复核并继续导出？`);
+}
+
+function buildReportExportChecklistSummaryMarkup(data) {
+  const checklist = data?.sections?.export_checklist;
+  if (!checklist || checklist.status !== "ready") return "";
+  const items = Array.isArray(checklist.items) ? checklist.items : [];
+  const blockingItems = items.filter((item) => item?.required && ["manual", "attention"].includes(String(item?.state || "")));
+  const readyItems = items.filter((item) => String(item?.state || "") === "ready");
+  return `
+    <section class="report-document-review-summary">
+      <div class="report-document-review-head">
+        <span>归档复核摘要</span>
+        <strong>${blockingItems.length ? `${blockingItems.length} 项需人工确认` : "复核清单已具备"}</strong>
+      </div>
+      <p>${escapeHtml(checklist.summary || "导出前复核清单已随归档副本保存。")}</p>
+      <dl class="report-document-review-meta">
+        <div><dt>复核项目</dt><dd>${escapeHtml(String(items.length))}</dd></div>
+        <div><dt>已具备</dt><dd>${escapeHtml(String(readyItems.length))}</dd></div>
+        <div><dt>待确认</dt><dd>${escapeHtml(String(blockingItems.length))}</dd></div>
+      </dl>
+      ${blockingItems.length ? `
+        <ul class="report-document-review-list">
+          ${blockingItems.map((item) => `<li>${escapeHtml(item?.label || "复核项目")}</li>`).join("")}
+        </ul>
+      ` : ""}
+    </section>
   `;
 }
 
@@ -3315,6 +3606,7 @@ function updateReportScenarioLayout(data) {
   } else {
     const navPairs = [
       ["#section-overview", 'a[href="#section-overview"]'],
+      ["#section-modeling-risk", 'a[href="#section-modeling-risk"]'],
       ["#section-raw-qc", '[data-nav-section="section-raw-qc"]'],
       ["#section-species", '[data-nav-section="section-species"]'],
       ["#section-assembly", '[data-nav-section="section-assembly"]'],
@@ -5109,6 +5401,7 @@ async function buildReportExportHtml(printMode = false, interactiveMode = false)
         <div><dt>导出时间</dt><dd>${escapeHtml(exportedAt)}</dd></div>
         <div><dt>导出形式</dt><dd>${printMode ? "PDF打印" : interactiveMode ? "HTML交互文档" : "Word归档文档"}</dd></div>
       </dl>
+      ${buildReportExportChecklistSummaryMarkup(currentReportData)}
     `;
     shell.insertBefore(masthead, shell.querySelector(".report-layout"));
   }
@@ -5141,22 +5434,47 @@ ${clone.outerHTML}`;
 }
 
 async function exportReportPage(format) {
+  if (!confirmReportExportReadiness()) return;
   const shell = document.querySelector(".report-shell");
   const baseName = slugifyFilename(shell?.dataset.taskName || "analysis_report");
   if (format === "pdf") {
+    const exportWindow = window.open("about:blank", "_blank");
+    if (!exportWindow) throw new Error("浏览器阻止了 PDF 导出窗口，未记录归档");
     const html = await buildReportExportHtml(true, false);
+    const exportRecord = await recordReportExport(format);
     const blob = new Blob([html], { type: "text/html;charset=utf-8" });
     const url = URL.createObjectURL(blob);
-    window.open(url, "_blank");
+    exportWindow.location.href = url;
     window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+    showReportToast(exportRecord.message || "正式报告导出已留痕");
     return;
   }
   const html = await buildReportExportHtml(false, format === "html");
   if (format === "word") {
+    const exportRecord = await recordReportExport(format);
     downloadBlob(new Blob([html], { type: "application/msword;charset=utf-8" }), `${baseName}.doc`);
+    showReportToast(exportRecord.message || "正式报告导出已留痕");
     return;
   }
+  const exportRecord = await recordReportExport(format);
   downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), `${baseName}.html`);
+  showReportToast(exportRecord.message || "正式报告导出已留痕");
+}
+
+async function recordReportExport(format) {
+  const taskId = String(currentReportData?.task?.id || "").trim();
+  if (!taskId) throw new Error("无法识别任务编号，未记录归档");
+  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/report-exports`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ format }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || payload.message || "报告已导出，但归档留痕失败");
+  }
+  notifyPortalClosureSync(taskId, "archive_export", { format });
+  return payload;
 }
 
 function normalizeInteractiveTableRows(columns, rows) {
@@ -5697,6 +6015,51 @@ function buildTableCard(containerId, title, columns, rows) {
   bindTableExportButtons(container, title, columns, rows.map((row) => (
     Array.isArray(row) ? row : columns.map((column) => row[column] ?? "")
   )));
+}
+
+function renderModelingRiskSection(section) {
+  const panel = document.getElementById("modeling-risk-panel");
+  const wrapper = document.getElementById("section-modeling-risk");
+  if (!panel || !wrapper) return;
+  const status = String(section?.status || "empty");
+  if (status !== "ready") {
+    panel.innerHTML = `
+      <div class="empty-box">
+        <p>${escapeHtml(section?.summary || "当前报告尚未匹配到样本库建模结果。")}</p>
+      </div>
+    `;
+    return;
+  }
+  const score = Number(section?.risk_score);
+  const scoreText = Number.isFinite(score) ? score.toFixed(1) : "--";
+  const items = Array.isArray(section?.items) ? section.items : [];
+  const level = String(section?.risk_level || "routine");
+  const versionLine = [
+    section?.model_version ? `模型版本 ${section.model_version}` : "",
+    section?.algorithm ? `算法 ${section.algorithm}` : "",
+    section?.model_sample_count ? `训练样本 ${section.model_sample_count} 份` : "",
+    section?.model_labeled_count ? `人工标签 ${section.model_labeled_count} 份` : "",
+  ].filter(Boolean).join(" · ");
+  panel.dataset.modelingRiskLevel = level;
+  panel.innerHTML = `
+    <div class="card-head">
+      <div class="card-title-stack">
+        <span class="section-chip">样本库基线</span>
+        <h3>${escapeHtml(section?.headline || "样本库建模评分")}</h3>
+      </div>
+      <span class="card-tag">${escapeHtml(section?.risk_label || "辅助解释")}</span>
+    </div>
+    <div class="modeling-risk-score">
+      <strong>${escapeHtml(scoreText)}</strong>
+      <span>风险分值</span>
+    </div>
+    <p class="empty-copy">${escapeHtml(section?.summary || "基于当前样本库基线模型生成，仅作为复核优先级和解释辅助。")}</p>
+    ${versionLine ? `<p class="empty-copy">${escapeHtml(versionLine)}</p>` : ""}
+    <ul class="modeling-risk-list">
+      ${items.length ? items.map((item) => `<li>${escapeHtml(item)}</li>`).join("") : "<li>当前评分未提供额外解释因素。</li>"}
+    </ul>
+    <p class="modeling-risk-disclaimer">${escapeHtml(section?.disclaimer || "本评分仅用于复核优先级排序和解释辅助，不作为临床诊断依据。")}</p>
+  `;
 }
 
 function renderSerotypeSection(section) {
@@ -7765,7 +8128,7 @@ function applySarsCov2ReportChrome(data) {
   const sampleTitleNode = document.getElementById("report-sample-title");
   const sampleCopyNode = document.getElementById("report-sample-copy");
   const sampleName = task.sample_display_name || task.sample_name || data?.sections?.serotype?.sequence_name || task.name || task.id || "SARS-CoV-2";
-  if (backNode) backNode.textContent = "返回任务";
+  if (backNode && !backNode.dataset.backLabel) backNode.textContent = "返回任务";
   if (kickerNode) kickerNode.textContent = "SARS-CoV-2 Report";
   if (titleNode) titleNode.textContent = "新型冠状病毒分型报告";
   if (subtitleNode) {
@@ -7855,7 +8218,7 @@ function applyMonkeypoxReportChrome(data) {
   const sampleTitleNode = document.getElementById("report-sample-title");
   const sampleCopyNode = document.getElementById("report-sample-copy");
   const sampleName = task.sample_display_name || task.sample_name || data?.sections?.serotype?.sequence_name || task.name || task.id || "hMPXV";
-  if (backNode) backNode.textContent = "返回任务";
+  if (backNode && !backNode.dataset.backLabel) backNode.textContent = "返回任务";
   if (kickerNode) kickerNode.textContent = "Monkeypox Report";
   if (titleNode) titleNode.textContent = "猴痘分型报告";
   if (subtitleNode) {
@@ -7908,7 +8271,7 @@ function applyRsvReportChrome(data) {
   const virusShort = isHiv ? "HIV" : (isRotavirus ? "RotaV" : (isNorovirus ? "NoV" : (isEnterovirus ? "EV" : (isHepatovirus ? (hepatovirusBroad || "HepV") : (isBandavirus ? "BandV" : (isOrthohantavirus ? "HTNV" : (isEbola ? "EBOV" : (isAstroviridae ? "AstV" : (isRhinovirus ? "HRV" : (isSeasonalHcov ? "HCoV" : (isChikv ? "CHIKV" : (isZikav ? "ZIKV" : (isDenv ? "DENV" : (isHmpv ? "HMPV" : (isHpiv ? "HPIV" : (isHadv ? "HAdV" : "RSV"))))))))))))))));
   const virusLabel = isHiv ? "HIV" : (isRotavirus ? "轮状病毒" : (isNorovirus ? "诺如病毒" : (isEnterovirus ? "肠道病毒" : (isHepatovirus ? hepatovirusLabel : (isBandavirus ? "班达病毒" : (isOrthohantavirus ? "汉坦病毒" : (isEbola ? "埃博拉病毒" : (isAstroviridae ? "星状病毒" : (isRhinovirus ? "鼻病毒" : (isSeasonalHcov ? "季节性冠状病毒" : (isChikv ? "基孔肯雅病毒" : (isZikav ? "寨卡病毒" : (isDenv ? "登革热病毒" : (isHmpv ? "人偏肺病毒" : (isHpiv ? "人副流感病毒" : (isHadv ? "人腺病毒" : "RSV"))))))))))))))));
   const sampleName = task.sample_display_name || task.sample_name || data?.sections?.serotype?.sequence_name || task.name || task.id || virusShort;
-  if (backNode) backNode.textContent = "返回任务";
+  if (backNode && !backNode.dataset.backLabel) backNode.textContent = "返回任务";
   if (kickerNode) kickerNode.textContent = `${virusShort} Report`;
   if (titleNode) titleNode.textContent = `${virusLabel}分型报告`;
   if (subtitleNode) {
@@ -8290,7 +8653,7 @@ function applyInfluenzaReportChrome(data) {
   const sampleTitleNode = document.getElementById("report-sample-title");
   const sampleCopyNode = document.getElementById("report-sample-copy");
   const sampleName = task.sample_display_name || task.sample_name || task.name || task.id || "Influenza";
-  if (backNode) backNode.textContent = "返回任务";
+  if (backNode && !backNode.dataset.backLabel) backNode.textContent = "返回任务";
   if (kickerNode) kickerNode.textContent = "Influenza Report";
   if (titleNode) titleNode.textContent = "流感分型报告";
   if (subtitleNode) {
@@ -8456,8 +8819,15 @@ function renderSampleSwitcher(task) {
   const explicitSample = new URLSearchParams(window.location.search).get("sample") || "";
   const isBatchLanding = String(task?.report_mode || "").trim() === "multi" && !explicitSample;
   const currentSample = explicitSample || task.sample_display_name || task.sample_name || "";
-  const sampleUrl = (sample) => `${window.location.pathname}?sample=${encodeURIComponent(sample)}`;
-  const batchUrl = () => window.location.pathname;
+  const taskId = String(currentReportData?.task?.id || task?.id || "").trim();
+  const sampleUrl = (sample) => {
+    const params = new URLSearchParams();
+    params.set("sample", sample);
+    params.set("return_to", "batch");
+    if (taskId) params.set("task", taskId);
+    return `${window.location.pathname}?${params.toString()}`;
+  };
+  const batchUrl = () => `${window.location.pathname}${taskId ? `?return_to=queue&task=${encodeURIComponent(taskId)}` : ""}`;
   const buildSampleOptions = () => samples.map((sample) => `
     <option value="${escapeHtml(sample)}"${sample === currentSample ? " selected" : ""}>${escapeHtml(sample)}</option>
   `).join("");
@@ -8543,6 +8913,16 @@ function isMultiSampleLanding(data) {
   return String(task.report_mode || "").trim() === "multi" && samples.length > 1 && !explicitSample;
 }
 
+function buildMultiSampleDetailUrl(sample) {
+  const sampleName = String(sample || "").trim();
+  const taskId = String(currentReportData?.task?.id || "").trim();
+  const params = new URLSearchParams();
+  if (sampleName) params.set("sample", sampleName);
+  params.set("return_to", "batch");
+  if (taskId) params.set("task", taskId);
+  return `${window.location.pathname}?${params.toString()}`;
+}
+
 function renderMultiSampleOverview(data) {
   const container = document.getElementById("multi-sample-overview");
   const metrics = document.getElementById("overview-metrics");
@@ -8583,7 +8963,7 @@ function renderMultiSampleOverview(data) {
     const key = String(column.key || "");
     const value = row?.[key];
     if (key === "sample") {
-      return `<a class="multi-sample-link" href="${window.location.pathname}?sample=${encodeURIComponent(String(row.sample || ""))}">${escapeHtml(row.sample || "-")}</a>`;
+      return `<a class="multi-sample-link" href="${buildMultiSampleDetailUrl(row?.sample)}">${escapeHtml(row.sample || "-")}</a>`;
     }
     if (key === "note") {
       return `<span class="multi-sample-note" title="${escapeHtml(value || "")}">${escapeHtml(value || "-")}</span>`;
@@ -8593,7 +8973,7 @@ function renderMultiSampleOverview(data) {
     }
     return escapeHtml(value == null || value === "" ? "-" : value);
   };
-  const sampleUrl = (row) => `${window.location.pathname}?sample=${encodeURIComponent(String(row?.sample || ""))}`;
+  const sampleUrl = (row) => buildMultiSampleDetailUrl(row?.sample);
   container.classList.remove("hidden");
   if (metrics) metrics.classList.add("hidden");
   container.innerHTML = `
@@ -17861,6 +18241,36 @@ function scheduleCommunitySectionRender(sectionId, renderFn) {
   observer.observe(section);
 }
 
+function renderReportLoadError(error) {
+  const content = document.querySelector(".report-content");
+  if (!(content instanceof HTMLElement)) return;
+  const message = String(error?.message || "结果数据加载失败").trim();
+  content.innerHTML = `
+    <section class="report-section">
+      <div class="section-heading">
+        <p class="report-kicker">Report Status</p>
+        <h2>报告数据暂未就绪</h2>
+        <p>任务页面已经打开，但后端还没有返回可渲染的结果数据。</p>
+      </div>
+      <article class="result-card">
+        <div class="card-head">
+          <h3>当前状态</h3>
+          <span class="card-tag">等待结果</span>
+        </div>
+        <div class="empty-box">
+          <p>${escapeHtml(message)}</p>
+          <p>如果任务仍在 RUNNING，这是正常的中间状态；等样本目录出现 summary.tsv、fastp JSON、Nextclade 或组装结果后刷新页面即可看到报告。</p>
+        </div>
+      </article>
+    </section>
+  `;
+  document.querySelectorAll(".report-nav-group").forEach((node, index) => {
+    if (node instanceof HTMLElement) node.classList.toggle("hidden", index > 0);
+  });
+  const currentSection = document.getElementById("report-current-section");
+  if (currentSection) currentSection.textContent = "当前位置：报告数据暂未就绪";
+}
+
 async function loadReport() {
   const shell = document.querySelector(".report-shell");
   if (!shell) return;
@@ -17946,6 +18356,8 @@ async function loadReport() {
   applyInfluenzaReportChrome(data);
   bindReportSceneSwitcher(data);
   document.getElementById("overview-metrics").innerHTML = buildMetricCards(data.overview_metrics || []);
+  renderModelingRiskSection(data.sections?.modeling_risk || {});
+  renderAutoPathosourceTriggerPanel(data);
   renderRawQc(data.sections || {});
   renderTaxonomyRiskSummary(data.sections?.species_identification?.risk_summary || {});
   renderTaxonomyInterpretation(data.sections?.species_identification?.interpretation || {});
@@ -18273,6 +18685,7 @@ document.addEventListener("DOMContentLoaded", () => {
         await exportReportPage(button.dataset.reportExportFormat || "html");
       } catch (error) {
         console.error(error);
+        window.alert(error?.message || "报告导出或归档留痕失败");
       }
     });
   });
@@ -18281,5 +18694,6 @@ document.addEventListener("DOMContentLoaded", () => {
   initializeTopbarAutoHide();
   loadReport().catch((error) => {
     console.error(error);
+    renderReportLoadError(error);
   });
 });

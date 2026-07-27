@@ -1,0 +1,515 @@
+    <div id="create-user-modal" class="browser-modal hidden" aria-hidden="true">
+      <div id="create-user-backdrop" class="browser-backdrop"></div>
+      <section class="browser-panel create-user-panel" role="dialog" aria-modal="true" aria-labelledby="create-user-title">
+        <div class="panel-head">
+          <div>
+            <p class="section-kicker">User</p>
+            <h2 id="create-user-title">添加用户</h2>
+            <p class="field-note">在这里创建新的门户账户，并指定角色与用户组。</p>
+          </div>
+          <button id="close-create-user-modal" class="ghost-button" type="button">关闭</button>
+        </div>
+        <form id="user-form" class="admin-form">
+          <section class="admin-form-cluster wide">
+            <div class="admin-form-cluster-head">
+              <div>
+                <strong>账户身份</strong>
+                <p class="field-note">先定义这个账号是谁，再决定他可以操作什么。</p>
+              </div>
+              <span class="admin-form-cluster-kicker">Identity</span>
+            </div>
+            <div class="admin-form-grid">
+              <label>
+                <span>用户名</span>
+                <input id="new_username" required>
+              </label>
+              <label>
+                <span>显示名</span>
+                <input id="new_display_name">
+              </label>
+              <label>
+                <span>用户组</span>
+                <input id="new_group_name" placeholder="例如：microbiology_lab">
+              </label>
+              <label>
+                <span>密码</span>
+                <input id="new_password" type="password" required>
+              </label>
+              <label>
+                <span>有效截止时间</span>
+                <input id="new_account_expires_at" type="datetime-local">
+              </label>
+              <label class="wide">
+                <span>角色</span>
+                <select id="new_role">
+                  <option value="user">普通用户</option>
+                  <option value="group_admin">group 管理</option>
+                  <option value="admin">管理员</option>
+                </select>
+              </label>
+            </div>
+          </section>
+          <section class="admin-form-cluster wide">
+            <div class="admin-form-cluster-head">
+              <div>
+                <strong>分析模块授权</strong>
+                <p class="field-note">权限不是备注，它决定用户登录后能进入哪些工作流。</p>
+              </div>
+              <span class="admin-form-cluster-kicker">Access</span>
+            </div>
+            <div id="new-permission-summary" class="permission-summary" aria-live="polite">
+              <strong>已开通 1 个模块</strong>
+              <span>普通用户至少需要一个可用分析模块。</span>
+            </div>
+            <div class="permission-card-grid" data-permission-scope="create">
+              <div class="permission-card" data-module-card="bacteria">
+                <input id="new_allowed_module_bacteria" type="checkbox" checked data-module-checkbox="bacteria" data-permission-scope="create">
+                <span class="permission-card-surface">
+                  <strong>细菌分析</strong>
+                  <small>组装、物种鉴定、耐药毒力、MLST 与血清型等常规流程。</small>
+                  <em>适合日常单菌样本主线分析</em>
+                  <span class="permission-expiry-field">
+                    <span class="permission-expiry-control">
+                      <span>模块截止时间</span>
+                      <input id="new_module_expiry_bacteria" type="datetime-local" data-module-expiry="bacteria" data-permission-scope="create">
+                    </span>
+                  </span>
+                </span>
+              </div>
+              <div class="permission-card" data-module-card="virus">
+                <input id="new_allowed_module_virus" type="checkbox" data-module-checkbox="virus" data-permission-scope="create">
+                <span class="permission-card-surface">
+                  <strong>病毒分析</strong>
+                  <small>参考驱动分析、病毒鉴定与病毒分型工作流。</small>
+                  <em>适合病毒目标分析与定向判读</em>
+                  <span class="permission-expiry-field">
+                    <span class="permission-expiry-control">
+                      <span>模块截止时间</span>
+                      <input id="new_module_expiry_virus" type="datetime-local" data-module-expiry="virus" data-permission-scope="create">
+                    </span>
+                  </span>
+                  <span class="permission-expiry-field">
+                    <span class="permission-expiry-control">
+                      <span>可用病毒</span>
+                      <span class="virus-access-panel" data-virus-permission-scope="create">
+                        <span class="virus-access-head">
+                          <span class="virus-access-copy">
+                            <strong>按分组批量授权</strong>
+                            <small>先选场景，再微调单病毒，减少重复点选。</small>
+                          </span>
+                          <span class="virus-access-actions">
+                            <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="__all__" data-virus-permission-scope="create">全部选择</button>
+                            <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="__all__" data-virus-permission-scope="create">全部清空</button>
+                          </span>
+                        </span>
+                        <span class="virus-access-groups">
+                          <span class="virus-access-group" data-virus-group-panel="respiratory" data-virus-permission-scope="create">
+                            <span class="virus-access-group-head">
+                              <span>
+                                <strong>呼吸道病毒</strong>
+                                <small>面向呼吸道监测和常规呼吸病原判读。</small>
+                              </span>
+                              <span class="virus-access-group-tools">
+                                <strong data-virus-group-count>0 / 8</strong>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="respiratory" data-virus-permission-scope="create">整组选择</button>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="respiratory" data-virus-permission-scope="create">整组清空</button>
+                              </span>
+                            </span>
+                            <span class="virus-access-chip-grid">
+                              <label class="virus-access-chip"><input id="new_allowed_virus_ncov" type="checkbox" data-virus-checkbox="ncov" data-virus-group="respiratory" data-virus-permission-scope="create"><span>新冠</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_flu" type="checkbox" data-virus-checkbox="flu" data-virus-group="respiratory" data-virus-permission-scope="create"><span>流感</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_rsv" type="checkbox" data-virus-checkbox="rsv" data-virus-group="respiratory" data-virus-permission-scope="create"><span>合胞病毒</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_hmpv" type="checkbox" data-virus-checkbox="hmpv" data-virus-group="respiratory" data-virus-permission-scope="create"><span>偏肺病毒</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_hpiv" type="checkbox" data-virus-checkbox="hpiv" data-virus-group="respiratory" data-virus-permission-scope="create"><span>副流感病毒</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_hadv" type="checkbox" data-virus-checkbox="hadv" data-virus-group="respiratory" data-virus-permission-scope="create"><span>腺病毒</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_rhinovirus" type="checkbox" data-virus-checkbox="rhinovirus" data-virus-group="respiratory" data-virus-permission-scope="create"><span>鼻病毒</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_seasonal_hcov" type="checkbox" data-virus-checkbox="seasonal_hcov" data-virus-group="respiratory" data-virus-permission-scope="create"><span>季节性冠状病毒</span></label>
+                            </span>
+                          </span>
+                          <span class="virus-access-group" data-virus-group-panel="enteric" data-virus-permission-scope="create">
+                            <span class="virus-access-group-head">
+                              <span>
+                                <strong>肠道病毒</strong>
+                                <small>适合腹泻、肠道感染和粪便病原场景。</small>
+                              </span>
+                              <span class="virus-access-group-tools">
+                                <strong data-virus-group-count>0 / 6</strong>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="enteric" data-virus-permission-scope="create">整组选择</button>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="enteric" data-virus-permission-scope="create">整组清空</button>
+                              </span>
+                            </span>
+                            <span class="virus-access-chip-grid">
+                              <label class="virus-access-chip"><input id="new_allowed_virus_norovirus" type="checkbox" data-virus-checkbox="norovirus" data-virus-group="enteric" data-virus-permission-scope="create"><span>诺如病毒</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_rotavirus" type="checkbox" data-virus-checkbox="rotavirus" data-virus-group="enteric" data-virus-permission-scope="create"><span>轮状病毒</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_astroviridae" type="checkbox" data-virus-checkbox="astroviridae" data-virus-group="enteric" data-virus-permission-scope="create"><span>星状病毒</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_enterovirus" type="checkbox" data-virus-checkbox="enterovirus" data-virus-group="enteric" data-virus-permission-scope="create"><span>肠道病毒</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_hepatovirus" type="checkbox" data-virus-checkbox="hepatovirus" data-virus-group="enteric" data-virus-permission-scope="create"><span>肝炎病毒</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_sapovirus" type="checkbox" data-virus-checkbox="sapovirus" data-virus-group="enteric" data-virus-permission-scope="create"><span>札如病毒</span></label>
+                            </span>
+                          </span>
+                          <span class="virus-access-group" data-virus-group-panel="vector" data-virus-permission-scope="create">
+                            <span class="virus-access-group-head">
+                              <span>
+                                <strong>虫媒与发热相关</strong>
+                                <small>用于登革热、寨卡及发热伴血小板减少综合征场景。</small>
+                              </span>
+                              <span class="virus-access-group-tools">
+                                <strong data-virus-group-count>0 / 3</strong>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="vector" data-virus-permission-scope="create">整组选择</button>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="vector" data-virus-permission-scope="create">整组清空</button>
+                              </span>
+                            </span>
+                            <span class="virus-access-chip-grid">
+                              <label class="virus-access-chip"><input id="new_allowed_virus_denv" type="checkbox" data-virus-checkbox="denv" data-virus-group="vector" data-virus-permission-scope="create"><span>登革热病毒</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_zikav" type="checkbox" data-virus-checkbox="zikav" data-virus-group="vector" data-virus-permission-scope="create"><span>寨卡病毒</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_chikv" type="checkbox" data-virus-checkbox="chikv" data-virus-group="vector" data-virus-permission-scope="create"><span>基孔肯雅病毒</span></label>
+                              <label class="virus-access-chip"><input id="new_allowed_virus_bandavirus" type="checkbox" data-virus-checkbox="bandavirus" data-virus-group="vector" data-virus-permission-scope="create"><span>班达病毒</span></label>
+                            </span>
+                          </span>
+                          <span class="virus-access-group" data-virus-group-panel="contact" data-virus-permission-scope="create">
+                            <span class="virus-access-group-head">
+                              <span>
+                                <strong>接触传播与其他</strong>
+                                <small>保留较少见但需要单独授权的病毒类型。</small>
+                              </span>
+                              <span class="virus-access-group-tools">
+                                <strong data-virus-group-count>0 / 1</strong>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="contact" data-virus-permission-scope="create">整组选择</button>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="contact" data-virus-permission-scope="create">整组清空</button>
+                              </span>
+                            </span>
+                            <span class="virus-access-chip-grid">
+                              <label class="virus-access-chip"><input id="new_allowed_virus_mpox" type="checkbox" data-virus-checkbox="mpox" data-virus-group="contact" data-virus-permission-scope="create"><span>猴痘病毒</span></label>
+                            </span>
+                          </span>
+                          <span class="virus-access-group" data-virus-group-panel="chronic" data-virus-permission-scope="create">
+                            <span class="virus-access-group-head">
+                              <span>
+                                <strong>慢性病毒</strong>
+                                <small>用于 HIV 等需要耐药解释和长期随访的场景。</small>
+                              </span>
+                              <span class="virus-access-group-tools">
+                                <strong data-virus-group-count>0 / 1</strong>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="chronic" data-virus-permission-scope="create">整组选择</button>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="chronic" data-virus-permission-scope="create">整组清空</button>
+                              </span>
+                            </span>
+                            <span class="virus-access-chip-grid">
+                              <label class="virus-access-chip"><input id="new_allowed_virus_hiv" type="checkbox" data-virus-checkbox="hiv" data-virus-group="chronic" data-virus-permission-scope="create"><span>HIV-1</span></label>
+                            </span>
+                          </span>
+                        </span>
+                      </span>
+                    </span>
+                  </span>
+                </span>
+              </div>
+              <div class="permission-card" data-module-card="metagenome">
+                <input id="new_allowed_module_metagenome" type="checkbox" data-module-checkbox="metagenome" data-permission-scope="create">
+                <span class="permission-card-surface">
+                  <strong>宏基因组分析</strong>
+                  <small>宏基因组组装、物种识别与复杂样本结果汇总。</small>
+                  <em>适合混合样本与复杂背景分析</em>
+                  <span class="permission-expiry-field">
+                    <span class="permission-expiry-control">
+                      <span>模块截止时间</span>
+                      <input id="new_module_expiry_metagenome" type="datetime-local" data-module-expiry="metagenome" data-permission-scope="create">
+                    </span>
+                  </span>
+                </span>
+              </div>
+              <div class="permission-card" data-module-card="community">
+                <input id="new_allowed_module_community" type="checkbox" data-module-checkbox="community" data-permission-scope="create">
+                <span class="permission-card-surface">
+                  <strong>群落分析</strong>
+                  <small>多样本群落后分析，覆盖 alpha / beta 多样性、Biomarker（LEfSe / RF）与 microeco Network。</small>
+                  <em>适合队列比较、分组解读与群落可视化</em>
+                  <span class="permission-expiry-field">
+                    <span class="permission-expiry-control">
+                      <span>模块截止时间</span>
+                      <input id="new_module_expiry_community" type="datetime-local" data-module-expiry="community" data-permission-scope="create">
+                    </span>
+                  </span>
+                </span>
+              </div>
+              <div class="permission-card" data-module-card="pathosource">
+                <input id="new_allowed_module_pathosource" type="checkbox" data-module-checkbox="pathosource" data-permission-scope="create">
+                <span class="permission-card-surface">
+                  <strong>溯源分析</strong>
+                  <small>系统发育、聚类距离、MLST/cgMLST 与分子溯源判读。</small>
+                  <em>适合暴发调查与菌株关联分析</em>
+                  <span class="permission-expiry-field">
+                    <span class="permission-expiry-control">
+                      <span>模块截止时间</span>
+                      <input id="new_module_expiry_pathosource" type="datetime-local" data-module-expiry="pathosource" data-permission-scope="create">
+                    </span>
+                  </span>
+                </span>
+              </div>
+            </div>
+          </section>
+          <div class="modal-form-actions">
+            <button class="ghost-button" id="cancel-create-user" type="button">取消</button>
+            <button class="primary-button" type="submit">创建用户</button>
+          </div>
+        </form>
+      </section>
+    </div>
+    <div id="edit-user-modal" class="browser-modal hidden" aria-hidden="true">
+      <div id="edit-user-backdrop" class="browser-backdrop"></div>
+      <section class="browser-panel create-user-panel" role="dialog" aria-modal="true" aria-labelledby="edit-user-title">
+        <div class="panel-head">
+          <div>
+            <p class="section-kicker">User</p>
+            <h2 id="edit-user-title">编辑用户</h2>
+            <p class="field-note">统一调整账号身份、角色和模块授权，不再使用临时输入框修改权限。</p>
+          </div>
+          <button id="close-edit-user-modal" class="ghost-button" type="button">关闭</button>
+        </div>
+        <form id="edit-user-form" class="admin-form">
+          <input id="edit_original_username" type="hidden">
+          <section class="admin-form-cluster wide">
+            <div class="admin-form-cluster-head">
+              <div>
+                <strong>账户身份</strong>
+                <p class="field-note">修改展示信息、用户组和角色；用户名变更会同步更新账号标识。</p>
+              </div>
+              <span class="admin-form-cluster-kicker">Identity</span>
+            </div>
+            <div class="admin-form-grid">
+              <label>
+                <span>用户名</span>
+                <input id="edit_username" required>
+              </label>
+              <label>
+                <span>显示名</span>
+                <input id="edit_display_name">
+              </label>
+              <label>
+                <span>用户组</span>
+                <input id="edit_group_name" placeholder="例如：microbiology_lab">
+              </label>
+              <label>
+                <span>重置密码</span>
+                <input id="edit_password" type="password" placeholder="留空表示不修改">
+              </label>
+              <label>
+                <span>有效截止时间</span>
+                <input id="edit_account_expires_at" type="datetime-local">
+              </label>
+              <label class="wide">
+                <span>角色</span>
+                <select id="edit_role">
+                  <option value="user">普通用户</option>
+                  <option value="group_admin">group 管理</option>
+                  <option value="admin">管理员</option>
+                </select>
+              </label>
+            </div>
+          </section>
+          <section class="admin-form-cluster wide">
+            <div class="admin-form-cluster-head">
+              <div>
+                <strong>分析模块授权</strong>
+                <p class="field-note">这里决定用户工作台首页能进入哪些分析模块。</p>
+              </div>
+              <span class="admin-form-cluster-kicker">Access</span>
+            </div>
+            <div id="edit-permission-summary" class="permission-summary" aria-live="polite">
+              <strong>已开通 1 个模块</strong>
+              <span>普通用户至少需要一个可用分析模块。</span>
+            </div>
+            <div class="permission-card-grid" data-permission-scope="edit">
+              <div class="permission-card" data-module-card="bacteria">
+                <input id="edit_allowed_module_bacteria" type="checkbox" data-module-checkbox="bacteria" data-permission-scope="edit">
+                <span class="permission-card-surface">
+                  <strong>细菌分析</strong>
+                  <small>组装、物种鉴定、耐药毒力、MLST 与血清型等常规流程。</small>
+                  <em>适合日常单菌样本主线分析</em>
+                  <span class="permission-expiry-field">
+                    <span class="permission-expiry-control">
+                      <span>模块截止时间</span>
+                      <input id="edit_module_expiry_bacteria" type="datetime-local" data-module-expiry="bacteria" data-permission-scope="edit">
+                    </span>
+                  </span>
+                </span>
+              </div>
+              <div class="permission-card" data-module-card="virus">
+                <input id="edit_allowed_module_virus" type="checkbox" data-module-checkbox="virus" data-permission-scope="edit">
+                <span class="permission-card-surface">
+                  <strong>病毒分析</strong>
+                  <small>参考驱动分析、病毒鉴定与病毒分型工作流。</small>
+                  <em>适合病毒目标分析与定向判读</em>
+                  <span class="permission-expiry-field">
+                    <span class="permission-expiry-control">
+                      <span>模块截止时间</span>
+                      <input id="edit_module_expiry_virus" type="datetime-local" data-module-expiry="virus" data-permission-scope="edit">
+                    </span>
+                  </span>
+                  <span class="permission-expiry-field">
+                    <span class="permission-expiry-control">
+                      <span>可用病毒</span>
+                      <span class="virus-access-panel" data-virus-permission-scope="edit">
+                        <span class="virus-access-head">
+                          <span class="virus-access-copy">
+                            <strong>按分组批量授权</strong>
+                            <small>先选场景，再微调单病毒，减少重复点选。</small>
+                          </span>
+                          <span class="virus-access-actions">
+                            <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="__all__" data-virus-permission-scope="edit">全部选择</button>
+                            <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="__all__" data-virus-permission-scope="edit">全部清空</button>
+                          </span>
+                        </span>
+                        <span class="virus-access-groups">
+                          <span class="virus-access-group" data-virus-group-panel="respiratory" data-virus-permission-scope="edit">
+                            <span class="virus-access-group-head">
+                              <span>
+                                <strong>呼吸道病毒</strong>
+                                <small>面向呼吸道监测和常规呼吸病原判读。</small>
+                              </span>
+                              <span class="virus-access-group-tools">
+                                <strong data-virus-group-count>0 / 8</strong>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="respiratory" data-virus-permission-scope="edit">整组选择</button>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="respiratory" data-virus-permission-scope="edit">整组清空</button>
+                              </span>
+                            </span>
+                            <span class="virus-access-chip-grid">
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_ncov" type="checkbox" data-virus-checkbox="ncov" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>新冠</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_flu" type="checkbox" data-virus-checkbox="flu" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>流感</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_rsv" type="checkbox" data-virus-checkbox="rsv" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>合胞病毒</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_hmpv" type="checkbox" data-virus-checkbox="hmpv" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>偏肺病毒</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_hpiv" type="checkbox" data-virus-checkbox="hpiv" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>副流感病毒</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_hadv" type="checkbox" data-virus-checkbox="hadv" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>腺病毒</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_rhinovirus" type="checkbox" data-virus-checkbox="rhinovirus" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>鼻病毒</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_seasonal_hcov" type="checkbox" data-virus-checkbox="seasonal_hcov" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>季节性冠状病毒</span></label>
+                            </span>
+                          </span>
+                          <span class="virus-access-group" data-virus-group-panel="enteric" data-virus-permission-scope="edit">
+                            <span class="virus-access-group-head">
+                              <span>
+                                <strong>肠道病毒</strong>
+                                <small>适合腹泻、肠道感染和粪便病原场景。</small>
+                              </span>
+                              <span class="virus-access-group-tools">
+                                <strong data-virus-group-count>0 / 6</strong>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="enteric" data-virus-permission-scope="edit">整组选择</button>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="enteric" data-virus-permission-scope="edit">整组清空</button>
+                              </span>
+                            </span>
+                            <span class="virus-access-chip-grid">
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_norovirus" type="checkbox" data-virus-checkbox="norovirus" data-virus-group="enteric" data-virus-permission-scope="edit"><span>诺如病毒</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_rotavirus" type="checkbox" data-virus-checkbox="rotavirus" data-virus-group="enteric" data-virus-permission-scope="edit"><span>轮状病毒</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_astroviridae" type="checkbox" data-virus-checkbox="astroviridae" data-virus-group="enteric" data-virus-permission-scope="edit"><span>星状病毒</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_enterovirus" type="checkbox" data-virus-checkbox="enterovirus" data-virus-group="enteric" data-virus-permission-scope="edit"><span>肠道病毒</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_hepatovirus" type="checkbox" data-virus-checkbox="hepatovirus" data-virus-group="enteric" data-virus-permission-scope="edit"><span>肝炎病毒</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_sapovirus" type="checkbox" data-virus-checkbox="sapovirus" data-virus-group="enteric" data-virus-permission-scope="edit"><span>札如病毒</span></label>
+                            </span>
+                          </span>
+                          <span class="virus-access-group" data-virus-group-panel="vector" data-virus-permission-scope="edit">
+                            <span class="virus-access-group-head">
+                              <span>
+                                <strong>虫媒与发热相关</strong>
+                                <small>用于登革热、寨卡及发热伴血小板减少综合征场景。</small>
+                              </span>
+                              <span class="virus-access-group-tools">
+                                <strong data-virus-group-count>0 / 3</strong>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="vector" data-virus-permission-scope="edit">整组选择</button>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="vector" data-virus-permission-scope="edit">整组清空</button>
+                              </span>
+                            </span>
+                            <span class="virus-access-chip-grid">
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_denv" type="checkbox" data-virus-checkbox="denv" data-virus-group="vector" data-virus-permission-scope="edit"><span>登革热病毒</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_zikav" type="checkbox" data-virus-checkbox="zikav" data-virus-group="vector" data-virus-permission-scope="edit"><span>寨卡病毒</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_chikv" type="checkbox" data-virus-checkbox="chikv" data-virus-group="vector" data-virus-permission-scope="edit"><span>基孔肯雅病毒</span></label>
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_bandavirus" type="checkbox" data-virus-checkbox="bandavirus" data-virus-group="vector" data-virus-permission-scope="edit"><span>班达病毒</span></label>
+                            </span>
+                          </span>
+                          <span class="virus-access-group" data-virus-group-panel="contact" data-virus-permission-scope="edit">
+                            <span class="virus-access-group-head">
+                              <span>
+                                <strong>接触传播与其他</strong>
+                                <small>保留较少见但需要单独授权的病毒类型。</small>
+                              </span>
+                              <span class="virus-access-group-tools">
+                                <strong data-virus-group-count>0 / 1</strong>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="contact" data-virus-permission-scope="edit">整组选择</button>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="contact" data-virus-permission-scope="edit">整组清空</button>
+                              </span>
+                            </span>
+                            <span class="virus-access-chip-grid">
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_mpox" type="checkbox" data-virus-checkbox="mpox" data-virus-group="contact" data-virus-permission-scope="edit"><span>猴痘病毒</span></label>
+                            </span>
+                          </span>
+                          <span class="virus-access-group" data-virus-group-panel="chronic" data-virus-permission-scope="edit">
+                            <span class="virus-access-group-head">
+                              <span>
+                                <strong>慢性病毒</strong>
+                                <small>用于 HIV 等需要耐药解释和长期随访的场景。</small>
+                              </span>
+                              <span class="virus-access-group-tools">
+                                <strong data-virus-group-count>0 / 1</strong>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="chronic" data-virus-permission-scope="edit">整组选择</button>
+                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="chronic" data-virus-permission-scope="edit">整组清空</button>
+                              </span>
+                            </span>
+                            <span class="virus-access-chip-grid">
+                              <label class="virus-access-chip"><input id="edit_allowed_virus_hiv" type="checkbox" data-virus-checkbox="hiv" data-virus-group="chronic" data-virus-permission-scope="edit"><span>HIV-1</span></label>
+                            </span>
+                          </span>
+                        </span>
+                      </span>
+                    </span>
+                  </span>
+                </span>
+              </div>
+              <div class="permission-card" data-module-card="metagenome">
+                <input id="edit_allowed_module_metagenome" type="checkbox" data-module-checkbox="metagenome" data-permission-scope="edit">
+                <span class="permission-card-surface">
+                  <strong>宏基因组分析</strong>
+                  <small>宏基因组组装、物种识别与复杂样本结果汇总。</small>
+                  <em>适合混合样本与复杂背景分析</em>
+                  <span class="permission-expiry-field">
+                    <span class="permission-expiry-control">
+                      <span>模块截止时间</span>
+                      <input id="edit_module_expiry_metagenome" type="datetime-local" data-module-expiry="metagenome" data-permission-scope="edit">
+                    </span>
+                  </span>
+                </span>
+              </div>
+              <div class="permission-card" data-module-card="community">
+                <input id="edit_allowed_module_community" type="checkbox" data-module-checkbox="community" data-permission-scope="edit">
+                <span class="permission-card-surface">
+                  <strong>群落分析</strong>
+                  <small>多样本群落后分析，覆盖 alpha / beta 多样性、Biomarker（LEfSe / RF）与 microeco Network。</small>
+                  <em>适合队列比较、分组解读与群落可视化</em>
+                  <span class="permission-expiry-field">
+                    <span class="permission-expiry-control">
+                      <span>模块截止时间</span>
+                      <input id="edit_module_expiry_community" type="datetime-local" data-module-expiry="community" data-permission-scope="edit">
+                    </span>
+                  </span>
+                </span>
+              </div>
+              <div class="permission-card" data-module-card="pathosource">
+                <input id="edit_allowed_module_pathosource" type="checkbox" data-module-checkbox="pathosource" data-permission-scope="edit">
+                <span class="permission-card-surface">
+                  <strong>溯源分析</strong>
+                  <small>系统发育、聚类距离、MLST/cgMLST 与分子溯源判读。</small>
+                  <em>适合暴发调查与菌株关联分析</em>
+                  <span class="permission-expiry-field">
+                    <span class="permission-expiry-control">
+                      <span>模块截止时间</span>
+                      <input id="edit_module_expiry_pathosource" type="datetime-local" data-module-expiry="pathosource" data-permission-scope="edit">
+                    </span>
+                  </span>
+                </span>
+              </div>
+            </div>
+          </section>
+          <div class="modal-form-actions">
+            <button class="ghost-button" id="cancel-edit-user" type="button">取消</button>
+            <button class="primary-button" type="submit">保存修改</button>
+          </div>
+        </form>
+      </section>
+    </div>

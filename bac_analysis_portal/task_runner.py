@@ -93,7 +93,7 @@ def main(task_file_arg: str) -> int:
 
 def _cache_task_analytics_snapshot(task_file: Path, task: dict, log_handle) -> None:
     try:
-        from .app import _build_report_payload
+        from .report_payload import _build_report_payload
 
         report = _build_report_payload(task)
         snapshot = build_queue_analytics_snapshot(report)

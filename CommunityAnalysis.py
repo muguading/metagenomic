@@ -314,8 +314,8 @@ def run_qiime_command(*, qiime_env: str, command: str, log_path: Path) -> None:
         raise subprocess.CalledProcessError(completed.returncode, completed.args, output=completed.stdout, stderr=completed.stderr)
 
 
-def run_env_command(*, env_name: str, command: str, log_path: Path) -> None:
-    wrapped = f"{_qiime_shell_prefix()}; {command}"
+def run_env_command(*, env_name: str, command: str, log_path: Path, use_qiime_prefix: bool = True) -> None:
+    wrapped = f"{_qiime_shell_prefix()}; {command}" if use_qiime_prefix else command
     write_log(log_path, f"执行命令: {command}")
     completed = subprocess.run(
         ["conda", "run", "-n", env_name, "/bin/zsh", "-lc", wrapped],
@@ -668,6 +668,7 @@ def build_amplicon_workflow(
             "module": "microeco Beta 多样性",
             "runtime": microeco_env,
             "env": microeco_env,
+            "use_qiime_prefix": False,
             "command": f"Rscript {project_root / 'scripts' / 'run_microeco_beta.R'} {table_qza} {taxonomy_qza} {metadata_path} {metadata_summary.group_column} {microeco_beta_dir} {args.beta_metric}",
             "targets": [microeco_beta_dir / "run_summary.txt", microeco_beta_dir / "pcoa_plot.png", microeco_beta_dir / "nmds_plot.png"],
         })
@@ -676,6 +677,7 @@ def build_amplicon_workflow(
             "module": "microeco 网络分析",
             "runtime": microeco_env,
             "env": microeco_env,
+            "use_qiime_prefix": False,
             "command": f"Rscript {project_root / 'scripts' / 'run_microeco_network.R'} {table_qza} {taxonomy_qza} {metadata_path} {metadata_summary.group_column} {microeco_network_dir} Genus spearman 0.6 0.05 0.0005",
             "targets": [
                 microeco_network_dir / "run_summary.txt",
@@ -690,6 +692,7 @@ def build_amplicon_workflow(
             "module": "microeco Biomarker",
             "runtime": biomarker_env,
             "env": biomarker_env,
+            "use_qiime_prefix": False,
             "command": f"Rscript {project_root / 'scripts' / 'run_microeco_biomarker.R'} {table_qza} {taxonomy_qza} {metadata_path} {metadata_summary.group_column} {microeco_biomarker_dir} Genus {args.ml_model}",
             "targets": [microeco_biomarker_dir / "run_summary.txt", microeco_biomarker_dir / "lefse_diff.tsv", microeco_biomarker_dir / "rf_importance.tsv"],
         })
@@ -852,7 +855,12 @@ def execute_amplicon_workflow(
             item["status"] = "skipped-existing"
             continue
         env_name = str(item.get("env") or qiime_env).strip() or qiime_env
-        run_env_command(env_name=env_name, command=command, log_path=log_path)
+        run_env_command(
+            env_name=env_name,
+            command=command,
+            log_path=log_path,
+            use_qiime_prefix=bool(item.get("use_qiime_prefix", True)),
+        )
         item["status"] = "ready" if _targets_ready(targets) else "missing"
     mark_output_statuses(outputs)
 

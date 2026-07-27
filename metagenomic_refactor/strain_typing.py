@@ -5,6 +5,8 @@ import math
 import os
 import re
 import subprocess
+import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Set, Tuple
 
@@ -25,6 +27,31 @@ def _database_root() -> Path:
 
 def _database_path(*parts: str) -> str:
     return str(_database_root().joinpath(*parts))
+
+
+def _log_serotype(pre: str, message: str) -> None:
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with open(f'{pre}_serotype.log', 'a', encoding='utf-8') as handle:
+        handle.write(f'[{timestamp}] {message}\n')
+
+
+def _log_serotype_artifacts(pre: str) -> None:
+    paths = [
+        f'{pre}.final.fasta',
+        f'{pre}_serotype_result.tsv',
+        f'{pre}.pathonet_result.tsv',
+        f'{pre}.keblo.tsv',
+        'results',
+    ]
+    for raw_path in paths:
+        path = Path(raw_path)
+        if path.is_dir():
+            items = ', '.join(sorted(item.name for item in path.iterdir())[:20])
+            _log_serotype(pre, f'ARTIFACT {raw_path}: dir exists, items=[{items}]')
+        elif path.exists():
+            _log_serotype(pre, f'ARTIFACT {raw_path}: file exists, size={path.stat().st_size}')
+        else:
+            _log_serotype(pre, f'ARTIFACT {raw_path}: missing')
 
 
 def serotype_B(pre):   # 大肠+致贺——ectyper
@@ -361,13 +388,108 @@ def serotype_A(pre):  # 沙门氏菌血清型——sistr
     return sero_result['血清型'].tolist()[0]
 
 
+KLEBORATE_COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
+    'ST': ('ST', 'klebsiella_pneumo_complex__mlst__ST'),
+    'virulence_score': ('virulence_score', 'klebsiella_pneumo_complex__virulence_score__virulence_score'),
+    'resistance_score': ('resistance_score', 'klebsiella_pneumo_complex__resistance_score__resistance_score'),
+    'Yersiniabactin': ('Yersiniabactin', 'klebsiella__ybst__Yersiniabactin'),
+    'Colibactin': ('Colibactin', 'klebsiella__cbst__Colibactin'),
+    'Bla_chr': ('Bla_chr', 'klebsiella_pneumo_complex__amr__Bla_chr'),
+    'SHV_mutations': ('SHV_mutations', 'klebsiella_pneumo_complex__amr__SHV_mutations'),
+    'wzi': ('wzi', 'klebsiella_pneumo_complex__wzi__wzi'),
+    'K_locus': ('K_locus', 'klebsiella_pneumo_complex__kaptive__K_locus'),
+    'O_locus': ('O_locus', 'klebsiella_pneumo_complex__kaptive__O_locus'),
+}
+
+
+def _read_kleborate_result_table(output_path: Path) -> pd.DataFrame:
+    candidates: List[Path] = []
+    if output_path.is_file():
+        candidates.append(output_path)
+    elif output_path.is_dir():
+        preferred_names = [
+            'klebsiella_pneumo_complex_output.txt',
+            'klebsiella_output.txt',
+            'results.txt',
+        ]
+        candidates.extend(output_path / name for name in preferred_names)
+        candidates.extend(sorted(output_path.glob('*_output.txt')))
+        candidates.extend(sorted(output_path.glob('*.tsv')))
+        candidates.extend(sorted(output_path.glob('*.txt')))
+
+    seen: Set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen or not candidate.is_file() or candidate.stat().st_size == 0:
+            continue
+        seen.add(candidate)
+        try:
+            result = pd.read_table(candidate, dtype=str).fillna('-')
+        except Exception:
+            continue
+        if result.empty:
+            continue
+        if _kleborate_value(result, 'K_locus') != '-' or _kleborate_value(result, 'O_locus') != '-':
+            return result
+    raise FileNotFoundError(f'未找到可解析的 kleborate 输出表: {output_path}')
+
+
+def _kleborate_value(kledb: pd.DataFrame, field: str) -> str:
+    aliases = KLEBORATE_COLUMN_ALIASES[field]
+    for column in aliases:
+        if column in kledb.columns:
+            value = str(kledb[column].tolist()[0]).strip()
+            return value if value and value.lower() != 'nan' else '-'
+    for column in kledb.columns:
+        if any(column.endswith(f'__{alias}') for alias in aliases):
+            value = str(kledb[column].tolist()[0]).strip()
+            return value if value and value.lower() != 'nan' else '-'
+    return '-'
+
+
+def _normalise_kleborate_table(kledb: pd.DataFrame, pre: str) -> pd.DataFrame:
+    row = {field: _kleborate_value(kledb, field) for field in KLEBORATE_COLUMN_ALIASES}
+    result = pd.DataFrame([row])
+    result['样本名称'] = pre
+    result.rename(
+        columns={
+            'virulence_score': '毒力得分',
+            'resistance_score': '耐药得分',
+            'Yersiniabactin': '耶尔森菌素',
+            'Colibactin': '大肠菌素',
+            'Bla_chr': '氨苄类耐药SHV等位基因',
+            'SHV_mutations': 'SHV耐药突变',
+            'wzi': 'wzi荚膜预测',
+        },
+        inplace=True,
+    )
+    result['KO血清型'] = result['K_locus'].tolist()[0] + '|' + result['O_locus'].tolist()[0]
+    return result[
+        [
+            '样本名称',
+            'ST',
+            '毒力得分',
+            '耐药得分',
+            '耶尔森菌素',
+            '大肠菌素',
+            '氨苄类耐药SHV等位基因',
+            'SHV耐药突变',
+            'wzi荚膜预测',
+            'KO血清型',
+        ]
+    ]
+
+
 def serotype_kb(pre):  # 克雷伯菌血清型分型——kleborate
-    subprocess.run(f'kleborate --all -o results.txt -a {pre}.final.fasta > {pre}.keblo.tsv', shell=True)
-    kledb = pd.read_table(f'{pre}.keblo.tsv')
-    kledb['样本名称'] = pre
-    kledb.rename(columns={'virulence_score': '毒力得分', 'resistance_score': '耐药得分', 'Yersiniabactin': '耶尔森菌素', 'Colibactin': '大肠菌素', 'Bla_chr': '氨苄类耐药SHV等位基因', 'SHV_mutations': 'SHV耐药突变', 'wzi': 'wzi荚膜预测'}, inplace=True)
-    kledb['KO血清型'] = kledb['K_locus'].tolist()[0] + '|' + kledb['O_locus'].tolist()[0]
-    kledb = kledb[['样本名称', 'ST', '毒力得分', '耐药得分', '耶尔森菌素', '大肠菌素', '氨苄类耐药SHV等位基因', 'SHV耐药突变', 'wzi荚膜预测', 'KO血清型']]
+    output_dir = Path('results')
+    cmd = ['kleborate', '-p', 'kpsc', '-o', str(output_dir), '-a', f'{pre}.final.fasta']
+    _log_serotype(pre, f'RUN kleborate: {" ".join(cmd)}')
+    with open(f'{pre}_serotype.log', 'a', encoding='utf-8') as log_handle:
+        result = subprocess.run(cmd, stdout=log_handle, stderr=log_handle, text=True)
+    _log_serotype(pre, f'kleborate returncode={result.returncode}')
+    result.check_returncode()
+    raw_kledb = _read_kleborate_result_table(output_dir)
+    kledb = _normalise_kleborate_table(raw_kledb, pre)
+    kledb.to_csv(f'{pre}.keblo.tsv', sep='\t', index=False)
     kledb.to_csv(f'{pre}_serotype_result.tsv', sep='\t', index=False)
     return kledb['KO血清型'].tolist()[0]
 
@@ -743,10 +865,28 @@ def is_non_numeric_in_bracket(x):
     return bool(m) and (not m.group(1).isdigit())
 
 
+def _read_or_init_checkm(Pre):
+    path = Path(f'{Pre}.checkm.tsv')
+    if path.is_file() and path.stat().st_size != 0:
+        return pd.read_table(path)
+    _log_serotype(Pre, f'WARN missing {path.name}; create placeholder checkm table so serotype can continue')
+    return pd.DataFrame(
+        [
+            {
+                '样本名称': Pre,
+                '物种名称': '-',
+                'mlst 物种名称': '-',
+                '污染率': '-',
+                '完整性': '-',
+            }
+        ]
+    )
+
+
 def _run_mlst_core(Pre, tSpe):
     runtime = get_runtime_context()
     requested_scheme = tSpe or runtime.species
-    cmdb = pd.read_table(f'{Pre}.checkm.tsv')
+    cmdb = _read_or_init_checkm(Pre)
     Asdb = pd.read_table('Assem_info1.tsv')
     cfile = pytaxonkit.lineage(Asdb['taxid'].tolist())
     cfile['Species'] = cfile.apply(extract_SpeID, axis=1)
@@ -806,7 +946,7 @@ def _run_mlst_core(Pre, tSpe):
             y = mlst_gene[mlst_gene["管家基因"] == x]["序列名称"].tolist()[0]
             os.system(f"show-aligns out.delta {x} {y}|sed -n '/-- Alignments/,/--   END/p' > {x}_gene_show.txt")
 
-    cdb = pd.read_table(f'{Pre}.checkm.tsv')
+    cdb = _read_or_init_checkm(Pre)
     cdb['mlst 物种名称'] = mlst_B
     print(mlst_B, Pre)
     cdb[['样本名称', '物种名称', 'mlst 物种名称', '污染率', '完整性']].to_csv(f'{Pre}.checkm.tsv', sep='\t', index=False)
@@ -821,55 +961,92 @@ def mlst_only(Pre, tSpe):
 
 def serotype_only(Pre, tSpe):
     print('serotype only')
-    mlst_B, requested_scheme = _run_mlst_core(Pre, tSpe)
+    _log_serotype(Pre, f'START serotype_only tSpe={tSpe}')
+    _log_serotype_artifacts(Pre)
+    try:
+        mlst_B, requested_scheme = _run_mlst_core(Pre, tSpe)
+        _log_serotype(Pre, f'MLST result mlst_B={mlst_B}, requested_scheme={requested_scheme}')
 
-    if mlst_B == 'bordetella_3':
-        bp_vaccine(Pre)
-        if os.path.isfile(f'{Pre}.R1.fastq.gz'):
-            bp_2037(Pre)
+        selected_step = ''
+
+        def _run_step(label, func):
+            _log_serotype(Pre, f'RUN step={label}')
+            value = func()
+            _log_serotype(Pre, f'DONE step={label}, return={value}')
+            return value
+
+        if mlst_B == 'bordetella_3':
+            selected_step = 'bordetella_3'
+            _run_step('bp_vaccine', lambda: bp_vaccine(Pre))
+            if os.path.isfile(f'{Pre}.R1.fastq.gz'):
+                _run_step('bp_2037', lambda: bp_2037(Pre))
+            else:
+                _run_step('fa_2037', lambda: fa_2037(Pre))
+            _run_step('bp_mlva', lambda: bp_mlva(Pre))
+        elif mlst_B == 'klebsiella':
+            selected_step = 'klebsiella/kleborate'
+            _run_step('serotype_kb', lambda: serotype_kb(Pre))
+        elif 'ecoli' in mlst_B:
+            selected_step = 'ecoli/ectyper'
+            _run_step('serotype_B', lambda: serotype_B(Pre))
+        elif 'salmonella' in mlst_B:
+            selected_step = 'salmonella/sistr'
+            _run_step('serotype_A', lambda: serotype_A(Pre))
+        elif 'hinfluenzae' in mlst_B:
+            selected_step = 'hinfluenzae/hicap'
+            _run_step('serotype_HI', lambda: serotype_HI(Pre))
+        elif 'vparahaemolyticus' in mlst_B:
+            selected_step = 'vparahaemolyticus/vpsero'
+            _run_step('serotype_D', lambda: serotype_D(Pre))
+        elif 'spyogenes' in mlst_B:
+            selected_step = 'spyogenes/emm'
+            _run_step('serotype_groupA', lambda: serotype_groupA(Pre))
+        elif 'vcholerae' in mlst_B:
+            selected_step = 'vcholerae'
+            _run_step('serotype_E', lambda: serotype_E(Pre))
+        elif 'nmeningitidis' in mlst_B or 'neisseria' in mlst_B:
+            selected_step = 'neisseria/pmga'
+            _run_step('serotype_nm', lambda: serotype_nm(Pre))
+        elif 'saureus' in mlst_B:
+            selected_step = 'saureus'
+            _run_step('serotype_st', lambda: serotype_st(Pre))
+        elif 'listeria' in mlst_B:
+            selected_step = 'listeria'
+            _run_step('serotype_lm', lambda: serotype_lm(Pre))
+        elif 'bcereus' in mlst_B:
+            selected_step = 'bcereus'
+            _run_step('serotype_bt', lambda: serotype_bt(Pre))
+        elif 'mpneumoniae' in mlst_B:
+            selected_step = 'mpneumoniae/mlva'
+            _run_step('mp_mlva', lambda: mp_mlva(Pre))
+        elif 'ssuis' in mlst_B:
+            selected_step = 'ssuis'
+            _run_step('serotype_SS', lambda: serotype_SS(Pre))
+        elif 'campylobacter' in mlst_B:
+            selected_step = 'campylobacter'
+            _run_step('serotype_Cb', lambda: serotype_Cb(Pre))
         else:
-            fa_2037(Pre)
-        bp_mlva(Pre)
-    elif mlst_B == 'klebsiella':
-        serotype_kb(Pre)
-    elif 'ecoli' in mlst_B:
-        serotype_B(Pre)
-    elif 'salmonella' in mlst_B:
-        serotype_A(Pre)
-    elif 'hinfluenzae' in mlst_B:
-        serotype_HI(Pre)
-    elif 'vparahaemolyticus' in mlst_B:
-        serotype_D(Pre)
-    elif 'spyogenes' in mlst_B:
-        serotype_groupA(Pre)
-    elif 'vcholerae' in mlst_B:
-        serotype_E(Pre)
-    elif 'nmeningitidis' in mlst_B or 'neisseria' in mlst_B:
-        serotype_nm(Pre)
-    elif 'saureus' in mlst_B:
-        serotype_st(Pre)
-    elif 'listeria' in mlst_B:
-        serotype_lm(Pre)
-    elif 'bcereus' in mlst_B:
-        serotype_bt(Pre)
-    elif 'mpneumoniae' in mlst_B:
-        mp_mlva(Pre)
-    elif 'ssuis' in mlst_B:
-        serotype_SS(Pre)
-    elif 'campylobacter' in mlst_B:
-        serotype_Cb(Pre)
+            _log_serotype(Pre, f'NO matched serotype branch for mlst_B={mlst_B}')
+        _log_serotype(Pre, f'SELECTED branch={selected_step or "-"}')
 
-    if os.path.isfile(f'{Pre}_2.report.txt'):
-        kradb = pd.read_table(f'{Pre}_2.report.txt', header=None)
-    else:
-        kradb = pd.read_table(f'{Pre}_assem.kraken2.txt', header=None)
-    if kradb.loc[kradb[3] == 'G', 5].tolist()[0].strip() == 'Yersinia':
-        serotype_ys(Pre)
-    if requested_scheme:
-        PathoNet(Pre, requested_scheme)
-    else:
-        PathoNet(Pre, mlst_B)
-    return mlst_B
+        kraken_report = f'{Pre}_2.report.txt' if os.path.isfile(f'{Pre}_2.report.txt') else f'{Pre}_assem.kraken2.txt'
+        _log_serotype(Pre, f'CHECK Yersinia report={kraken_report}, exists={os.path.isfile(kraken_report)}')
+        kradb = pd.read_table(kraken_report, header=None)
+        genus_values = kradb.loc[kradb[3] == 'G', 5].astype(str).str.strip().tolist()
+        genus = genus_values[0] if genus_values else ''
+        _log_serotype(Pre, f'Kraken genus={genus or "-"}')
+        if genus == 'Yersinia':
+            _run_step('serotype_ys', lambda: serotype_ys(Pre))
+        pathonet_species = requested_scheme or mlst_B
+        _run_step(f'PathoNet species={pathonet_species}', lambda: PathoNet(Pre, pathonet_species))
+        return mlst_B
+    except Exception:
+        _log_serotype(Pre, 'ERROR serotype_only failed')
+        _log_serotype(Pre, traceback.format_exc())
+        raise
+    finally:
+        _log_serotype_artifacts(Pre)
+        _log_serotype(Pre, 'END serotype_only')
 
 
 def mlst_serotype(Pre, tSpe):
