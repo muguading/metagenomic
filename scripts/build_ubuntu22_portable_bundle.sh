@@ -5,6 +5,7 @@ SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT="/Volumes/10gelizi/pathogen-workbench-ubuntu22-portable"
 VERSION="$(date +%Y.%m.%d)"
 ARCHIVE="0"
+INCLUDE_DEMO="0"
 
 usage() {
   cat <<'USAGE'
@@ -17,6 +18,7 @@ Options:
                       Default: /Volumes/10gelizi/pathogen-workbench-ubuntu22-portable
   --version VERSION   Version label. Default: current date.
   --archive           Also create OUTPUT-VERSION.tar.gz next to the output dir.
+  --include-demo      Include the large demo dataset. Disabled by default.
   -h, --help          Show this help.
 USAGE
 }
@@ -27,6 +29,7 @@ while [[ $# -gt 0 ]]; do
     --output) OUTPUT="${2:?}"; shift 2 ;;
     --version) VERSION="${2:?}"; shift 2 ;;
     --archive) ARCHIVE="1"; shift ;;
+    --include-demo) INCLUDE_DEMO="1"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -120,6 +123,14 @@ copy_app_source "$SOURCE_ROOT" "$OUTPUT/app"
 
 echo "Adding Ubuntu 22.04 installer..."
 install -m 0755 "$SOURCE_ROOT/deployment/ubuntu22-portable/install.sh" "$OUTPUT/install.sh"
+cat > "$OUTPUT/deploy.sh" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec sudo bash "${BUNDLE_DIR}/install.sh" --yes "$@"
+EOF
+chmod 0755 "$OUTPUT/deploy.sh"
 
 echo "Copying database assets..."
 copy_tree "$SOURCE_ROOT/database" "$OUTPUT/database"
@@ -128,13 +139,9 @@ echo "Copying tool and public assets..."
 copy_tree "$SOURCE_ROOT/soft" "$OUTPUT/soft"
 copy_tree "$SOURCE_ROOT/public" "$OUTPUT/public"
 
-if [[ -d "$SOURCE_ROOT/demo_data" ]]; then
+if [[ "$INCLUDE_DEMO" == "1" && -d "$SOURCE_ROOT/demo_data" ]]; then
   echo "Copying demo data..."
   copy_tree "$SOURCE_ROOT/demo_data" "$OUTPUT/demo_data"
-fi
-if [[ -d "$SOURCE_ROOT/test_data" ]]; then
-  echo "Copying test data..."
-  copy_tree "$SOURCE_ROOT/test_data" "$OUTPUT/test_data"
 fi
 
 cat > "$OUTPUT/README_UBUNTU22_INSTALL.md" <<EOF
