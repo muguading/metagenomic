@@ -10,6 +10,8 @@ SERVER_NAME="_"
 YES="0"
 FORCE_CONDA="0"
 SERVICE_NAME="bac-analysis-portal"
+SERVICE_USER="pathogen-workbench"
+SERVICE_GROUP="pathogen-workbench"
 REQUIRED_ENVS="web_runtime,meta_main,genomad_aux,amr_aux,host_filter,mag_aux,cm210,sistr_hicap,qiime2,microeco,genovi,plasflow,longread_aux,chewie,ncov,choleraefinder,report_env,Vlib,tNGS"
 
 usage() {
@@ -48,6 +50,7 @@ CONDA_ROOT="${PREFIX}/conda"
 CONDA_ENVS_DIR="${CONDA_ROOT}/envs"
 STATE_DIR="${DATA_ROOT}/state"
 TASK_ROOT="${DATA_ROOT}/tasks"
+OUTPUT_ROOT="${DATA_ROOT}/outputs"
 ENV_FILE="${APP_DIR}/deployment/portal.env"
 MANIFEST_FILE="${BUNDLE_DIR}/manifest.json"
 ADMIN_PASSWORD_FILE="${STATE_DIR}/initial_admin_password.txt"
@@ -237,7 +240,15 @@ if [[ -n "$manifest_envs" ]]; then
 fi
 
 echo "Creating install directories..."
-mkdir -p "$PREFIX" "$APP_DIR" "$CONDA_ROOT" "$CONDA_ENVS_DIR" "$STATE_DIR" "$TASK_ROOT" "$DB_ROOT"
+mkdir -p "$PREFIX" "$APP_DIR" "$CONDA_ROOT" "$CONDA_ENVS_DIR" "$STATE_DIR" "$TASK_ROOT" "$OUTPUT_ROOT" "$DB_ROOT"
+if ! getent group "$SERVICE_GROUP" >/dev/null; then
+  groupadd --system "$SERVICE_GROUP"
+fi
+if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+  useradd --system --gid "$SERVICE_GROUP" --home-dir /nonexistent --shell /usr/sbin/nologin "$SERVICE_USER"
+fi
+chown "$SERVICE_USER:$SERVICE_GROUP" "$STATE_DIR" "$TASK_ROOT" "$OUTPUT_ROOT"
+chmod 0750 "$STATE_DIR" "$TASK_ROOT" "$OUTPUT_ROOT"
 
 echo "Installing application files..."
 copy_tree "${BUNDLE_DIR}/app" "$APP_DIR"
@@ -279,6 +290,7 @@ PORTAL_STATE_DIR=${STATE_DIR}
 PORTAL_TASK_DIR=${TASK_ROOT}
 PORTAL_DB_PATH=${STATE_DIR}/bac_analysis_portal.sqlite3
 BAC_ANALYSIS_TASK_ROOT=${TASK_ROOT}
+BAC_ANALYSIS_OUTPUT_ROOT=${OUTPUT_ROOT}
 META_DATABASE_ROOT=${DB_ROOT}
 CONDA_ROOT=${CONDA_ROOT}
 PORTAL_CONDA_ROOT=${CONDA_ROOT}
@@ -363,12 +375,22 @@ Description=Pathogen Workbench Portal
 After=network.target
 
 [Service]
+User=${SERVICE_USER}
+Group=${SERVICE_GROUP}
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${ENV_FILE}
 Environment=PYTHONUNBUFFERED=1
 ExecStart=${CONDA_ENVS_DIR}/web_runtime/bin/gunicorn -w 2 -b 127.0.0.1:${PORT} 'bac_analysis_portal:create_app()'
 Restart=always
 RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadOnlyPaths=${APP_DIR} ${DB_ROOT} ${CONDA_ROOT}
+ReadWritePaths=${STATE_DIR} ${TASK_ROOT} ${OUTPUT_ROOT}
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

@@ -2176,7 +2176,14 @@ class AnalysisTaskManager:
         if not text:
             raise ValidationError("output_dir 不能为空")
         path = Path(text).expanduser()
-        return (self.project_root / path).resolve() if not path.is_absolute() else path.resolve()
+        resolved = (self.project_root / path).resolve() if not path.is_absolute() else path.resolve()
+        allowed_root_value = os.environ.get("BAC_ANALYSIS_OUTPUT_ROOT", "").strip()
+        if not allowed_root_value:
+            return resolved
+        allowed_root = Path(allowed_root_value).expanduser().resolve()
+        if resolved != allowed_root and allowed_root not in resolved.parents:
+            raise ValidationError(f"输出路径必须位于批准输出目录内: {allowed_root}")
+        return resolved
 
     def _resolve_task_output_path(self, raw_value: Any, task_name: str) -> Path:
         output_root = self._resolve_output_path(raw_value)

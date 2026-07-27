@@ -26,15 +26,19 @@ set +a
 
 VENV_DIR="${PROJECT_DIR}/.venv_web"
 SERVICE_NAME="${SERVICE_NAME:-bac-analysis-portal}"
-APP_USER="${APP_USER:-$(id -un)}"
-APP_GROUP="${APP_GROUP:-$(id -gn)}"
+APP_USER="${APP_USER:-pathogen-workbench}"
+APP_GROUP="${APP_GROUP:-pathogen-workbench}"
+CREATE_SERVICE_USER="${CREATE_SERVICE_USER:-1}"
 APP_HOST="${APP_HOST:-127.0.0.1}"
 APP_PORT="${APP_PORT:-5055}"
 GUNICORN_WORKERS="${GUNICORN_WORKERS:-2}"
 SERVER_NAME="${SERVER_NAME:-_}"
 INSTALL_SYSTEM_PACKAGES="${INSTALL_SYSTEM_PACKAGES:-1}"
-PORTAL_DB_PATH="${PORTAL_DB_PATH:-${PROJECT_DIR}/bac_analysis_portal.sqlite3}"
-BAC_ANALYSIS_TASK_ROOT="${BAC_ANALYSIS_TASK_ROOT:-${PROJECT_DIR}/analysis_tasks}"
+PORTAL_STATE_DIR="${PORTAL_STATE_DIR:-/var/lib/pathogen-workbench/state}"
+PORTAL_DB_PATH="${PORTAL_DB_PATH:-${PORTAL_STATE_DIR}/bac_analysis_portal.sqlite3}"
+BAC_ANALYSIS_TASK_ROOT="${BAC_ANALYSIS_TASK_ROOT:-/var/lib/pathogen-workbench/tasks}"
+BAC_ANALYSIS_OUTPUT_ROOT="${BAC_ANALYSIS_OUTPUT_ROOT:-/var/lib/pathogen-workbench/outputs}"
+META_DATABASE_ROOT="${META_DATABASE_ROOT:-/data/pathogen-db}"
 
 echo "Project dir: ${PROJECT_DIR}"
 echo "Env file: ${ENV_FILE}"
@@ -42,6 +46,21 @@ echo "App user: ${APP_USER}:${APP_GROUP}"
 echo "Bind: ${APP_HOST}:${APP_PORT}"
 echo "Portal DB: ${PORTAL_DB_PATH}"
 echo "Task root: ${BAC_ANALYSIS_TASK_ROOT}"
+
+if ! getent group "${APP_GROUP}" >/dev/null; then
+  if [[ "${CREATE_SERVICE_USER}" != "1" ]]; then
+    echo "ERROR: service group does not exist: ${APP_GROUP}" >&2
+    exit 2
+  fi
+  sudo groupadd --system "${APP_GROUP}"
+fi
+if ! id "${APP_USER}" >/dev/null 2>&1; then
+  if [[ "${CREATE_SERVICE_USER}" != "1" ]]; then
+    echo "ERROR: service user does not exist: ${APP_USER}" >&2
+    exit 2
+  fi
+  sudo useradd --system --gid "${APP_GROUP}" --home-dir /nonexistent --shell /usr/sbin/nologin "${APP_USER}"
+fi
 
 if [[ "${PORTAL_MODE:-}" == "production" ]]; then
   if [[ -z "${PORTAL_SECRET_KEY:-}" || "${PORTAL_SECRET_KEY}" == replace-with-* ]]; then
@@ -54,7 +73,7 @@ if [[ "${PORTAL_MODE:-}" == "production" ]]; then
   fi
 fi
 
-mkdir -p "$(dirname "${PORTAL_DB_PATH}")" "${BAC_ANALYSIS_TASK_ROOT}"
+sudo install -d -o "${APP_USER}" -g "${APP_GROUP}" -m 0750 "$(dirname "${PORTAL_DB_PATH}")" "${BAC_ANALYSIS_TASK_ROOT}" "${BAC_ANALYSIS_OUTPUT_ROOT}"
 
 if [[ "${INSTALL_SYSTEM_PACKAGES}" == "1" ]]; then
   echo "Installing Ubuntu system packages..."
@@ -96,6 +115,14 @@ Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=${ENV_FILE}
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadOnlyPaths=${PROJECT_DIR} ${META_DATABASE_ROOT}
+ReadWritePaths=$(dirname "${PORTAL_DB_PATH}") ${BAC_ANALYSIS_TASK_ROOT} ${BAC_ANALYSIS_OUTPUT_ROOT}
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

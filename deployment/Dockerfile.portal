@@ -6,6 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+RUN groupadd --system --gid 10001 pathogen-workbench \
+    && useradd --system --uid 10001 --gid pathogen-workbench --home-dir /nonexistent --shell /usr/sbin/nologin pathogen-workbench
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
@@ -15,6 +18,7 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install -r /app/requirements-release.lock
 
 COPY . /app
+USER pathogen-workbench
 
 EXPOSE 5055
 

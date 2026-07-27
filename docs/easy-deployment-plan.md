@@ -123,6 +123,17 @@ bash install.sh --prefix /opt/pathogen-workbench --database-root /data/pathogen-
 /opt/miniconda3                   # Conda/Mamba 安装
 ```
 
+## 执行权限与数据目录
+
+生产安装器默认创建不可登录的 `pathogen-workbench` 系统账号。Portal 及其分析子进程均以该账号运行；不要使用 `root`、个人登录账号或共享管理员账号启动服务。
+
+- `/opt/pathogen-workbench/app`、Conda 运行时和 `/data/pathogen-db` 应由管理员维护，并对服务账号只读。
+- `/data/pathogen-workbench/state` 与 `/data/pathogen-workbench/tasks` 是服务账号唯一默认可写目录，权限为 `0750`。
+- 分析输出必须置于由该账号管理的批准输出根目录；不要把个人主目录、系统目录或参考库目录作为输出位置。
+- systemd 使用 `NoNewPrivileges`、私有 `/tmp`、只读系统/代码/参考库路径和最小 `ReadWritePaths`。如新增数据盘，必须显式加入服务的可写路径，并按同一账号/权限规则创建。
+
+Docker Compose 同样使用 UID/GID `10001` 的非 root 账号、只读根文件系统、临时 `/tmp`、只读参考库挂载及 `no-new-privileges`。宿主机的 state/task 挂载目录应事先 `chown 10001:10001`。
+
 Docker Compose 方案中，源码目录挂载为 `/app`，状态目录挂载为 `/data/pathogen-workbench/state`，数据库目录挂载为 `/data/pathogen-db`。
 
 ## 推荐部署命令
