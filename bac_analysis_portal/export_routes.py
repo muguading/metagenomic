@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import csv
 import io
+import re
+import secrets
+import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
-from flask import Response, request, send_file
+from flask import Response, jsonify, request, send_file, session
 
 from .app_services import get_app_services
 from .export_utils import (
@@ -19,6 +22,7 @@ from .export_utils import (
     _normalize_export_sheets,
     _sanitize_export_filename,
 )
+from .import_templates import _extract_batch_upload_headers, _parse_database_batch_upload
 from .task_manager import ValidationError
 
 
@@ -64,10 +68,30 @@ def _safe_zip_part(value: object, fallback: str = "unknown") -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in text).strip("._") or fallback
 
 
-def _analysis_archive_name(artifact_type: str, sample_name: str, path: Path, task_id: str = "", *, include_task_prefix: bool = False) -> str:
+def _replace_archive_sample_name(filename: str, source_sample_name: str, export_sample_name: str) -> str:
+    """Replace a source sample-name prefix in an artifact filename when present."""
+    source = _safe_zip_part(source_sample_name, "")
+    target = _safe_zip_part(export_sample_name)
+    if source and target != source:
+        if filename.startswith(f"{source}."):
+            return f"{target}{filename[len(source):]}"
+        if filename.startswith(f"{source}_"):
+            return f"{target}{filename[len(source):]}"
+    return filename
+
+
+def _analysis_archive_name(
+    artifact_type: str,
+    sample_name: str,
+    path: Path,
+    task_id: str = "",
+    *,
+    source_sample_name: str = "",
+    include_task_prefix: bool = False,
+) -> str:
     safe_sample = _safe_zip_part(sample_name)
     safe_task = _safe_zip_part(task_id, "")
-    filename = path.name
+    filename = _replace_archive_sample_name(path.name, source_sample_name, sample_name)
     if safe_sample and not filename.startswith(f"{safe_sample}.") and not filename.startswith(f"{safe_sample}_"):
         filename = f"{safe_sample}_{filename}"
     if include_task_prefix and safe_task and not filename.startswith(f"{safe_task}_"):
@@ -86,6 +110,122 @@ def _duplicate_sample_names(raw_samples: list[object]) -> set[str]:
             continue
         sample_tasks.setdefault(sample_name, set()).add(task_id)
     return {sample_name for sample_name, task_ids in sample_tasks.items() if len(task_ids) > 1}
+
+
+def _export_sample_name(sample_item: dict) -> str:
+    return str(sample_item.get("export_sample_name") or sample_item.get("sample_name") or "").strip()
+
+
+def _duplicate_export_sample_names(raw_samples: list[object]) -> set[str]:
+    return _duplicate_sample_names(
+        [
+            {
+                "task_id": item.get("task_id"),
+                "sample_name": _export_sample_name(item),
+            }
+            for item in raw_samples
+            if isinstance(item, dict)
+        ]
+    )
+
+
+def _is_ncov_or_monkeypox_task(task: dict) -> bool:
+    """Identify virus tasks whose exported consensus FASTA header follows the sample label."""
+    params = task.get("params") if isinstance(task.get("params"), dict) else {}
+    values = [
+        task.get("name"),
+        task.get("demo_type"),
+        task.get("pipeline_script"),
+        params.get("species"),
+        params.get("ref"),
+    ]
+    text = " ".join(str(value or "").lower() for value in values)
+    markers = (
+        "sars-cov-2",
+        "sars cov 2",
+        "2019-ncov",
+        "covid-19",
+        "ncov",
+        "新冠",
+        "新型冠状",
+        "monkeypox",
+        "mpox",
+        "hmpxv",
+        "猴痘",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _rewrite_first_fasta_contig_name(content: bytes, sample_name: str) -> bytes:
+    """Return a FASTA copy whose first record identifier is the safe exported sample name."""
+    target = _safe_zip_part(sample_name).encode("utf-8")
+    header_start = content.find(b">")
+    while header_start >= 0 and header_start not in {0} and content[header_start - 1:header_start] not in {b"\n", b"\r"}:
+        header_start = content.find(b">", header_start + 1)
+    if header_start < 0:
+        return content
+    line_end = content.find(b"\n", header_start)
+    if line_end < 0:
+        line_end = len(content)
+    old_header = content[header_start + 1:line_end].rstrip(b"\r")
+    description_start = len(old_header)
+    for index, character in enumerate(old_header):
+        if character in b" \t":
+            description_start = index
+            break
+    description = old_header[description_start:]
+    return content[:header_start] + b">" + target + description + content[line_end:]
+
+
+_ILLUMINA_LIBRARY_SUFFIX_RE = re.compile(r"_S\d+_L\d{3}_\d{3}$", re.IGNORECASE)
+
+
+def _canonical_meta_sequencing_name(value: object) -> str:
+    """Remove the standard Illumina sample/lane/read suffix used in FASTQ folder names."""
+    return _ILLUMINA_LIBRARY_SUFFIX_RE.sub("", str(value or "").strip()).strip()
+
+
+def _prepare_meta_name_mapping(rows: list[dict[str, str]], sequencing_column: str, sample_column: str) -> dict[str, object]:
+    mapping: dict[str, str] = {}
+    duplicates: set[str] = set()
+    skipped_rows = 0
+    for row in rows:
+        sequencing_name = str(row.get(sequencing_column) or "").strip()
+        sample_name = str(row.get(sample_column) or "").strip()
+        if not sequencing_name or not sample_name:
+            skipped_rows += 1
+            continue
+        existing = mapping.get(sequencing_name)
+        if existing is not None and existing != sample_name:
+            duplicates.add(sequencing_name)
+            continue
+        mapping[sequencing_name] = sample_name
+    for sequencing_name in duplicates:
+        mapping.pop(sequencing_name, None)
+
+    normalized_mapping: dict[str, str] = {}
+    ambiguous_normalized_names: set[str] = set()
+    for sequencing_name, sample_name in mapping.items():
+        normalized_name = _canonical_meta_sequencing_name(sequencing_name)
+        if not normalized_name:
+            continue
+        existing = normalized_mapping.get(normalized_name)
+        if existing is not None and existing != sample_name:
+            ambiguous_normalized_names.add(normalized_name)
+            continue
+        normalized_mapping[normalized_name] = sample_name
+    for normalized_name in ambiguous_normalized_names:
+        normalized_mapping.pop(normalized_name, None)
+
+    return {
+        "mapping": mapping,
+        "normalized_mapping": normalized_mapping,
+        "mapped_count": len(mapping),
+        "library_suffix_normalized_count": len(normalized_mapping),
+        "skipped_rows": skipped_rows,
+        "duplicate_sequencing_names": sorted(duplicates),
+        "ambiguous_normalized_sequencing_names": sorted(ambiguous_normalized_names),
+    }
 
 
 def _iter_report_sample_dirs(report_source: dict, requested_sample: str) -> list[tuple[str, Path]]:
@@ -139,6 +279,20 @@ def _find_analysis_artifacts(sample_dir: Path, sample_name: str, artifact_type: 
 def register_export_routes(app) -> None:
     services = get_app_services(app)
     login_required = services.access.login_required
+    metadata_import_cache: dict[str, dict[str, object]] = {}
+
+    def _purge_expired_metadata_imports() -> None:
+        expires_before = time.monotonic() - 30 * 60
+        for import_id, item in list(metadata_import_cache.items()):
+            if float(item.get("created_at", 0) or 0) < expires_before:
+                metadata_import_cache.pop(import_id, None)
+
+    def _get_metadata_import(import_id: str) -> dict[str, object]:
+        _purge_expired_metadata_imports()
+        item = metadata_import_cache.get(import_id)
+        if not item or str(item.get("username") or "") != str(session.get("username") or ""):
+            raise ValidationError("Meta 导入记录不存在或已过期，请重新导入文件")
+        return item
 
     @app.post("/api/export/table")
     @login_required
@@ -176,6 +330,62 @@ def register_export_routes(app) -> None:
             },
         )
 
+    @app.post("/api/export/sample-meta/preview")
+    @login_required
+    def preview_sample_meta_import():
+        upload = request.files.get("file")
+        if upload is None or not str(upload.filename or "").strip():
+            raise ValidationError("请先选择 Meta 文件")
+        filename = Path(str(upload.filename or "")).name
+        if Path(filename).suffix.lower() not in {".csv", ".tsv", ".xlsx"}:
+            raise ValidationError("Meta 文件只支持 csv、tsv 或 xlsx")
+        content = upload.read()
+        if len(content) > 10 * 1024 * 1024:
+            raise ValidationError("Meta 文件不能超过 10 MB")
+        headers = _extract_batch_upload_headers(filename, content)
+        rows = _parse_database_batch_upload(filename, content)
+        if not headers:
+            raise ValidationError("Meta 文件缺少表头")
+        if not rows:
+            raise ValidationError("Meta 文件没有可用于匹配的数据行")
+        import_id = secrets.token_urlsafe(18)
+        _purge_expired_metadata_imports()
+        metadata_import_cache[import_id] = {
+            "created_at": time.monotonic(),
+            "username": str(session.get("username") or ""),
+            "filename": filename,
+            "headers": headers,
+            "rows": rows,
+        }
+        return jsonify({
+            "import_id": import_id,
+            "filename": filename,
+            "headers": headers,
+            "row_count": len(rows),
+        })
+
+    @app.post("/api/export/sample-meta/mapping")
+    @login_required
+    def prepare_sample_meta_mapping():
+        payload = request.get_json(force=True) or {}
+        import_id = str(payload.get("import_id") or "").strip()
+        sequencing_column = str(payload.get("sequencing_column") or "").strip()
+        sample_column = str(payload.get("sample_column") or "").strip()
+        item = _get_metadata_import(import_id)
+        headers = item.get("headers") if isinstance(item.get("headers"), list) else []
+        if sequencing_column not in headers or sample_column not in headers:
+            raise ValidationError("请选择 Meta 文件中的测序名称列和样本名称列")
+        if sequencing_column == sample_column:
+            raise ValidationError("测序名称列和样本名称列不能相同")
+        rows = item.get("rows") if isinstance(item.get("rows"), list) else []
+        result = _prepare_meta_name_mapping(rows, sequencing_column, sample_column)
+        return jsonify({
+            "filename": item.get("filename"),
+            "sequencing_column": sequencing_column,
+            "sample_column": sample_column,
+            **result,
+        })
+
     @app.post("/api/tasks/batch-analysis-export")
     @login_required
     def export_batch_analysis_results():
@@ -200,7 +410,7 @@ def register_export_routes(app) -> None:
         missing_rows: list[list[object]] = []
         seen_requests: set[tuple[str, str]] = set()
         zip_names: set[str] = set()
-        duplicate_sample_names = _duplicate_sample_names(raw_samples)
+        duplicate_sample_names = _duplicate_export_sample_names(raw_samples)
 
         with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for sample_item in raw_samples:
@@ -208,6 +418,7 @@ def register_export_routes(app) -> None:
                     continue
                 task_id = str(sample_item.get("task_id") or "").strip()
                 sample_name = str(sample_item.get("sample_name") or "").strip()
+                export_sample_name = _export_sample_name(sample_item)
                 if not task_id:
                     continue
                 request_key = (task_id, sample_name)
@@ -230,9 +441,10 @@ def register_export_routes(app) -> None:
                     continue
 
                 for resolved_sample, sample_dir in _iter_report_sample_dirs(report_source, sample_name):
-                    sample_label = sample_name or resolved_sample or sample_dir.name
+                    source_sample_label = sample_name or resolved_sample or sample_dir.name
+                    sample_label = export_sample_name or source_sample_label
                     for artifact_type in artifact_types:
-                        found_paths, missing_patterns = _find_analysis_artifacts(sample_dir, sample_label, artifact_type)
+                        found_paths, missing_patterns = _find_analysis_artifacts(sample_dir, source_sample_label, artifact_type)
                         type_label = ANALYSIS_EXPORT_TYPES[artifact_type]["label"]
                         for pattern in missing_patterns:
                             missing_rows.append([task_id, task.get("name") or task_id, sample_label, type_label, pattern])
@@ -242,13 +454,20 @@ def register_export_routes(app) -> None:
                                 sample_label,
                                 path,
                                 task_id,
+                                source_sample_name=source_sample_label,
                                 include_task_prefix=sample_label in duplicate_sample_names,
                             )
                             if archive_name in zip_names:
                                 archive_path = Path(archive_name)
                                 archive_name = str(archive_path.with_name(f"{len(zip_names)}_{archive_path.name}"))
                             zip_names.add(archive_name)
-                            archive.write(path, archive_name)
+                            if artifact_type == "fasta" and sample_label != source_sample_label and _is_ncov_or_monkeypox_task(task):
+                                exported_content = _rewrite_first_fasta_contig_name(path.read_bytes(), sample_label)
+                                archive.writestr(archive_name, exported_content)
+                                exported_size = len(exported_content)
+                            else:
+                                archive.write(path, archive_name)
+                                exported_size = path.stat().st_size
                             manifest_rows.append([
                                 task_id,
                                 task.get("name") or task_id,
@@ -256,7 +475,7 @@ def register_export_routes(app) -> None:
                                 type_label,
                                 str(path),
                                 archive_name,
-                                path.stat().st_size,
+                                exported_size,
                             ])
 
             archive.writestr(

@@ -40,3 +40,33 @@ rtk pip list            rtk pnpm install        rtk npm run <script>
 - For debugging, use raw command without rtk prefix
 - `rtk proxy <cmd>` runs command without filtering but tracks usage
 <!-- /headroom:rtk-instructions -->
+
+## Test server for build and packaging
+
+Use this server only for project-scoped environment setup, builds, packaging, and
+non-production verification:
+
+- Host: `111.231.101.166`
+- User: `ubuntu`
+- Platform: Ubuntu (confirm the exact version and CPU architecture after login)
+
+### Credential handling
+
+- Do **not** store passwords, private keys, access tokens, or database secrets in
+  this repository, commits, generated reports, or command output.
+- Before any password-based SSH operation, obtain the password from the current
+  secure session and pass it through an ephemeral secret mechanism (for example,
+  a terminal prompt or `SSH_PASSWORD` supplied only to the current process).
+- Prefer a dedicated SSH key or a short-lived credential for repeated work.
+
+### Operating rules
+
+- Treat this host as a test server, never as production.
+- Inspect disk space, OS release, architecture, existing Conda/Docker tooling,
+  and active services before installing or changing anything.
+- Keep project assets under a dedicated project directory; do not modify unrelated
+  users, services, Conda environments, Docker images, or databases.
+- Ask for confirmation before destructive actions, public network exposure,
+  system-wide package changes, service restarts, or deleting remote assets.
+- Record installed versions, environment names, database locations, and validation
+  results in a project-local deployment report that contains no secrets.

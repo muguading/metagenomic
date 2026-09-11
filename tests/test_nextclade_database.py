@@ -151,6 +151,7 @@ def test_manager_check_reports_latest_and_outdated_datasets(tmp_path: Path, monk
         "total_count": 2,
         "latest_count": 1,
         "outdated_count": 1,
+        "missing_count": 0,
         "unmatched_count": 0,
         "failed_count": 0,
     }
@@ -226,3 +227,59 @@ def test_nextclade_check_endpoint_is_admin_only(
     assert forbidden.status_code == 403
     assert allowed.status_code == 200
     assert allowed.get_json()["summary"]["total_count"] == 0
+
+
+def test_scan_adds_missing_influenza_ha_and_na_datasets(tmp_path: Path) -> None:
+    from bac_analysis_portal.nextclade_database import _scan_local_datasets
+
+    dataset_root = tmp_path / "nextclade_db"
+    dataset_root.mkdir()
+    remote = [
+        _dataset_payload(
+            name="Influenza A H9 HA",
+            accession="HA_REF",
+            reference="H9 reference",
+            tag="2026-08-01",
+            path="nextstrain/flu/h9n2/ha/REF_H9",
+            shortcuts=["flu_h9n2_ha"],
+        ),
+        _dataset_payload(
+            name="Influenza A H9 NA",
+            accession="NA_REF",
+            reference="N2 reference",
+            tag="2026-08-01",
+            path="nextstrain/flu/h9n2/na/REF_N2",
+            shortcuts=["flu_h9n2_na"],
+        ),
+    ]
+
+    items = _scan_local_datasets(dataset_root, remote)
+
+    assert [(item["display_name"], item["status"], item["updatable"]) for item in items] == [
+        ("Influenza A H9 HA", "missing", True),
+        ("Influenza A H9 NA", "missing", True),
+    ]
+    assert {item["dataset_path"] for item in items} == {
+        "nextstrain/flu/h9n2/ha/REF_H9",
+        "nextstrain/flu/h9n2/na/REF_N2",
+    }
+
+
+def test_download_creates_missing_dataset_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset_root = tmp_path / "nextclade_db"
+    dataset_root.mkdir()
+
+    def fake_run(_executable: Path, arguments: list[str], *, timeout: int) -> CompletedProcess[str]:
+        output_dir = Path(arguments[arguments.index("--output-dir") + 1])
+        output_dir.mkdir()
+        (output_dir / "pathogen.json").write_text(json.dumps({"version": {"tag": "new"}}), encoding="utf-8")
+        return CompletedProcess(["nextclade"], 0, "", "")
+
+    monkeypatch.setattr(nextclade_database, "_run_nextclade", fake_run)
+    _download_and_replace(
+        Path("/fake/nextclade"),
+        dataset_root,
+        {"directory": "flu_h9n2_ha", "dataset_path": "nextstrain/flu/h9n2/ha", "latest_tag": "new"},
+    )
+
+    assert (dataset_root / "flu_h9n2_ha" / "pathogen.json").is_file()

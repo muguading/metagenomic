@@ -51,6 +51,7 @@ from metagenomic_refactor.virus_analysis import (
     resolve_hadv_reference,
     resolve_hpiv_reference,
     resolve_influenza_reference,
+    run_influenza_segment_nextclade,
     resolve_norovirus_reference,
     resolve_orthoebolavirus_reference,
     resolve_rotavirus_reference,
@@ -2538,6 +2539,7 @@ def reassm_fun(inf, fq1, fq2, threads, Pre, pts, pst, method, asmt, f, outputfa)
                 polish_soft=pst,
                 logf=f,
             )
+            run_influenza_segment_nextclade(Pre, Path(outputfa), logf=f)
 
 
 def renamefa(inf, ofn):

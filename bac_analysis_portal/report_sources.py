@@ -441,6 +441,7 @@ def _build_multi_sample_queue_summary(report_source: dict) -> dict:
             "species_name": species_name,
             "taxonomy_ratio": taxonomy_call.get("ratio"),
             "typing": typing_call.get("typing") or "",
+            "nextclade_typing": typing_call.get("nextclade_typing") or "-",
             "serotype": typing_call.get("serotype") or "",
             "coverage": _display_percent(typing_call.get("coverage")) if typing_call.get("coverage") not in {None, ""} else "",
             "coverage_1x": typing_call.get("coverage_1x") or (_display_percent(typing_call.get("coverage")) if typing_call.get("coverage") not in {None, ""} else ""),
@@ -524,15 +525,76 @@ def _read_multi_sample_assembly_profile(report_dir: Path, sample_name: str) -> d
         "total_length": _first_table_cell(first, columns, ["总长度(bp)"]),
     }
 
+
+def _read_multi_sample_influenza_typing_call(report_dir: Path, sample_name: str) -> dict[str, str]:
+    """Read the subtype selected by the workflow's influenza reference stage."""
+    table = _read_tsv_rows(report_dir / "wf_flu" / "typing_summary.tsv")
+    row = _first_row_mapping(table)
+    if not row:
+        return {}
+    status = _first_mapping_value(row, ["status", "状态"])
+    subtype_call = _first_mapping_value(row, ["subtype_call", "分型结果", "subtype"])
+    ha_subtype = _first_mapping_value(row, ["ha_subtype", "HA亚型"])
+    na_subtype = _first_mapping_value(row, ["na_subtype", "NA亚型"])
+    if not _has_meaningful_serotype_value(subtype_call):
+        subtype_call = "".join(
+            value for value in (ha_subtype, na_subtype)
+            if _has_meaningful_serotype_value(value)
+        )
+    if not _has_meaningful_serotype_value(subtype_call):
+        return {}
+    return {
+        "species": _first_mapping_value(row, ["influenza_type", "流感类型", "virus_type"]),
+        "typing": subtype_call,
+        "status": status,
+    }
+
+
+def _read_multi_sample_influenza_nextclade_typing(report_dir: Path) -> str:
+    """Return ready HA and NA Nextclade clades as ``HA|NA`` for batch display."""
+    table = _read_tsv_rows(report_dir / "wf_flu" / "nextclade" / "segment_analysis.tsv")
+    columns = table.get("columns") or []
+    rows = table.get("rows") or []
+    segment_index = _find_column_index(columns, ["segment", "片段"])
+    clade_index = _find_column_index(columns, ["clade", "分支", "Nextclade分型"])
+    status_index = _find_column_index(columns, ["status", "状态"])
+    if segment_index is None or clade_index is None:
+        return "-"
+
+    values_by_segment: dict[str, list[str]] = {"HA": [], "NA": []}
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        segment = _cell_at(row, segment_index).upper()
+        if segment not in values_by_segment:
+            continue
+        status = _cell_at(row, status_index).lower() if status_index is not None else "ready"
+        clade = _cell_at(row, clade_index)
+        if status != "ready" or not _has_meaningful_serotype_value(clade):
+            continue
+        if clade not in values_by_segment[segment]:
+            values_by_segment[segment].append(clade)
+
+    ha = "/".join(values_by_segment["HA"])
+    na = "/".join(values_by_segment["NA"])
+    return f"{ha or '-'}|{na or '-'}" if ha or na else "-"
+
+
 def _read_multi_sample_typing_call(report_dir: Path, sample_name: str, checkm_info: dict, *, is_virus: bool) -> dict:
     result: dict[str, object] = {}
     serotype_table = _read_multi_sample_serotype_table(report_dir, sample_name)
     serotype_row = _first_row_mapping(serotype_table)
     if is_virus:
         nextclade_row = _first_row_mapping(_read_tsv_rows(report_dir / "nextclade_output" / "nextclade.tsv"))
+        influenza_typing = _read_multi_sample_influenza_typing_call(report_dir, sample_name)
+        influenza_nextclade_typing = _read_multi_sample_influenza_nextclade_typing(report_dir)
         species = _first_mapping_value(serotype_row, ["病毒类型", "物种", "species", "virus_type"])
         clade = _first_mapping_value(serotype_row, ["Nextclade分型", "大类分型", "大亚型", "分型结果", "基因型", "亚型", "clade", "type"])
         lineage = _first_mapping_value(serotype_row, ["Pango谱系", "S子亚型", "子亚型", "G分型", "P分型", "组合分型", "lineage", "subtype"])
+        if influenza_typing:
+            species = influenza_typing.get("species") or species
+            clade = influenza_typing.get("typing") or clade
+            lineage = ""
         hiv_typing = _read_multi_sample_hiv_typing_call(report_dir, sample_name)
         if not species:
             species = str(hiv_typing.get("species") or "").strip()
@@ -559,6 +621,7 @@ def _read_multi_sample_typing_call(report_dir: Path, sample_name: str, checkm_in
         result.update({
             "species": species,
             "typing": " / ".join(typing_parts),
+            "nextclade_typing": influenza_nextclade_typing,
             "coverage": coverage,
             "coverage_1x": depth_coverage.get("coverage_1x") or (_display_percent(coverage) if coverage else ""),
             "coverage_10x": depth_coverage.get("coverage_10x") or "",
@@ -888,6 +951,7 @@ def _build_multi_sample_overview_table(sample_rows: list[dict], *, is_virus: boo
             {"key": "q_label", "label": "Q20 / Q30"},
             {"key": "species_name", "label": "病毒/物种"},
             {"key": "typing", "label": "分型/谱系"},
+            {"key": "nextclade_typing", "label": "Nextclade分型"},
             {"key": "coverage_1x", "label": "1x覆盖度"},
             {"key": "coverage_10x", "label": "10x覆盖度"},
             {"key": "coverage_100x", "label": "100x覆盖度"},

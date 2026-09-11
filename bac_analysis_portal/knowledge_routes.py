@@ -41,6 +41,12 @@ def register_knowledge_routes(app) -> None:
         ensure_panel_enabled()
         return no_cache(knowledge.bundle())
 
+    @app.put("/api/knowledge-base/pathonet-rules")
+    @login_required
+    def update_pathonet_rules():
+        ensure_panel_enabled()
+        return no_cache(knowledge.update_pathonet_rules(request.get_json(force=True), identity=identity()))
+
     @app.get("/api/report-templates/virus")
     @login_required
     def list_virus_report_templates():

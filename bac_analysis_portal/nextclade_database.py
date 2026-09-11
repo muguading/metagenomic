@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -196,11 +197,46 @@ def _display_name(payload: dict[str, object], fallback: str) -> str:
     return fallback
 
 
+def _is_influenza_ha_or_na_dataset(payload: dict[str, object]) -> bool:
+    parts = [part for part in str(payload.get("path") or "").strip().split("/") if part]
+    return len(parts) >= 4 and parts[:2] == ["nextstrain", "flu"] and parts[3] in {"ha", "na"}
+
+
+def _influenza_dataset_directory(payload: dict[str, object]) -> str:
+    dataset_path = str(payload.get("path") or "").strip()
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", dataset_path).strip("_.")
+
+
+def _missing_influenza_ha_na_items(
+    remote_datasets: list[dict[str, object]], known_remote_paths: set[str]
+) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for remote in remote_datasets:
+        dataset_path = str(remote.get("path") or "").strip()
+        latest_tag = _version_tag(remote)
+        if not _is_influenza_ha_or_na_dataset(remote) or not dataset_path or dataset_path in known_remote_paths:
+            continue
+        items.append(
+            {
+                "directory": _influenza_dataset_directory(remote),
+                "display_name": _display_name(remote, dataset_path),
+                "local_tag": "",
+                "latest_tag": latest_tag,
+                "dataset_path": dataset_path,
+                "status": "missing",
+                "updatable": bool(latest_tag),
+                "message": "尚未下载；可在此处使用 ncov 环境的 Nextclade 获取数据集",
+            }
+        )
+    return sorted(items, key=lambda item: str(item["directory"]).casefold())
+
+
 def _summarize(items: list[dict[str, object]]) -> dict[str, int]:
     return {
         "total_count": len(items),
         "latest_count": sum(item.get("status") == "latest" for item in items),
         "outdated_count": sum(item.get("status") == "outdated" for item in items),
+        "missing_count": sum(item.get("status") == "missing" for item in items),
         "unmatched_count": sum(item.get("status") == "unmatched" for item in items),
         "failed_count": sum(item.get("status") in {"invalid", "update_failed"} for item in items),
     }
@@ -208,6 +244,7 @@ def _summarize(items: list[dict[str, object]]) -> dict[str, int]:
 
 def _scan_local_datasets(dataset_root: Path, remote_datasets: list[dict[str, object]]) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
+    known_remote_paths: set[str] = set()
     for metadata_path in sorted(dataset_root.glob("*/pathogen.json"), key=lambda item: item.parent.name.casefold()):
         directory = metadata_path.parent.name
         try:
@@ -243,6 +280,9 @@ def _scan_local_datasets(dataset_root: Path, remote_datasets: list[dict[str, obj
             )
             continue
         latest_tag = _version_tag(remote)
+        remote_path = str(remote.get("path") or "").strip()
+        if remote_path:
+            known_remote_paths.add(remote_path)
         is_latest = bool(local_tag and latest_tag and local_tag == latest_tag)
         items.append(
             {
@@ -250,12 +290,13 @@ def _scan_local_datasets(dataset_root: Path, remote_datasets: list[dict[str, obj
                 "display_name": _display_name(local_payload, directory),
                 "local_tag": local_tag,
                 "latest_tag": latest_tag,
-                "dataset_path": str(remote.get("path") or "").strip(),
+                "dataset_path": remote_path,
                 "status": "latest" if is_latest else "outdated",
                 "updatable": bool(not is_latest and latest_tag and remote.get("path")),
                 "message": "已是最新兼容版本" if is_latest else "存在可更新的兼容版本",
             }
         )
+    items.extend(_missing_influenza_ha_na_items(remote_datasets, known_remote_paths))
     if not items:
         raise ValidationError(f"Nextclade 数据库目录中没有数据集: {dataset_root}")
     return items
@@ -285,7 +326,12 @@ def _download_and_replace(
     dataset_path = str(item.get("dataset_path") or "").strip()
     expected_tag = str(item.get("latest_tag") or "").strip()
     target = dataset_root / directory
-    if not directory or target.parent.resolve() != dataset_root.resolve() or not target.is_dir() or target.is_symlink():
+    if (
+        not directory
+        or target.parent.resolve() != dataset_root.resolve()
+        or target.is_symlink()
+        or (target.exists() and not target.is_dir())
+    ):
         raise ValidationError(f"数据集目录无效: {directory or '-'}")
     if not dataset_path or not expected_tag:
         raise ValidationError(f"数据集 {directory} 缺少在线路径或版本信息")
@@ -293,6 +339,7 @@ def _download_and_replace(
     staging_root = Path(tempfile.mkdtemp(prefix=".nextclade_update_", dir=dataset_root))
     download_root = staging_root / "dataset"
     backup = dataset_root / f".{directory}.backup-{uuid4().hex}"
+    replacing_existing = target.is_dir()
     try:
         _run_nextclade(
             executable,
@@ -312,15 +359,18 @@ def _download_and_replace(
         if _version_tag(downloaded_metadata) != expected_tag:
             raise ValidationError(f"数据集 {directory} 下载版本校验失败")
 
-        target.rename(backup)
+        if replacing_existing:
+            target.rename(backup)
         try:
             download_root.rename(target)
         except OSError:
-            backup.rename(target)
+            if replacing_existing and backup.is_dir():
+                backup.rename(target)
             raise
-        shutil.rmtree(backup, ignore_errors=True)
+        if replacing_existing:
+            shutil.rmtree(backup, ignore_errors=True)
     except OSError as exc:
-        if backup.is_dir() and not target.exists():
+        if replacing_existing and backup.is_dir() and not target.exists():
             backup.rename(target)
         raise ValidationError(f"替换数据集 {directory} 失败: {exc}") from exc
     finally:
@@ -367,7 +417,7 @@ class NextcladeDatabaseManager:
             update_results: list[dict[str, object]] = []
             for item in items:
                 directory = str(item.get("directory") or "")
-                if item.get("status") != "outdated" or (requested is not None and directory not in requested):
+                if item.get("status") not in {"outdated", "missing"} or (requested is not None and directory not in requested):
                     continue
                 try:
                     _download_and_replace(executable, dataset_root, item)

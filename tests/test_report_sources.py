@@ -135,6 +135,8 @@ def test_ncov_multi_sample_demo_skips_pending_sample_and_builds_payload(tmp_path
     assert payload["task"]["multi_sample_summary"]["table"]["rows"][1]["mean_depth"] == "2524.40"
     assert payload["sections"]["assembly"]["coverage"]["status"] == "ready"
     assert payload["sections"]["serotype"]["status"] == "ready"
+    assert payload["sections"]["serotype"]["qc_result"]["overallStatus"] == "bad"
+    assert payload["sections"]["serotype"]["qc_result"]["mixedSites"]["totalMixedSites"] == 4
 
 
 def test_other_virus_multi_sample_demos_build_batch_overview(tmp_path) -> None:
@@ -221,3 +223,46 @@ def test_multi_sample_depth_coverage_falls_back_to_mosdepth_dist(tmp_path) -> No
         "coverage_10x": "80.00%",
         "coverage_100x": "25.00%",
     }
+
+
+def test_influenza_batch_overview_reads_wf_flu_subtype_call(tmp_path) -> None:
+    from bac_analysis_portal.report_sources import _read_multi_sample_typing_call
+
+    report_dir = tmp_path / "HP-P5_S30_L001_001"
+    typing_dir = report_dir / "wf_flu"
+    typing_dir.mkdir(parents=True)
+    (typing_dir / "typing_summary.tsv").write_text(
+        "sample\tinfluenza_type\tha_subtype\tna_subtype\tsubtype_call\tstatus\treference_path\n"
+        "HP-P5_S30_L001_001\tInfluenza A virus\tH9\tN2\tH9N2\tready\t/ref/final_segments.fa\n",
+        encoding="utf-8",
+    )
+    nextclade_dir = typing_dir / "nextclade"
+    nextclade_dir.mkdir()
+    (nextclade_dir / "segment_analysis.tsv").write_text(
+        "segment\tsubtype_call\tdataset\tclade\tstatus\tdetail\n"
+        "HA\tH9N2\tha-one\tG.1\tready\tgood\n"
+        "HA\tH9N2\tha-two\tG.1\tready\tgood\n"
+        "NA\tH9N2\tna-one\tA.2.2\tready\tgood\n",
+        encoding="utf-8",
+    )
+
+    call = _read_multi_sample_typing_call(report_dir, "HP-P5_S30_L001_001", {}, is_virus=True)
+
+    assert call["species"] == "Influenza A virus"
+    assert call["typing"] == "H9N2"
+    assert call["nextclade_typing"] == "G.1|A.2.2"
+
+
+def test_influenza_batch_overview_uses_dash_without_ready_nextclade(tmp_path) -> None:
+    from bac_analysis_portal.report_sources import _read_multi_sample_influenza_nextclade_typing
+
+    report_dir = tmp_path / "sample"
+    nextclade_dir = report_dir / "wf_flu" / "nextclade"
+    nextclade_dir.mkdir(parents=True)
+    (nextclade_dir / "segment_analysis.tsv").write_text(
+        "segment\tsubtype_call\tdataset\tclade\tstatus\tdetail\n"
+        "HA\tH3N2\tha\t-\tskipped\tmissing dataset\n",
+        encoding="utf-8",
+    )
+
+    assert _read_multi_sample_influenza_nextclade_typing(report_dir) == "-"

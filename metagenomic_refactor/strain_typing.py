@@ -29,6 +29,54 @@ def _database_path(*parts: str) -> str:
     return str(_database_root().joinpath(*parts))
 
 
+def _pathonet_knowledge_base_path(path: str | Path | None = None) -> Path:
+    """Return the PathoNet rule file selected for this invocation."""
+    configured_path = str(path or os.environ.get("META_PATHONET_KNOWLEDGE_BASE") or "").strip()
+    if configured_path:
+        return Path(configured_path).expanduser().resolve()
+    return _database_root() / "knowledge_base" / "pathonet" / "pathonet_typing.json"
+
+
+def _load_pathonet_knowledge_base(path: str | Path | None = None) -> Dict[str, Dict[str, List[str]]]:
+    """Load and validate focus serotype and virulence-gene rules from JSON."""
+    knowledge_base_path = _pathonet_knowledge_base_path(path)
+    try:
+        payload = json.loads(knowledge_base_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"PathoNet knowledge base was not found: {knowledge_base_path}. "
+            "Set META_PATHONET_KNOWLEDGE_BASE to a valid JSON file."
+        ) from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"PathoNet knowledge base is invalid: {knowledge_base_path}") from exc
+
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise ValueError(f"PathoNet knowledge base must contain an entries list: {knowledge_base_path}")
+
+    rules: Dict[str, Dict[str, List[str]]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError(f"PathoNet knowledge base entry must be an object: {knowledge_base_path}")
+        species = str(entry.get("species") or "").strip()
+        if not species:
+            raise ValueError(f"PathoNet knowledge base entry is missing species: {knowledge_base_path}")
+        if species in rules:
+            raise ValueError(f"PathoNet knowledge base has duplicate species '{species}': {knowledge_base_path}")
+
+        normalized_entry: Dict[str, List[str]] = {}
+        for field in ("serotype", "vfgene"):
+            values = entry.get(field)
+            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                raise ValueError(
+                    f"PathoNet knowledge base field '{field}' for species '{species}' must be a list of strings: "
+                    f"{knowledge_base_path}"
+                )
+            normalized_entry[field] = [value.strip() for value in values if value.strip()]
+        rules[species] = normalized_entry
+    return rules
+
+
 def _log_serotype(pre: str, message: str) -> None:
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     with open(f'{pre}_serotype.log', 'a', encoding='utf-8') as handle:
@@ -117,21 +165,9 @@ def serotype_D(pre):  # 副溶血弧菌血清型——VPsero
     return s1['血清型'].tolist()[0]
 
 
-def PathoNet(Pre, species):
+def PathoNet(Pre, species, knowledge_base_path: str | Path | None = None):
     PathoSamdict = {'样本名称': Pre, '物种': species, '血清型': '-', '毒力基因': '-'}
-    PathoNetdict = {
-        'vcholerae': {'serotype': ['O1', 'O139'], 'vfgene': ['ctxA', 'ctxB']},
-        'salmonella': {'serotype': ['S.Typhi', 'S.Paratyphi A', 'S.Paratyphi B', 'S.Paratyphi C', 'S.Enteritidis', 'S.Typhimurium', 'S.Choleracsuis', 'S.Derby', 'S.London', 'S.Stanley', 'S.Calabar', 'S.Agona', 'S.Thompson', 'S.Rissen', 'S.enterica subsp. enterica serovar Typhimurium monophasic variant'], 'vfgene': []},
-        'campylobacter': {'serotype': ['HS:1', 'HS:2', 'HS:4', 'HS:19', 'HS:23', 'HS:41', 'HS:44'], 'vfgene': ['hcp', 'virB', 'ciaB', 'ggt', 'cdtA', 'cdtB', 'ctdC', 'cgtA', 'cgtB', 'wlaN', 'cstII']},
-        'klebsiella': {'serotype': ['K1', 'K2', 'K5', 'K20', 'K54', 'K57'], 'vfgene': []},
-        'ecoli': {'serotype': ['O2', 'O45', 'O103', 'O111', 'O121', 'O145', 'O157'], 'vfgene': ['stx1A', 'stx1B', 'stx2A', 'stx2B', 'stxA']},
-        'Shigella': {'serotype': ['1a', '1b', '1c', '2a', '2b', '3a', '3b', '4a', '4b', '5a', '5b', 'X', 'Xv', 'F6', 'Y'], 'vfgene': ['stx1A', 'stx1B', 'stx2A', 'stx2B', 'stxA']},
-        'hinfluenzae': {'serotype': ['a', 'b', 'c', 'd', 'e', 'f'], 'vfgene': ['hmw1A', 'iga1', 'ompP5']},
-        'vparahaemolyticus': {'serotype': ['O3:K6', 'O4:K8', 'O10:K4'], 'vfgene': ['tdh', 'trh']},
-        'listeria': {'serotype': ['IIa', 'IIb', 'IIc', 'IVb', 'L'], 'vfgene': ['hly']},
-        'ssuis': {'serotype': ['1', '2', '7', '9', '14'], 'vfgene': ['mrp', 'sly', 'ef']},
-        'neisseria': {'serotype': ['A', 'B', 'C', 'W', 'X', 'Y', 'Z', '29E', 'H', 'I', 'K', 'L'], 'vfgene': ['ctrA', 'porA', 'tbpA']},
-    }
+    pathonet_rules = _load_pathonet_knowledge_base(knowledge_base_path)
     def _load_vf_hits():
         if os.path.isfile(f'{Pre}.vfdb.tsv') and os.path.getsize(f'{Pre}.vfdb.tsv') != 0:
             return pd.read_table(f'{Pre}.vfdb.tsv')
@@ -141,7 +177,7 @@ def PathoNet(Pre, species):
             return '-'
         return f'{stype}(重点关注)' if stype in focus_list else stype
     if species == 'campylobacter':
-        pathodict = PathoNetdict[species]
+        pathodict = pathonet_rules.get(species, {'serotype': [], 'vfgene': []})
         if os.path.isfile(f'{Pre}.vfdb.tsv') and os.path.getsize(f'{Pre}.vfdb.tsv') != 0:
             cpvfdb = pd.read_table(f'{Pre}.vfdb.tsv')
             tarvflist = [i for i in pathodict['vfgene'] if i in cpvfdb['基因名称'].tolist()]
@@ -154,7 +190,7 @@ def PathoNet(Pre, species):
             else:
                 PathoSamdict['血清型'] = cpserodb['血清型'].tolist()[0]
     if species == 'klebsiella':
-        pathodict = PathoNetdict[species]
+        pathodict = pathonet_rules.get(species, {'serotype': [], 'vfgene': []})
         if os.path.isfile(f'{Pre}.vfdb.tsv') and os.path.getsize(f'{Pre}.vfdb.tsv') != 0:
             klvfdb = pd.read_table(f'{Pre}.vfdb.tsv')
             tarvflist = [i for i in pathodict['vfgene'] if i in klvfdb['基因名称'].tolist()]
@@ -168,7 +204,7 @@ def PathoNet(Pre, species):
             else:
                 PathoSamdict['血清型'] = stype
     if species == 'salmonella':
-        pathodict = PathoNetdict[species]
+        pathodict = pathonet_rules.get(species, {'serotype': [], 'vfgene': []})
         if os.path.isfile(f'{Pre}.vfdb.tsv') and os.path.getsize(f'{Pre}.vfdb.tsv') != 0:
             salvfdb = pd.read_table(f'{Pre}.vfdb.tsv')
             tarvflist = [i for i in pathodict['vfgene'] if i in salvfdb['基因名称'].tolist()]
@@ -182,7 +218,7 @@ def PathoNet(Pre, species):
             else:
                 PathoSamdict['血清型'] = stype
     if species == 'vcholerae':
-        pathodict = PathoNetdict[species]
+        pathodict = pathonet_rules.get(species, {'serotype': [], 'vfgene': []})
         vchovfdb = _load_vf_hits()
         if vchovfdb is not None:
             tarvflist = [i for i in pathodict['vfgene'] if i in vchovfdb['基因名称'].tolist()]
@@ -196,7 +232,7 @@ def PathoNet(Pre, species):
             else:
                 PathoSamdict['血清型'] = stype
     if species in {'hinfluenzae', 'vparahaemolyticus', 'listeria', 'ssuis', 'nmeningitidis', 'neisseria'}:
-        pathodict = PathoNetdict[species]
+        pathodict = pathonet_rules.get(species, {'serotype': [], 'vfgene': []})
         vfdb = _load_vf_hits()
         if vfdb is not None:
             tarvflist = [i for i in pathodict['vfgene'] if i in vfdb['基因名称'].tolist()]
@@ -213,10 +249,10 @@ def PathoNet(Pre, species):
     if species == 'ecoli_achtman_4':
         ecodb = pd.read_table(f'{Pre}_serotype_result.tsv')
         if ecodb['物种'].tolist()[0] == 'Escherichia coli':
-            pathodict = PathoNetdict['ecoli']
+            pathodict = pathonet_rules.get('ecoli', {'serotype': [], 'vfgene': []})
             stype = ecodb['O抗原'].tolist()[0]
         else:
-            pathodict = PathoNetdict['Shigella']
+            pathodict = pathonet_rules.get('Shigella', {'serotype': [], 'vfgene': []})
             stype = ecodb['志贺分型'].tolist()[0]
         PathoSamdict['血清型'] = f'{stype}(重点关注)' if stype in pathodict['serotype'] else stype
         PathoSamdict['物种'] = ecodb['物种'].tolist()[0]

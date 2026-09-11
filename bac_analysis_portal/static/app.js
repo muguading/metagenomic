@@ -74,6 +74,7 @@ const state = {
   },
   knowledgeBaseTable: {
     pathogens: { sortKey: "common_name", sortDirection: "asc", filters: {} },
+    pathonet_rules: { sortKey: "species", sortDirection: "asc", filters: {} },
     gene_rules: { sortKey: "report_label", sortDirection: "asc", filters: {} },
     event_rules: { sortKey: "title", sortDirection: "asc", filters: {} },
     downgrade_rules: { sortKey: "title", sortDirection: "asc", filters: {} },
@@ -249,6 +250,22 @@ const state = {
     sortKey: "sample_name",
     sortDirection: "asc",
     exportFormat: "xlsx",
+    metaImport: {
+      loading: false,
+      importId: "",
+      filename: "",
+      headers: [],
+      rowCount: 0,
+      sequencingColumn: "",
+      sampleColumn: "",
+      nameMapping: {},
+      normalizedNameMapping: {},
+      mappedCount: 0,
+      isApplied: false,
+      editorOpen: true,
+      skippedRows: 0,
+      duplicateSequencingNames: [],
+    },
   },
   analysisExport: {
     open: false,
@@ -944,6 +961,7 @@ const elements = {
   mergedExportBody: document.getElementById("merged-export-body"),
   mergedExportDescription: document.getElementById("merged-export-description"),
   mergedExportFormat: document.getElementById("merged-export-format"),
+  mergedExportMetaFile: document.getElementById("merged-export-meta-file"),
   mergedExportFilteredButton: document.getElementById("merged-export-filtered"),
   mergedExportSelectedButton: document.getElementById("merged-export-selected"),
   closeMergedExportModalButton: document.getElementById("close-merged-export-modal"),
@@ -1733,7 +1751,11 @@ function renderTableFilterInput({
           type="button"
           title="清空筛选"
           aria-label="清空筛选"${clearAttr}
-        >×</button>
+        >
+          <svg class="table-filter-clear-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <path d="M4 4l8 8M12 4l-8 8" />
+          </svg>
+        </button>
       ` : ""}
     </div>
   `;
@@ -2634,6 +2656,7 @@ function bindEvents() {
   elements.mergedExportFormat?.addEventListener("change", () => {
     state.mergedExport.exportFormat = elements.mergedExportFormat.value || "xlsx";
   });
+  elements.mergedExportMetaFile?.addEventListener("change", importMergedExportMetaFile);
   elements.mergedExportFilteredButton?.addEventListener("click", () => exportMergedSamples("filtered"));
   elements.mergedExportSelectedButton?.addEventListener("click", () => exportMergedSamples("selected"));
   elements.analysisExportBackdrop?.addEventListener("click", closeAnalysisExportModal);
@@ -3752,6 +3775,10 @@ function isInfluenzaSpecies(speciesLabel = getSelectedVirusSpeciesLabel()) {
   return normalized.includes("influenza") || normalized.includes("流感");
 }
 
+function doesVirusRequireReference() {
+  return isVirusWorkstation() && !isInfluenzaSpecies();
+}
+
 function getVirusReferenceAliases(speciesLabel = getSelectedVirusSpeciesLabel()) {
   const normalized = normalizeReferenceLabel(speciesLabel);
   if (!normalized) return [];
@@ -3945,7 +3972,11 @@ function renderRefOptions(selectedValue) {
   const effectiveValue = shouldAutoSelect
     ? getReferenceValueFromRecord(preferredVirusRecord || candidateRecords[0])
     : (currentValue || (!customPath ? defaultVirusReference : ""));
-  const emptyLabel = isVirus ? (aliases.length ? "请选择病毒参考" : "请先选择病毒物种") : "可留空";
+  const emptyLabel = isVirus
+    ? (isInfluenzaSpecies()
+      ? "可选：由流感工作流自动选择参考"
+      : (aliases.length ? "请选择病毒参考" : "请先选择病毒物种"))
+    : "可留空";
   const options = [{ value: "", label: emptyLabel }].concat(
     candidateRecords.map((record) => ({
       value: getReferenceValueFromRecord(record),
@@ -4070,6 +4101,22 @@ function getReferenceStrategyCopy() {
   const refStatus = refValue ? (usingUpload ? "已上传任务参考" : "已选择参考") : "尚未选择";
   const gtfStatus = gtfValue ? "已有注释" : "未提供注释";
   if (isVirusWorkstation()) {
+    if (isInfluenzaSpecies()) {
+      return {
+        visible: true,
+        required: false,
+        title: "流感参考由工作流自动选择",
+        badge: refValue ? "使用自定义参考" : "自动选择",
+        summary: refValue
+          ? "当前将使用你指定的流感参考。清空此项后，工作流会先判定流感型别/亚型，再从内置参考集中选择匹配的分节段参考。"
+          : "无需上传参考基因组。工作流会先判定流感型别/亚型，再从内置参考集中自动选择匹配的分节段参考；如需固定参考，可在下方任选或上传。",
+        chips: [
+          { label: "组装类型", value: asmType || "shortref" },
+          { label: "参考策略", value: refValue ? "自定义参考" : "自动选择" },
+          { label: "注释状态", value: gtfStatus },
+        ],
+      };
+    }
     return {
       visible: true,
       required: true,
@@ -4237,7 +4284,7 @@ function isStepThreeComplete() {
   const required = ["inputtype", "thread", "runflow"];
   if (!isMetagenomeWorkstation()) {
     required.push("asm_type", "method", "species");
-    if (isVirusWorkstation()) {
+    if (doesVirusRequireReference()) {
       required.push("ref");
     }
   }
@@ -4305,7 +4352,7 @@ function getMissingStepThreeFields() {
       { id: "method", label: "组装方法" },
       { id: "species", label: "物种信息" },
     );
-    if (isVirusWorkstation()) {
+    if (doesVirusRequireReference()) {
       fields.push({ id: "ref", label: "参考基因组" });
     }
   }
@@ -6344,6 +6391,7 @@ function renderKnowledgeBasePanel(error = null) {
   const collections = payload.collections || {};
   const collectionOptions = [
     { key: "pathogens", label: "病原体画像", empty: "还没有病原体画像。" },
+    { key: "pathonet_rules", label: "PathoNet 运行规则", empty: "还没有 PathoNet 运行规则。" },
     { key: "typing_rules", label: "分型/亚型规则", empty: "还没有分型规则。" },
     { key: "gene_rules", label: "重点基因规则", empty: "还没有基因规则。" },
     { key: "event_rules", label: "组合事件规则", empty: "还没有事件规则。" },
@@ -6379,6 +6427,11 @@ function renderKnowledgeBasePanel(error = null) {
       <span>分型/亚型规则</span>
       <strong>${escapeHtml(String(summary.typing_rule_count || 0))}</strong>
       <p>病毒大亚型、子亚型、基因型和 CRF 判读规则。</p>
+    </article>
+    <article class="knowledge-base-card">
+      <span>PathoNet 运行规则</span>
+      <strong>${escapeHtml(String(summary.pathonet_rule_count || 0))}</strong>
+      <p>重点血清型与毒力基因；支持运行环境覆盖配置。</p>
     </article>
     <article class="knowledge-base-card">
       <span>组合 / 降权规则</span>
@@ -6465,12 +6518,177 @@ function renderKnowledgeBasePanel(error = null) {
   updateKnowledgeBaseBrowserResults();
 }
 
+function normalizePathoNetRuleEntry(entry = {}) {
+  return {
+    species: String(entry?.species || "").trim(),
+    serotype: Array.isArray(entry?.serotype) ? entry.serotype.map((item) => String(item || "").trim()).filter(Boolean) : [],
+    vfgene: Array.isArray(entry?.vfgene) ? entry.vfgene.map((item) => String(item || "").trim()).filter(Boolean) : [],
+  };
+}
+
+function splitPathoNetRuleValues(value) {
+  const values = String(value || "")
+    .split(/[\n,;；]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return [...new Set(values)];
+}
+
+function getPathoNetRuleEntries(payload = state.knowledgeBaseBundle || {}) {
+  const entries = Array.isArray(payload?.collections?.pathonet_rules) ? payload.collections.pathonet_rules : [];
+  return entries.map((entry) => normalizePathoNetRuleEntry(entry));
+}
+
+function collectPathoNetRuleEntry(form) {
+  if (!(form instanceof HTMLFormElement)) return normalizePathoNetRuleEntry();
+  return {
+    species: String(form.querySelector('[name="species"]')?.value || "").trim(),
+    serotype: splitPathoNetRuleValues(form.querySelector('[name="serotype"]')?.value),
+    vfgene: splitPathoNetRuleValues(form.querySelector('[name="vfgene"]')?.value),
+  };
+}
+
+function renderPathoNetRuleCrudToolbar(payload, isAdmin) {
+  const configuration = payload?.pathonet_configuration || {};
+  const sourceLabel = configuration.source === "environment" ? "环境变量覆盖文件" : "数据库知识库文件";
+  return `
+    <section class="pathonet-rule-crud-toolbar" aria-labelledby="pathonet-rule-crud-title">
+      <div class="pathonet-rule-crud-toolbar-copy">
+        <span class="pathonet-rule-crud-kicker">RUNTIME CONFIGURATION</span>
+        <div>
+          <h3 id="pathonet-rule-crud-title">PathoNet 运行规则</h3>
+          <p class="field-note">在表格中检索规则；管理员可新增、编辑或删除单条规则。</p>
+        </div>
+      </div>
+      <div class="pathonet-rule-crud-toolbar-actions">
+        <span class="knowledge-base-pill">${escapeHtml(sourceLabel)}</span>
+        ${isAdmin ? '<button class="primary-button" type="button" data-add-pathonet-rule>新增规则</button>' : ""}
+      </div>
+    </section>
+  `;
+}
+
+function renderPathoNetRuleModalFields(rule) {
+  const normalized = normalizePathoNetRuleEntry(rule);
+  return `
+    <fieldset class="pathonet-rule-modal-fields">
+      <legend>规则字段</legend>
+      <p class="pathonet-rule-modal-help">每行一个值；也可使用逗号或分号分隔。保存后会立即更新当前运行时知识库。</p>
+      <div class="pathonet-rule-modal-grid">
+        <label class="pathonet-rule-modal-field pathonet-rule-modal-field-species">
+          <span>运行物种键 <b aria-hidden="true">*</b></span>
+          <input name="species" value="${escapeHtml(normalized.species)}" autocomplete="off" spellcheck="false" required placeholder="例如：vcholerae">
+        </label>
+        <label class="pathonet-rule-modal-field">
+          <span>重点血清型</span>
+          <textarea name="serotype" rows="6" placeholder="例如：O1&#10;O139">${escapeHtml(normalized.serotype.join("\n"))}</textarea>
+        </label>
+        <label class="pathonet-rule-modal-field">
+          <span>重点毒力基因</span>
+          <textarea name="vfgene" rows="6" placeholder="例如：ctxA&#10;ctxB">${escapeHtml(normalized.vfgene.join("\n"))}</textarea>
+        </label>
+      </div>
+      <p class="pathonet-rule-modal-error hidden" data-pathonet-modal-error role="alert"></p>
+    </fieldset>
+  `;
+}
+
+function setPathoNetRuleModalError(form, message = "") {
+  const error = form.querySelector("[data-pathonet-modal-error]");
+  if (!(error instanceof HTMLElement)) return;
+  error.textContent = message;
+  error.classList.toggle("hidden", !message);
+}
+
+async function showPathoNetRuleEditor(mode, originalSpecies = "") {
+  const entries = getPathoNetRuleEntries();
+  const existing = entries.find((entry) => entry.species === originalSpecies);
+  if (mode === "edit" && !existing) {
+    showToast("未找到要编辑的 PathoNet 规则。", "warning");
+    return;
+  }
+  const isCreate = mode === "create";
+  const result = await openWorkbenchFormModal({
+    kicker: "PATHONET RULE",
+    title: isCreate ? "新增运行规则" : `编辑 ${existing.species}`,
+    message: "维护运行物种键、重点血清型与重点毒力基因。",
+    panelClass: "pathonet-rule-modal-panel",
+    formClass: "pathonet-rule-modal-form",
+    bodyHtml: renderPathoNetRuleModalFields(isCreate ? normalizePathoNetRuleEntry() : existing),
+    cancelLabel: "取消",
+    closeLabel: "关闭",
+    confirmLabel: isCreate ? "新增规则" : "保存修改",
+    defaultFocusSelector: '[name="species"]',
+    validateSubmit: (form) => {
+      const draft = collectPathoNetRuleEntry(form);
+      const duplicate = entries.some((entry) => entry.species === draft.species && entry.species !== originalSpecies);
+      if (!draft.species) {
+        setPathoNetRuleModalError(form, "请填写运行物种键。");
+        form.querySelector('[name="species"]')?.focus({ preventScroll: true });
+        return false;
+      }
+      if (duplicate) {
+        setPathoNetRuleModalError(form, `运行物种键“${draft.species}”已存在，请使用唯一的物种键。`);
+        form.querySelector('[name="species"]')?.focus({ preventScroll: true });
+        return false;
+      }
+      setPathoNetRuleModalError(form);
+      return true;
+    },
+    transformSubmit: (form) => collectPathoNetRuleEntry(form),
+  });
+  if (!result || typeof result !== "object") return;
+  const draft = normalizePathoNetRuleEntry(result);
+  const nextEntries = isCreate
+    ? [...entries, draft]
+    : entries.map((entry) => (entry.species === originalSpecies ? draft : entry));
+  try {
+    await persistPathoNetRuleEntries(nextEntries, isCreate ? "PathoNet 运行规则已新增" : "PathoNet 运行规则已更新");
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : "保存失败，请稍后重试。", "warning");
+  }
+}
+
+async function persistPathoNetRuleEntries(entries, successMessage) {
+  const data = await requestJson("/api/knowledge-base/pathonet-rules", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ entries }),
+  });
+  state.knowledgeBaseBundle = data || state.knowledgeBaseBundle;
+  showToast(successMessage);
+  renderKnowledgeBasePanel();
+}
+
+async function deletePathoNetRule(species) {
+  const entries = getPathoNetRuleEntries();
+  const target = entries.find((entry) => entry.species === species);
+  if (!target) {
+    showToast("未找到要删除的 PathoNet 规则。", "warning");
+    return;
+  }
+  const confirmed = await confirmDangerAction({
+    title: "删除 PathoNet 运行规则",
+    message: `将删除运行物种键“${target.species}”及其重点血清型和毒力基因。`,
+    impact: "删除后不再用于后续 PathoNet 判读。",
+    detail: "保存的知识库会立即切换到删除后的规则集合。",
+    confirmLabel: "确认删除规则",
+  });
+  if (!confirmed) return;
+  try {
+    await persistPathoNetRuleEntries(entries.filter((entry) => entry.species !== species), "PathoNet 运行规则已删除");
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : "删除失败，请稍后重试。", "warning");
+  }
+}
+
 function updateKnowledgeBaseBrowserResults(preserve = null) {
   if (!elements.knowledgeBaseCollections) return;
   const payload = state.knowledgeBaseBundle || {};
   const collections = payload.collections || {};
   const collectionOptions = [
     { key: "pathogens", label: "病原体画像", empty: "还没有病原体画像。" },
+    { key: "pathonet_rules", label: "PathoNet 运行规则", empty: "还没有 PathoNet 运行规则。" },
     { key: "typing_rules", label: "分型/亚型规则", empty: "还没有分型规则。" },
     { key: "gene_rules", label: "重点基因规则", empty: "还没有基因规则。" },
     { key: "event_rules", label: "组合事件规则", empty: "还没有事件规则。" },
@@ -6487,6 +6705,7 @@ function updateKnowledgeBaseBrowserResults(preserve = null) {
   const searchTerm = String(state.knowledgeBaseFilter.search || "").trim().toLowerCase();
   const filteredItems = activeItems.filter((item) => matchKnowledgeBaseSearch(item, searchTerm));
   const activeOption = collectionOptions.find((item) => item.key === activeCollection) || collectionOptions[0];
+  const canManagePathoNet = activeCollection === "pathonet_rules" && state.currentUser?.role === "admin";
   const resultsRoot = elements.knowledgeBaseCollections.querySelector("#knowledge-base-browser-results");
   if (!resultsRoot) return;
   const effectivePreserve = preserve || captureKnowledgeBaseBrowserState();
@@ -6495,9 +6714,25 @@ function updateKnowledgeBaseBrowserResults(preserve = null) {
   const visibleRows = getKnowledgeBaseBrowserRows(activeCollection, filteredItems);
   const filteredRows = visibleRows.filter((row) => matchKnowledgeBaseTableFilters(row, tableColumns, tableState.filters || {}));
   const sortedRows = sortKnowledgeBaseBrowserRows(filteredRows, tableColumns, tableState);
-  const previewLimit = activeCollection === "pathogens" ? 2 : 3;
+  const previewLimit = activeCollection === "pathogens" ? 2 : (activeCollection === "pathonet_rules" ? 0 : 3);
   const previewCards = filteredItems.slice(0, previewLimit).map((item) => renderKnowledgeBaseItemCard(activeCollection, item)).join("");
+  const tableActions = canManagePathoNet
+    ? {
+      label: "操作",
+      render: (row) => {
+        const species = String(row?.species || "");
+        const encodedSpecies = encodeURIComponent(species);
+        return `
+          <div class="pathonet-rule-table-actions">
+            <button class="pathonet-rule-action-button is-edit" type="button" data-pathonet-edit="${escapeHtml(encodedSpecies)}" aria-label="编辑 ${escapeHtml(species)} 规则">编辑</button>
+            <button class="pathonet-rule-action-button is-delete" type="button" data-pathonet-delete="${escapeHtml(encodedSpecies)}" aria-label="删除 ${escapeHtml(species)} 规则">删除</button>
+          </div>
+        `;
+      },
+    }
+    : null;
   resultsRoot.innerHTML = `
+    ${activeCollection === "pathonet_rules" ? renderPathoNetRuleCrudToolbar(payload, canManagePathoNet) : ""}
     <div class="knowledge-base-browser-meta">
       <strong>${escapeHtml(activeOption.label)}</strong>
       <span>${escapeHtml(searchTerm ? `命中 ${sortedRows.length} / ${activeItems.length}` : `共 ${sortedRows.length} / ${activeItems.length} 条`)}</span>
@@ -6511,7 +6746,7 @@ function updateKnowledgeBaseBrowserResults(preserve = null) {
       ${renderKnowledgeBaseBrowserTable(activeCollection, tableColumns, sortedRows, tableState, {
         emptyTitle: "没有匹配内容",
         emptyMessage: searchTerm ? "当前搜索词没有命中条目，换个关键词再试。" : activeOption.empty,
-      })}
+      }, tableActions)}
     </div>
   `;
   bindKnowledgeBaseTableInteractions(activeCollection);
@@ -6574,6 +6809,13 @@ function ensureKnowledgeBaseTableState(collectionKey) {
 }
 
 function getKnowledgeBaseBrowserColumns(collectionKey) {
+  if (collectionKey === "pathonet_rules") {
+    return [
+      { key: "species", label: "运行物种键", sortable: true, filterable: true },
+      { key: "serotype", label: "重点血清型", sortable: true, filterable: true },
+      { key: "vfgene", label: "重点毒力基因", sortable: true, filterable: true },
+    ];
+  }
   if (collectionKey === "pathogens") {
     return [
       { key: "common_name", label: "中文名", sortable: true, filterable: true },
@@ -6652,6 +6894,13 @@ function getKnowledgeBaseBrowserColumns(collectionKey) {
 
 function getKnowledgeBaseBrowserRows(collectionKey, items) {
   return (items || []).map((item) => {
+    if (collectionKey === "pathonet_rules") {
+      return {
+        species: item?.species || "-",
+        serotype: Array.isArray(item?.serotype) && item.serotype.length ? item.serotype.join("；") : "-",
+        vfgene: Array.isArray(item?.vfgene) && item.vfgene.length ? item.vfgene.join("；") : "-",
+      };
+    }
     if (collectionKey === "pathogens") {
       const syndromes = Array.isArray(item?.syndrome_associations)
         ? item.syndrome_associations.map((entry) => {
@@ -6773,7 +7022,9 @@ function sortKnowledgeBaseBrowserRows(rows, columns, tableState) {
   });
 }
 
-function renderKnowledgeBaseBrowserTable(collectionKey, columns, rows, tableState, emptyState = null) {
+function renderKnowledgeBaseBrowserTable(collectionKey, columns, rows, tableState, emptyState = null, rowActions = null) {
+  const hasRowActions = typeof rowActions?.render === "function";
+  const actionLabel = rowActions?.label || "操作";
   return `
     <div class="database-table-shell">
       <div class="database-table-frame">
@@ -6800,6 +7051,7 @@ function renderKnowledgeBaseBrowserTable(collectionKey, columns, rows, tableStat
                   </div>
                 </th>
               `).join("")}
+              ${hasRowActions ? `<th class="knowledge-base-table-actions-head">${escapeHtml(actionLabel)}</th>` : ""}
             </tr>
           </thead>
           <tbody>
@@ -6816,11 +7068,12 @@ function renderKnowledgeBaseBrowserTable(collectionKey, columns, rows, tableStat
                       const cellClass = index < 2 ? "knowledge-base-table-cell knowledge-base-table-cell-primary" : "knowledge-base-table-cell";
                       return `<td class="${cellClass}" title="${escapeHtml(value)}"${renderMobileCellAttributes(column.label)}>${text}</td>`;
                     }).join("")}
+                    ${hasRowActions ? `<td class="knowledge-base-table-actions"${renderMobileCellAttributes(actionLabel, "actions")}>${rowActions.render(row)}</td>` : ""}
                   </tr>
                 `).join("")
               : `
                 <tr class="knowledge-base-browser-empty-row">
-                  <td colspan="${columns.length}">
+                  <td colspan="${columns.length + (hasRowActions ? 1 : 0)}">
                     <article class="knowledge-base-browser-empty">
                       <strong>${escapeHtml(emptyState?.emptyTitle || "没有匹配内容")}</strong>
                       <p>${escapeHtml(emptyState?.emptyMessage || "当前没有可显示的条目。")}</p>
@@ -6872,6 +7125,22 @@ function bindKnowledgeBaseTableInteractions(collectionKey) {
       });
     });
   });
+  if (collectionKey !== "pathonet_rules" || state.currentUser?.role !== "admin") return;
+  root.querySelector("[data-add-pathonet-rule]")?.addEventListener("click", () => {
+    void showPathoNetRuleEditor("create");
+  });
+  root.querySelectorAll("[data-pathonet-edit]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const species = decodeURIComponent(String(button.dataset.pathonetEdit || ""));
+      if (species) void showPathoNetRuleEditor("edit", species);
+    });
+  });
+  root.querySelectorAll("[data-pathonet-delete]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const species = decodeURIComponent(String(button.dataset.pathonetDelete || ""));
+      if (species) await deletePathoNetRule(species);
+    });
+  });
 }
 
 function formatNcbiClassification(item) {
@@ -6916,6 +7185,7 @@ function matchKnowledgeBaseSearch(item, searchTerm) {
     item?.level,
     item?.broad_type,
     item?.serotype,
+    Array.isArray(item?.vfgene) ? item.vfgene.join(" ") : item?.vfgene,
     item?.subtype,
     item?.subtype_type,
     item?.panel,
@@ -7006,6 +7276,33 @@ function matchKnowledgeBaseSearch(item, searchTerm) {
 }
 
 function renderKnowledgeBaseItemCard(collectionKey, item) {
+  if (collectionKey === "pathonet_rules") {
+    const serotypes = Array.isArray(item?.serotype) ? item.serotype : [];
+    const virulenceGenes = Array.isArray(item?.vfgene) ? item.vfgene : [];
+    return `
+      <article class="knowledge-base-browser-card">
+        <div class="knowledge-base-browser-card-head">
+          <div>
+            <p class="knowledge-base-card-kicker">PathoNet 运行规则</p>
+            <h4>${escapeHtml(item?.species || "未命名物种键")}</h4>
+            <p class="knowledge-base-browser-subtitle">运行时重点关注标记</p>
+          </div>
+          <div class="knowledge-base-pill-group">
+            <span class="knowledge-base-pill">血清型 ${escapeHtml(String(serotypes.length))}</span>
+            <span class="knowledge-base-pill">毒力基因 ${escapeHtml(String(virulenceGenes.length))}</span>
+          </div>
+        </div>
+        <div class="knowledge-base-browser-body">
+          <p>命中下列血清型或毒力基因时，PathoNet 会在结果中标记“重点关注”。</p>
+          <dl class="knowledge-base-browser-facts">
+            <div><dt>重点血清型</dt><dd>${escapeHtml(serotypes.length ? serotypes.join("；") : "-")}</dd></div>
+            <div><dt>重点毒力基因</dt><dd>${escapeHtml(virulenceGenes.length ? virulenceGenes.join("；") : "-")}</dd></div>
+            <div><dt>运行时覆盖</dt><dd>META_PATHONET_KNOWLEDGE_BASE</dd></div>
+          </dl>
+        </div>
+      </article>
+    `;
+  }
   if (collectionKey === "pathogens") {
     const aliases = Array.isArray(item.aliases) ? item.aliases : [];
     const sites = Array.isArray(item.typical_infection_sites) ? item.typical_infection_sites : [];
@@ -8603,6 +8900,27 @@ const MERGED_SAMPLE_COLUMNS = [
   { key: "note", label: "关注说明", sortable: false, text: true },
 ];
 
+const MERGED_LATEST_NAME_COLUMN = { key: "latest_name", label: "最新名称", sortable: false, text: true };
+
+function hasAppliedMergedMetaMapping() {
+  return Boolean(state.mergedExport.metaImport?.isApplied);
+}
+
+function getMergedSampleColumns() {
+  if (!hasAppliedMergedMetaMapping()) return MERGED_SAMPLE_COLUMNS;
+  const sampleNameIndex = MERGED_SAMPLE_COLUMNS.findIndex((column) => column.key === "sample_name");
+  return [
+    ...MERGED_SAMPLE_COLUMNS.slice(0, sampleNameIndex + 1),
+    MERGED_LATEST_NAME_COLUMN,
+    ...MERGED_SAMPLE_COLUMNS.slice(sampleNameIndex + 1),
+  ];
+}
+
+function getMergedSampleColumnValue(sample, column) {
+  if (column.key === "latest_name") return getMergedExportSampleName(sample) || "-";
+  return sample?.[column.key] ?? "-";
+}
+
 const ANALYSIS_EXPORT_TYPES = [
   { key: "fasta", label: "FASTA", description: "样本 final.fasta 序列文件" },
   { key: "qc", label: "质控结果", description: "fastp json 与运行日志" },
@@ -9012,6 +9330,7 @@ function renderMergedExportModal(focusKey = "", caretPosition = null) {
   const abnormalTasks = state.mergedExport.tasks.filter((task) => task.abnormal);
   const allVisibleSelected = Boolean(filteredSamples.length) && filteredSamples.every((sample) => selectedIds.has(sample.sample_id));
   const partialVisibleSelected = filteredSamples.some((sample) => selectedIds.has(sample.sample_id)) && !allVisibleSelected;
+  const mergedColumns = getMergedSampleColumns();
   elements.mergedExportBody.innerHTML = `
     <div class="merged-export-stats">
       ${renderMergedExportStat("来源任务数", state.mergedExport.tasks.length)}
@@ -9024,34 +9343,8 @@ function renderMergedExportModal(focusKey = "", caretPosition = null) {
         ${escapeHtml(`${abnormalTasks.length} 个任务结果读取异常，已跳过其样本并继续合并其他任务。`)}
       </div>
     ` : ""}
-    <div class="merged-export-filters">
-      ${renderMergedFilterInput("任务名称", "taskName")}
-      ${renderMergedFilterInput("样本名称", "sampleName")}
-      ${renderMergedFilterInput("状态", "status")}
-      ${renderMergedFilterInput("物种", "species")}
-      ${renderMergedFilterInput("ST 型", "mlst")}
-      ${renderMergedFilterInput("血清型", "serotype")}
-      ${renderMergedFilterInput("完整性最小", "completenessMin", "number")}
-      ${renderMergedFilterInput("完整性最大", "completenessMax", "number")}
-      ${renderMergedFilterInput("污染率最小", "contaminationMin", "number")}
-      ${renderMergedFilterInput("污染率最大", "contaminationMax", "number")}
-      <label class="merged-filter-field">
-        <span>耐药/毒力</span>
-        <select data-merged-filter="resistanceVirulence">
-          <option value="all" ${state.mergedExport.filters.resistanceVirulence === "all" ? "selected" : ""}>全部</option>
-          <option value="detected" ${state.mergedExport.filters.resistanceVirulence === "detected" ? "selected" : ""}>有检出</option>
-          <option value="none" ${state.mergedExport.filters.resistanceVirulence === "none" ? "selected" : ""}>未检出</option>
-        </select>
-      </label>
-      <label class="merged-filter-field">
-        <span>关注说明</span>
-        <select data-merged-filter="noteMode">
-          <option value="all" ${state.mergedExport.filters.noteMode === "all" ? "selected" : ""}>全部</option>
-          <option value="has" ${state.mergedExport.filters.noteMode === "has" ? "selected" : ""}>有说明</option>
-          <option value="empty" ${state.mergedExport.filters.noteMode === "empty" ? "selected" : ""}>为空</option>
-        </select>
-      </label>
-    </div>
+    ${renderMergedMetaImportPanel()}
+    ${renderMergedFilterPanel()}
     <div class="merged-export-table-shell">
       <table class="merged-export-table">
         <thead>
@@ -9059,7 +9352,7 @@ function renderMergedExportModal(focusKey = "", caretPosition = null) {
             <th class="merged-check-cell">
               <input type="checkbox" data-merged-select-visible ${allVisibleSelected ? "checked" : ""} ${filteredSamples.length ? "" : "disabled"} ${partialVisibleSelected ? "data-indeterminate=\"true\"" : ""} aria-label="全选当前筛选结果">
             </th>
-            ${MERGED_SAMPLE_COLUMNS.map((column) => `
+            ${mergedColumns.map((column) => `
               <th>
                 ${column.sortable ? `<button type="button" data-merged-sort="${escapeHtml(column.key)}">${escapeHtml(column.label)}${state.mergedExport.sortKey === column.key ? ` ${state.mergedExport.sortDirection === "desc" ? "↓" : "↑"}` : ""}</button>` : escapeHtml(column.label)}
               </th>
@@ -9068,7 +9361,7 @@ function renderMergedExportModal(focusKey = "", caretPosition = null) {
         </thead>
         <tbody>
           ${filteredSamples.length ? filteredSamples.map((sample) => renderMergedSampleRow(sample, selectedIds.has(sample.sample_id))).join("") : `
-            <tr><td colspan="${MERGED_SAMPLE_COLUMNS.length + 1}" class="merged-empty-cell">当前筛选范围内没有样本。</td></tr>
+            <tr><td colspan="${mergedColumns.length + 1}" class="merged-empty-cell">当前筛选范围内没有样本。</td></tr>
           `}
         </tbody>
       </table>
@@ -9091,6 +9384,237 @@ function renderMergedExportStat(label, value) {
   return `<article><span>${escapeHtml(label)}</span><strong>${escapeHtml(formatNumber(value))}</strong></article>`;
 }
 
+function findPreferredMetaHeader(headers, candidates) {
+  const normalized = (headers || []).map((header) => String(header || "").trim());
+  for (const candidate of candidates) {
+    const exact = normalized.find((header) => header.toLowerCase() === candidate.toLowerCase());
+    if (exact) return exact;
+  }
+  return "";
+}
+
+function renderMergedMetaImportPanel() {
+  const meta = state.mergedExport.metaImport || {};
+  if (meta.loading) {
+    return `
+      <div class="merged-meta-import-panel is-loading">
+        <strong>正在读取 Meta 信息</strong>
+        <span>正在识别文件表头和数据行。</span>
+      </div>
+    `;
+  }
+  if (!meta.importId) {
+    return `
+      <div class="merged-meta-import-panel is-empty">
+        <div class="merged-meta-import-intro">
+          <span class="merged-meta-import-kicker">META MAPPING</span>
+          <strong>用 Meta 信息规范导出名称</strong>
+          <span>选择测序名称列和样本名称列后，分析结果会使用对应样本名称；新冠和猴痘 FASTA 的首条 contig 也会同步更新。</span>
+        </div>
+        <button type="button" class="ghost-button merged-meta-import-upload" data-merged-meta-upload>
+          <span>导入 Meta</span>
+          <small>CSV · TSV · XLSX</small>
+        </button>
+      </div>
+    `;
+  }
+  if (meta.isApplied && !meta.editorOpen) {
+    return `
+      <div class="merged-meta-import-panel is-applied">
+        <div class="merged-meta-import-applied-copy">
+          <span class="merged-meta-import-kicker">META MAPPING</span>
+          <strong>已应用 ${escapeHtml(String(meta.mappedCount || 0))} 条名称映射</strong>
+          <small>${escapeHtml(meta.filename || "Meta 文件")} · 表格中的“最新名称”已按当前映射显示</small>
+        </div>
+        <div class="merged-meta-import-applied-actions">
+          <button type="button" class="ghost-button" data-merged-meta-edit>调整映射</button>
+          <button type="button" class="ghost-button" data-merged-meta-clear>清除</button>
+        </div>
+      </div>
+    `;
+  }
+  const headers = Array.isArray(meta.headers) ? meta.headers : [];
+  const renderOptions = (selected) => headers.map((header) => `<option value="${escapeHtml(header)}" ${header === selected ? "selected" : ""}>${escapeHtml(header)}</option>`).join("");
+  const mappingNotice = meta.mappedCount
+    ? `已应用 ${meta.mappedCount} 条名称映射。`
+    : "请选择两列后应用名称映射。";
+  const duplicateNotice = Array.isArray(meta.duplicateSequencingNames) && meta.duplicateSequencingNames.length
+    ? ` 已跳过 ${meta.duplicateSequencingNames.length} 个对应多个样本名称的重复测序名称。`
+    : "";
+  return `
+    <div class="merged-meta-import-panel">
+      <div class="merged-meta-import-head">
+        <div>
+          <strong>Meta 信息：${escapeHtml(meta.filename || "已导入文件")}</strong>
+          <span>共读取 ${escapeHtml(String(meta.rowCount || 0))} 行。${escapeHtml(mappingNotice + duplicateNotice)}</span>
+        </div>
+        <button type="button" class="ghost-button" data-merged-meta-clear>清除 Meta</button>
+      </div>
+      <div class="merged-meta-import-fields">
+        <label class="merged-filter-field">
+          <span>测序名称列</span>
+          <select data-merged-meta-sequencing>
+            <option value="">请选择</option>
+            ${renderOptions(meta.sequencingColumn)}
+          </select>
+        </label>
+        <label class="merged-filter-field">
+          <span>样本名称列</span>
+          <select data-merged-meta-sample>
+            <option value="">请选择</option>
+            ${renderOptions(meta.sampleColumn)}
+          </select>
+        </label>
+        <button type="button" class="primary-button merged-meta-apply-button" data-merged-meta-apply>应用名称映射</button>
+      </div>
+    </div>
+  `;
+}
+
+async function importMergedExportMetaFile(event) {
+  const file = event?.target?.files?.[0];
+  if (!file) return;
+  const meta = state.mergedExport.metaImport;
+  meta.loading = true;
+  meta.importId = "";
+  meta.nameMapping = {};
+  meta.normalizedNameMapping = {};
+  meta.mappedCount = 0;
+  meta.isApplied = false;
+  meta.editorOpen = true;
+  renderMergedExportModal();
+  try {
+    const formData = new FormData();
+    formData.append("file", file, file.name);
+    const response = await fetch("/api/export/sample-meta/preview", { method: "POST", body: formData });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Meta 文件导入失败");
+    meta.importId = String(data.import_id || "");
+    meta.filename = String(data.filename || file.name || "");
+    meta.headers = Array.isArray(data.headers) ? data.headers : [];
+    meta.rowCount = Number(data.row_count || 0);
+    meta.sequencingColumn = findPreferredMetaHeader(meta.headers, ["测序名称", "sequencing_name", "sequencing id", "sequence_name"]);
+    meta.sampleColumn = findPreferredMetaHeader(meta.headers, ["样本名称", "sample_name", "sample id", "sample_id"]);
+    meta.skippedRows = 0;
+    meta.duplicateSequencingNames = [];
+    showToast(`已读取 Meta 文件：${meta.rowCount} 行。请选择对应列并应用。`);
+  } catch (error) {
+    console.error(error);
+    showToast(error.message || "Meta 文件导入失败", "error");
+    clearMergedExportMetaImport();
+  } finally {
+    meta.loading = false;
+    renderMergedExportModal();
+  }
+}
+
+function clearMergedExportMetaImport() {
+  state.mergedExport.metaImport = {
+    loading: false,
+    importId: "",
+    filename: "",
+    headers: [],
+    rowCount: 0,
+    sequencingColumn: "",
+    sampleColumn: "",
+    nameMapping: {},
+    normalizedNameMapping: {},
+    mappedCount: 0,
+    isApplied: false,
+    editorOpen: true,
+    skippedRows: 0,
+    duplicateSequencingNames: [],
+  };
+  if (elements.mergedExportMetaFile) elements.mergedExportMetaFile.value = "";
+}
+
+async function applyMergedExportMetaMapping() {
+  const meta = state.mergedExport.metaImport || {};
+  if (!meta.importId || !meta.sequencingColumn || !meta.sampleColumn) {
+    showToast("请选择 Meta 文件中的测序名称列和样本名称列。", "warning");
+    return;
+  }
+  if (meta.sequencingColumn === meta.sampleColumn) {
+    showToast("测序名称列和样本名称列不能相同。", "warning");
+    return;
+  }
+  try {
+    const response = await fetch("/api/export/sample-meta/mapping", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        import_id: meta.importId,
+        sequencing_column: meta.sequencingColumn,
+        sample_column: meta.sampleColumn,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "名称映射生成失败");
+    meta.nameMapping = data.mapping && typeof data.mapping === "object" ? data.mapping : {};
+    meta.normalizedNameMapping = data.normalized_mapping && typeof data.normalized_mapping === "object" ? data.normalized_mapping : {};
+    meta.mappedCount = Number(data.mapped_count || 0);
+    meta.isApplied = true;
+    meta.editorOpen = false;
+    meta.skippedRows = Number(data.skipped_rows || 0);
+    meta.duplicateSequencingNames = Array.isArray(data.duplicate_sequencing_names) ? data.duplicate_sequencing_names : [];
+    renderMergedExportModal();
+    showToast(`已应用 ${meta.mappedCount} 条 Meta 名称映射。`);
+  } catch (error) {
+    console.error(error);
+    showToast(error.message || "名称映射生成失败", "error");
+  }
+}
+
+function getMergedActiveFilterCount() {
+  return Object.values(state.mergedExport.filters || {})
+    .filter((value) => String(value ?? "").trim() && String(value).trim() !== "all")
+    .length;
+}
+
+function renderMergedFilterPanel() {
+  const activeCount = getMergedActiveFilterCount();
+  return `
+    <section class="merged-filter-panel">
+      <input id="merged-filter-panel-toggle" class="merged-filter-checkbox" type="checkbox" ${activeCount ? "checked" : ""}>
+      <label class="merged-filter-toggle" for="merged-filter-panel-toggle">
+        <span>
+          <strong>筛选条件</strong>
+          <small>${activeCount ? `已启用 ${activeCount} 项筛选` : "按样本、质量、物种等条件筛选"}</small>
+        </span>
+        <b><i class="merged-filter-open-label">展开</i><i class="merged-filter-close-label">收起</i></b>
+      </label>
+      <div class="merged-export-filters">
+        ${renderMergedFilterInput("任务名称", "taskName")}
+        ${renderMergedFilterInput("样本名称", "sampleName")}
+        ${renderMergedFilterInput("状态", "status")}
+        ${renderMergedFilterInput("物种", "species")}
+        ${renderMergedFilterInput("ST 型", "mlst")}
+        ${renderMergedFilterInput("血清型", "serotype")}
+        ${renderMergedFilterInput("完整性最小", "completenessMin", "number")}
+        ${renderMergedFilterInput("完整性最大", "completenessMax", "number")}
+        ${renderMergedFilterInput("污染率最小", "contaminationMin", "number")}
+        ${renderMergedFilterInput("污染率最大", "contaminationMax", "number")}
+        <label class="merged-filter-field">
+          <span>耐药/毒力</span>
+          <select data-merged-filter="resistanceVirulence">
+            <option value="all" ${state.mergedExport.filters.resistanceVirulence === "all" ? "selected" : ""}>全部</option>
+            <option value="detected" ${state.mergedExport.filters.resistanceVirulence === "detected" ? "selected" : ""}>有检出</option>
+            <option value="none" ${state.mergedExport.filters.resistanceVirulence === "none" ? "selected" : ""}>未检出</option>
+          </select>
+        </label>
+        <label class="merged-filter-field">
+          <span>关注说明</span>
+          <select data-merged-filter="noteMode">
+            <option value="all" ${state.mergedExport.filters.noteMode === "all" ? "selected" : ""}>全部</option>
+            <option value="has" ${state.mergedExport.filters.noteMode === "has" ? "selected" : ""}>有说明</option>
+            <option value="empty" ${state.mergedExport.filters.noteMode === "empty" ? "selected" : ""}>为空</option>
+          </select>
+        </label>
+      </div>
+    </section>
+  `;
+}
+
 function renderMergedFilterInput(label, key, type = "text") {
   return `
     <label class="merged-filter-field">
@@ -9101,15 +9625,51 @@ function renderMergedFilterInput(label, key, type = "text") {
 }
 
 function renderMergedSampleRow(sample, checked) {
+  const columns = getMergedSampleColumns();
   return `
     <tr class="${checked ? "is-selected" : ""}">
       <td class="merged-check-cell"><input type="checkbox" data-merged-sample="${escapeHtml(sample.sample_id)}" ${checked ? "checked" : ""} aria-label="选择 ${escapeHtml(sample.sample_name)}"></td>
-      ${MERGED_SAMPLE_COLUMNS.map((column) => `<td>${escapeHtml(sample[column.key] ?? "-")}</td>`).join("")}
+      ${columns.map((column) => `<td>${escapeHtml(getMergedSampleColumnValue(sample, column))}</td>`).join("")}
     </tr>
   `;
 }
 
 function bindMergedExportModalEvents() {
+  elements.mergedExportBody.querySelector("[data-merged-meta-upload]")?.addEventListener("click", () => {
+    if (elements.mergedExportMetaFile) {
+      elements.mergedExportMetaFile.value = "";
+      elements.mergedExportMetaFile.click();
+    }
+  });
+  const sequencingColumn = elements.mergedExportBody.querySelector("[data-merged-meta-sequencing]");
+  sequencingColumn?.addEventListener("change", () => {
+    const meta = state.mergedExport.metaImport;
+    meta.sequencingColumn = sequencingColumn.value;
+    meta.nameMapping = {};
+    meta.normalizedNameMapping = {};
+    meta.mappedCount = 0;
+    meta.isApplied = false;
+    renderMergedExportModal();
+  });
+  const sampleColumn = elements.mergedExportBody.querySelector("[data-merged-meta-sample]");
+  sampleColumn?.addEventListener("change", () => {
+    const meta = state.mergedExport.metaImport;
+    meta.sampleColumn = sampleColumn.value;
+    meta.nameMapping = {};
+    meta.normalizedNameMapping = {};
+    meta.mappedCount = 0;
+    meta.isApplied = false;
+    renderMergedExportModal();
+  });
+  elements.mergedExportBody.querySelector("[data-merged-meta-apply]")?.addEventListener("click", applyMergedExportMetaMapping);
+  elements.mergedExportBody.querySelector("[data-merged-meta-edit]")?.addEventListener("click", () => {
+    state.mergedExport.metaImport.editorOpen = true;
+    renderMergedExportModal();
+  });
+  elements.mergedExportBody.querySelector("[data-merged-meta-clear]")?.addEventListener("click", () => {
+    clearMergedExportMetaImport();
+    renderMergedExportModal();
+  });
   elements.mergedExportBody.querySelectorAll("[data-merged-filter]").forEach((field) => {
     field.addEventListener("input", () => {
       const key = field.dataset.mergedFilter;
@@ -9209,6 +9769,28 @@ function compareMergedSamples(left, right) {
   return compareText(left[column.key], right[column.key]) * factor;
 }
 
+function getMergedCanonicalSequencingName(value) {
+  return String(value || "").trim().replace(/_S\d+_L\d{3}_\d{3}$/i, "").trim();
+}
+
+function getMergedExportSampleName(sample) {
+  const sourceName = String(sample?.sample_name || "").trim();
+  const meta = state.mergedExport.metaImport || {};
+  const mapping = meta.nameMapping;
+  if (!sourceName || !mapping || typeof mapping !== "object") return sourceName;
+  const exactName = String(mapping[sourceName] || "").trim();
+  if (exactName) return exactName;
+  const normalizedMapping = meta.normalizedNameMapping;
+  const canonicalName = getMergedCanonicalSequencingName(sourceName);
+  if (!canonicalName || !normalizedMapping || typeof normalizedMapping !== "object") return sourceName;
+  return String(normalizedMapping[canonicalName] || sourceName).trim() || sourceName;
+}
+
+function sampleWithMergedExportName(sample) {
+  const exportName = getMergedExportSampleName(sample);
+  return exportName === sample.sample_name ? sample : { ...sample, sample_name: exportName };
+}
+
 async function exportMergedSamples(mode) {
   const filtered = getMergedFilteredSortedSamples();
   const selectedIds = new Set(state.mergedExport.selectedSampleIds || []);
@@ -9226,8 +9808,12 @@ async function exportMergedSamples(mode) {
     return;
   }
   const format = state.mergedExport.exportFormat || "xlsx";
-  const columns = MERGED_SAMPLE_COLUMNS.map((column) => column.label);
-  const sampleRows = rows.map((sample) => MERGED_SAMPLE_COLUMNS.map((column) => sample[column.key] ?? "-"));
+  const mergedColumns = getMergedSampleColumns();
+  const columns = mergedColumns.map((column) => column.label);
+  const sampleRows = rows.map((sample) => {
+    const exportSample = sampleWithMergedExportName(sample);
+    return mergedColumns.map((column) => getMergedSampleColumnValue(exportSample, column));
+  });
   const taskColumns = ["任务 ID", "任务名称", "任务类型", "创建时间", "状态", "读取状态", "说明"];
   const taskRows = state.mergedExport.tasks.map((task) => [
     task.task_id,
@@ -9267,6 +9853,7 @@ async function confirmAnalysisExport() {
   const samples = (state.analysisExport.samples || []).map((sample) => ({
     task_id: sample.task_id,
     sample_name: sample.sample_name,
+    export_sample_name: getMergedExportSampleName(sample),
   })).filter((sample) => sample.task_id && sample.sample_name);
   if (!samples.length) {
     showToast("当前范围内没有可导出的样本。", "warning");

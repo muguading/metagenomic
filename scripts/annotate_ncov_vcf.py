@@ -247,7 +247,7 @@ def resolve_variant_maf(info_map: dict[str, str], dp: int) -> float:
 
 
 def classify_variant_quality(qual: float, dp: int, maf: float, ref: str | None, alt: str | None) -> str:
-    maf_threshold = 0.75 if is_poly_variant(ref, alt) else 0.1
+    maf_threshold = 0.75 if is_poly_variant(ref, alt) else 0.5
     return "高质量突变" if qual > 10 and dp > 10 and maf > maf_threshold else "低质量突变"
 
 

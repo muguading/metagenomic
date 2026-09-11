@@ -10,7 +10,7 @@ from .report_modeling import build_modeling_risk_section
 from .report_sources import _build_multi_sample_queue_summary
 from .runtime_paths import _resolve_runtime_database_root
 
-REPORT_CACHE_VERSION = 132
+REPORT_CACHE_VERSION = 137
 
 
 def _report_cache_dir(report_dir: Path) -> Path:
@@ -111,6 +111,8 @@ def _report_cache_fingerprint(task: dict, report_dir: Path, sample_name: str) ->
         report_dir / "nextclade_output" / "nextclade.csv",
         report_dir / "nextclade_output" / "nextclade.auspice.json",
         report_dir / "nextclade_output" / "nextclade.nwk",
+        report_dir / "wf_flu" / "typing_summary.tsv",
+        report_dir / "wf_flu" / "nextclade" / "segment_analysis.tsv",
         database_root / "virus" / "ncov" / "genomic.gff",
         report_dir / "genomes" / "ref.fa",
         report_dir / "genomes" / "ref.fa.fai",

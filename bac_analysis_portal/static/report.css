@@ -15,9 +15,9 @@
   --report-accent-olive: #7a7158;
   --report-accent-warm: #8a6654;
   --report-danger: #8a4741;
-  --report-radius-lg: 28px;
-  --report-radius-md: 18px;
-  --report-shadow: 0 24px 60px rgba(43, 40, 34, 0.08);
+  --report-radius-lg: 18px;
+  --report-radius-md: 14px;
+  --report-shadow: 0 12px 28px rgba(43, 40, 34, 0.06);
 }
 
 .workflow-closure-panel {
@@ -374,7 +374,7 @@ body {
   grid-template-columns: auto minmax(320px, 1fr) minmax(420px, 560px);
   gap: clamp(18px, 2.2vw, 34px);
   align-items: start;
-  width: min(100%, 1500px);
+  width: min(100%, 1280px);
   margin-inline: auto;
   padding: 18px 22px;
   border: 1px solid var(--report-line);
@@ -606,7 +606,9 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .report-topbar {
+  .report-topbar,
+  .report-tab-button,
+  .subreport-tab-button {
     transition: none;
   }
 }
@@ -2963,26 +2965,28 @@ body.report-export-document:not(.report-interactive-export) .report-sidebar {
 .mini-stat-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
 }
 
 .mini-stat-card {
-  padding: 12px 14px;
-  border: 1px solid var(--report-line);
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--report-soft-blue) 30%, white 70%);
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--report-line) 82%, transparent 18%);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--report-paper) 94%, var(--report-soft) 6%);
+  box-shadow: none;
 }
 
 .mini-stat-card span {
   display: block;
   color: var(--report-muted);
-  font-size: 0.83rem;
-  margin-bottom: 6px;
+  font-size: 0.8rem;
+  margin-bottom: 4px;
 }
 
 .mini-stat-card strong {
   color: var(--report-ink);
   font-size: 1rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .mini-stat-card small {
@@ -5024,20 +5028,58 @@ body.report-export-document:not(.report-interactive-export) .report-sidebar {
   flex-wrap: wrap;
 }
 
-.report-tab-button {
-  min-width: 118px;
-  height: 38px;
-  padding: 0 14px;
+.report-tab-button,
+.subreport-tab-button {
+  min-height: 44px;
+  height: auto;
+  padding: 8px 14px;
   border: 1px solid var(--report-line);
-  border-radius: 12px;
-  background: rgba(62, 84, 111, 0.08);
+  border-radius: 10px;
+  background: var(--report-paper);
   color: var(--report-ink-soft);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: inherit;
+  line-height: 1.25;
+  touch-action: manipulation;
+  transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease, color 180ms ease;
 }
 
-.report-tab-button.active {
+.report-tab-button {
+  min-width: 118px;
+}
+
+.report-tab-button:hover:not(.active),
+.subreport-tab-button:hover:not(.active) {
+  border-color: color-mix(in srgb, var(--report-accent) 42%, var(--report-line) 58%);
+  background: color-mix(in srgb, var(--report-paper) 86%, var(--report-accent-soft) 14%);
+  color: var(--report-accent);
+}
+
+.report-tab-button:active,
+.subreport-tab-button:active {
+  background: color-mix(in srgb, var(--report-paper) 74%, var(--report-accent-soft) 26%);
+  box-shadow: inset 0 1px 2px rgba(43, 40, 34, 0.12);
+}
+
+.report-tab-button:focus-visible,
+.subreport-tab-button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--report-accent) 42%, transparent 58%);
+  outline-offset: 2px;
+}
+
+.report-tab-button.active,
+.subreport-tab-button.active {
+  border-color: var(--report-accent);
   background: var(--report-accent);
   color: #fff;
+}
+
+.report-tab-button.active:hover,
+.subreport-tab-button.active:hover {
+  background: color-mix(in srgb, var(--report-accent) 88%, #000 12%);
 }
 
 .report-tab-panel {
@@ -5491,11 +5533,13 @@ body.report-export-document:not(.report-interactive-export) .report-sidebar {
   line-height: 1.7;
 }
 
-.ncov-depth-mode {
+.ncov-depth-mode,
+.ncov-plot-toolbar .ncov-depth-tabs {
   display: flex;
   align-items: center;
-  gap: 0;
+  gap: 4px;
   min-width: 0;
+  margin: 0;
 }
 
 .ncov-depth-label {
@@ -5510,47 +5554,71 @@ body.report-export-document:not(.report-interactive-export) .report-sidebar {
   border: 0;
 }
 
-.ncov-depth-select {
-  min-width: 132px;
-  height: 34px;
-  padding: 0 32px 0 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(176, 194, 220, 0.74);
-  background: rgba(255, 255, 255, 0.78);
-  color: #36506f;
-  font: inherit;
-  font-weight: 600;
-  font-size: 0.86rem;
-  box-shadow: none;
-}
-
-.ncov-depth-select:hover,
-.ncov-depth-select:focus {
-  border-color: rgba(84, 118, 166, 0.34);
-  background: rgba(255, 255, 255, 0.92);
-  outline: none;
-}
-
-.ncov-coverage-reset {
-  height: 34px;
+.ncov-depth-button.subreport-tab-button {
+  min-width: 62px;
+  min-height: 40px;
+  height: 40px;
   padding: 0 14px;
-  border-radius: 999px;
-  background: rgba(246, 249, 253, 0.74);
-  color: #53708f;
-  font-weight: 600;
+  border-radius: 8px;
+  border-color: rgba(78, 94, 114, 0.22);
+  background: #fffdfa;
+  color: #4b5969;
+  font: inherit;
+  font-weight: 700;
   font-size: 0.84rem;
-  border: 1px solid rgba(176, 194, 220, 0.62);
+  letter-spacing: 0.01em;
   box-shadow: none;
 }
 
-.ncov-coverage-reset:not(:disabled):hover {
-  background: rgba(255, 255, 255, 0.9);
-  border-color: rgba(84, 118, 166, 0.3);
-  color: #3e5875;
+.ncov-depth-button.subreport-tab-button.active {
+  border-color: #385775;
+  background: #3d5b79;
+  color: #fff;
+  box-shadow: 0 2px 5px rgba(32, 60, 97, 0.18);
 }
 
-.ncov-coverage-reset:disabled {
-  opacity: 0.54;
+.ncov-coverage-reset.table-export-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 96px;
+  min-height: 40px;
+  height: 40px;
+  padding: 0 14px;
+  border-radius: 8px;
+  background: #fffdfa;
+  color: #4b5969;
+  font: inherit;
+  font-weight: 700;
+  font-size: 0.84rem;
+  letter-spacing: 0.01em;
+  border: 1px solid rgba(78, 94, 114, 0.26);
+  box-shadow: none;
+}
+
+.ncov-depth-button.subreport-tab-button:hover:not(.active),
+.ncov-coverage-reset.table-export-button:not(:disabled):hover {
+  border-color: rgba(64, 96, 137, 0.72);
+  background: color-mix(in srgb, var(--report-paper) 88%, var(--report-accent-soft) 12%);
+  color: var(--report-accent);
+}
+
+.ncov-depth-button.subreport-tab-button:focus-visible,
+.ncov-coverage-reset.table-export-button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--report-accent) 42%, transparent 58%);
+  outline-offset: 2px;
+}
+
+.ncov-coverage-reset.table-export-button:active {
+  background: color-mix(in srgb, var(--report-paper) 74%, var(--report-accent-soft) 26%);
+  box-shadow: inset 0 1px 2px rgba(43, 40, 34, 0.12);
+}
+
+.ncov-coverage-reset.table-export-button:disabled {
+  opacity: 1;
+  border-color: rgba(127, 143, 160, 0.24);
+  background: #f6f7f8;
+  color: #8a97a6;
   cursor: not-allowed;
 }
 
@@ -5648,17 +5716,17 @@ body.report-export-document:not(.report-interactive-export) .report-sidebar {
 
 .ncov-plot-toolbar {
   position: absolute;
-  top: 14px;
-  right: 14px;
+  top: 12px;
+  right: 12px;
   z-index: 2;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px;
+  gap: 6px;
+  padding: 4px;
   border: 1px solid rgba(189, 204, 225, 0.44);
-  border-radius: 999px;
-  background: rgba(250, 252, 255, 0.7);
-  box-shadow: 0 4px 14px rgba(30, 54, 85, 0.06);
+  border-radius: 12px;
+  background: rgba(250, 252, 255, 0.94);
+  box-shadow: 0 6px 16px rgba(30, 54, 85, 0.08);
   backdrop-filter: blur(6px);
 }
 
@@ -5873,13 +5941,23 @@ body.report-export-document:not(.report-interactive-export) .report-sidebar {
   }
 
   .ncov-depth-mode {
-    width: 100%;
-    justify-content: space-between;
+    width: auto;
+    justify-content: flex-start;
+    flex: 1 1 auto;
   }
 
-  .ncov-depth-select,
-  .ncov-coverage-reset {
-    width: 100%;
+  .ncov-plot-toolbar .ncov-depth-tabs {
+    flex: 1 1 auto;
+  }
+
+  .ncov-depth-button.subreport-tab-button {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .ncov-coverage-reset.table-export-button {
+    width: auto;
+    flex: 0 1 auto;
   }
 
   .ncov-gene-track {
@@ -6562,6 +6640,7 @@ body.report-export-document:not(.report-interactive-export) .report-sidebar {
 }
 
 .serotype-nextclade-layout .nextclade-summary-table-card,
+.serotype-nextclade-layout .nextclade-qc-result-card,
 .serotype-nextclade-layout .nextclade-compact-assignment,
 .serotype-nextclade-layout .nextclade-phylogeny-section,
 .serotype-nextclade-layout #nextclade-igv,
@@ -6612,6 +6691,158 @@ body.report-export-document:not(.report-interactive-export) .report-sidebar {
 .nextclade-summary-table td:nth-child(2) {
   min-width: 380px;
   max-width: 620px;
+}
+
+.nextclade-qc-result-card {
+  padding: 16px 18px;
+}
+
+.nextclade-qc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.nextclade-qc-overall {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.nextclade-qc-overall-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid rgba(116, 133, 148, 0.2);
+  border-radius: 6px;
+  background: #f8fafb;
+  color: #55626d;
+  font-size: 0.76rem;
+}
+
+.nextclade-qc-overall-item b {
+  color: #74818c;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.nextclade-qc-overall-item strong {
+  color: #2f3d48;
+  font-size: 0.82rem;
+}
+
+.nextclade-qc-summary-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid rgba(116, 133, 148, 0.18);
+  border-radius: 8px;
+  background: #ffffff;
+  list-style: none;
+}
+
+.nextclade-qc-summary-item {
+  min-width: 0;
+  padding: 12px 14px;
+  border-right: 1px solid rgba(116, 133, 148, 0.16);
+  border-bottom: 1px solid rgba(116, 133, 148, 0.16);
+  background: #fcfdfe;
+}
+
+.nextclade-qc-summary-item:nth-child(3n) {
+  border-right: 0;
+}
+
+.nextclade-qc-summary-item:nth-last-child(-n + 3) {
+  border-bottom: 0;
+}
+
+.nextclade-qc-summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.nextclade-qc-summary-head strong {
+  color: #344450;
+  font-size: 0.84rem;
+}
+
+.nextclade-qc-summary-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 7px;
+  color: #77838d;
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.nextclade-qc-details {
+  margin-top: 10px;
+  border-top: 1px solid rgba(116, 133, 148, 0.16);
+  color: #5c6a75;
+  font-size: 0.75rem;
+}
+
+.nextclade-qc-details summary {
+  padding-top: 9px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.nextclade-qc-details pre {
+  max-height: 240px;
+  margin: 8px 0 0;
+  padding: 10px;
+  overflow: auto;
+  border-radius: 6px;
+  background: #f4f7f9;
+  color: #485762;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.nextclade-qc-empty {
+  margin: 0;
+  color: #66737e;
+  font-size: 0.84rem;
+}
+
+@media (max-width: 760px) {
+  .nextclade-qc-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .nextclade-qc-overall {
+    justify-content: flex-start;
+  }
+
+  .nextclade-qc-summary-list {
+    grid-template-columns: 1fr;
+  }
+
+  .nextclade-qc-summary-item,
+  .nextclade-qc-summary-item:nth-child(3n) {
+    border-right: 0;
+    border-bottom: 1px solid rgba(116, 133, 148, 0.16);
+  }
+
+  .nextclade-qc-summary-item:last-child {
+    border-bottom: 0;
+  }
 }
 
 .nextclade-qc-pill {
@@ -6671,7 +6902,9 @@ body.report-export-document:not(.report-interactive-export) .report-sidebar {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 12px;
+  margin: 16px 0 12px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--report-line) 72%, transparent 28%);
 }
 
 .report-shell[data-report-kind="sars-cov-2"] .nextclade-phylogeny-section .patho-tree-card {
@@ -7444,18 +7677,6 @@ body.report-export-document:not(.report-interactive-export) .report-sidebar {
 
 .subreport-tab-button {
   min-width: 72px;
-  height: 34px;
-  padding: 0 12px;
-  border: 1px solid var(--report-line);
-  border-radius: 10px;
-  background: rgba(62, 84, 111, 0.08);
-  color: var(--report-ink-soft);
-  cursor: pointer;
-}
-
-.subreport-tab-button.active {
-  background: var(--report-accent);
-  color: #fff;
 }
 
 .subreport-tab-panel {

@@ -65,6 +65,108 @@ def _sanitize_virus_demo_note(value: object) -> str:
         return ""
     return text
 
+
+def _format_nextclade_coverage_percent(value: object) -> str:
+    """Format Nextclade coverage for report display without changing other metrics."""
+    text = str(value or "").strip()
+    if not text or text == "-":
+        return "-"
+    has_percent_suffix = text.endswith("%")
+    try:
+        numeric = float(text.rstrip("%").strip())
+    except ValueError:
+        return text
+    if not has_percent_suffix and 0 <= numeric <= 1:
+        numeric *= 100
+    return f"{numeric:.2f}%"
+
+
+def _read_nextclade_qc_result(report_dir: Path, sequence_name: str) -> dict[str, object]:
+    """Return the QC object for the sequence displayed in the Nextclade summary."""
+    path = report_dir / "nextclade_output" / "nextclade.json"
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    if isinstance(payload, dict):
+        results = payload.get("results")
+    else:
+        results = payload
+    if not isinstance(results, list):
+        return {}
+
+    selected_result: dict[str, object] | None = None
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("seqName") or "").strip() == sequence_name:
+            selected_result = item
+            break
+        if selected_result is None:
+            selected_result = item
+    if selected_result is None:
+        return {}
+    qc_result = selected_result.get("qc")
+    return qc_result if isinstance(qc_result, dict) else {}
+
+
+def _read_influenza_nextclade_qc_results(report_dir: Path, table: dict[str, object]) -> list[dict[str, object]]:
+    """Read the detailed QC object for each ready influenza HA/NA Nextclade run."""
+    columns = table.get("columns") if isinstance(table.get("columns"), list) else []
+    rows = table.get("rows") if isinstance(table.get("rows"), list) else []
+    indexes = {str(name): index for index, name in enumerate(columns)}
+    required = ("segment", "dataset", "status", "qc_json")
+    if any(name not in indexes for name in required):
+        return []
+    output_dir = report_dir / "wf_flu" / "nextclade"
+    results: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, list) or str(row[indexes["status"]] if indexes["status"] < len(row) else "").strip().lower() != "ready":
+            continue
+        json_name = str(row[indexes["qc_json"]] if indexes["qc_json"] < len(row) else "").strip()
+        if not json_name or json_name == "-":
+            continue
+        path = output_dir / Path(json_name).name
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        records = payload.get("results") if isinstance(payload, dict) else payload
+        if not isinstance(records, list) or not records or not isinstance(records[0], dict):
+            continue
+        qc_result = records[0].get("qc")
+        if isinstance(qc_result, dict):
+            results.append({
+                "segment": str(row[indexes["segment"]]).strip(),
+                "dataset": str(row[indexes["dataset"]]).strip(),
+                "qc_result": qc_result,
+            })
+    return results
+
+
+def _format_influenza_subtype_with_nextclade(subtype: str, segment: str, table: dict[str, object]) -> str:
+    """Append unique ready Nextclade clades for the requested HA/NA segment."""
+    columns = table.get("columns") if isinstance(table.get("columns"), list) else []
+    rows = table.get("rows") if isinstance(table.get("rows"), list) else []
+    indexes = {str(name): index for index, name in enumerate(columns)}
+    if any(name not in indexes for name in ("segment", "clade", "status")):
+        return subtype
+    clades: list[str] = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        value = lambda key: str(row[indexes[key]] if indexes[key] < len(row) else "").strip()
+        if value("segment").upper() != segment.upper() or value("status").lower() != "ready":
+            continue
+        clade = value("clade")
+        if clade and clade != "-" and clade not in clades:
+            clades.append(clade)
+    return f"{subtype}（Nextclade：{'|'.join(clades)}）" if clades else subtype
+
+
 def _is_bordetella_pertussis(checkm_info: dict) -> bool:
     candidates = [
         checkm_info.get("species_name"),
@@ -95,6 +197,10 @@ def _read_influenza_typing_section(report_dir: Path, sample_name: str) -> dict |
     subtype_call = str(first.get("subtype_call") or "").strip() or "-"
     reference_path = str(first.get("reference_path") or "").strip()
     segment_manifest = _read_tsv_rows(report_dir / "wf_flu" / "reference_sets" / "final_segments.tsv")
+    nextclade_segments = _read_tsv_rows(report_dir / "wf_flu" / "nextclade" / "segment_analysis.tsv")
+    nextclade_qc_results = _read_influenza_nextclade_qc_results(report_dir, nextclade_segments)
+    ha_subtype_display = _format_influenza_subtype_with_nextclade(ha_subtype, "HA", nextclade_segments)
+    na_subtype_display = _format_influenza_subtype_with_nextclade(na_subtype, "NA", nextclade_segments)
     variant_annotation = _read_influenza_variant_annotation_table(report_dir)
     resistance_annotation = _read_influenza_resistance_annotation_table(report_dir)
     igv_view = _discover_influenza_igv_assets(report_dir, sample_name)
@@ -103,7 +209,7 @@ def _read_influenza_typing_section(report_dir: Path, sample_name: str) -> dict |
     )
     mutation_table = _build_influenza_mutation_display_table(report_dir, raw_mutation_table)
     summary_columns = ["样本名称", "流感类型", "HA亚型", "NA亚型", "分型结果", "状态"]
-    summary_rows = [[sample_name, influenza_type, ha_subtype, na_subtype, subtype_call, status]]
+    summary_rows = [[sample_name, influenza_type, ha_subtype_display, na_subtype_display, subtype_call, status]]
     segment_count = len(segment_manifest.get("rows") or [])
     mutation_rows = mutation_table.get("rows") or []
     mutation_columns = mutation_table.get("columns") or []
@@ -121,8 +227,8 @@ def _read_influenza_typing_section(report_dir: Path, sample_name: str) -> dict |
             )
     summary_cards = [
         {"label": "流感类型", "value": influenza_type},
-        {"label": "HA 亚型", "value": ha_subtype},
-        {"label": "NA 亚型", "value": na_subtype},
+        {"label": "HA 亚型", "value": ha_subtype_display},
+        {"label": "NA 亚型", "value": na_subtype_display},
         {"label": "分型结果", "value": subtype_call},
         {"label": "突变位点数", "value": int(variant_annotation.get("total_variants") or len(mutation_rows)) if mutation_rows else "--"},
     ]
@@ -133,6 +239,15 @@ def _read_influenza_typing_section(report_dir: Path, sample_name: str) -> dict |
         note_parts.append(f"参考集合: {Path(reference_path).name}")
     if str(variant_annotation.get("status") or "") == "ready" and mutation_rows:
         note_parts.append("已基于 VADR GFF3 与 consensus FASTA 生成 snpEff 变异注释表")
+    ready_nextclade_segments = [
+        row for row in (nextclade_segments.get("rows") or [])
+        if "ready" in {str(value).strip().lower() for value in row}
+    ]
+    if ready_nextclade_segments:
+        ready_nextclade_names = {
+            str(row[0]).strip().upper() for row in ready_nextclade_segments if row and str(row[0]).strip()
+        }
+        note_parts.append(f"已完成 {len(ready_nextclade_names)} 个 HA/NA 节段的 Nextclade 分型")
     if status == "screening_stop":
         note_parts.append("初筛未满足后续流感组装条件")
     return {
@@ -145,6 +260,8 @@ def _read_influenza_typing_section(report_dir: Path, sample_name: str) -> dict |
         "reference_path": reference_path,
         "summary_cards": summary_cards,
         "segment_manifest": segment_manifest,
+        "nextclade_segments": nextclade_segments,
+        "nextclade_qc_results": nextclade_qc_results,
         "mutation_table": mutation_table,
         "mutation_summary": {
             "count": int(variant_annotation.get("total_variants") or len(mutation_rows)),
@@ -484,6 +601,14 @@ def _build_serotype_section(report_dir: Path, sample_name: str, checkm_info: dic
                 notes.append(f"参考序列：{selected_reference}")
             if summary_note:
                 notes.append(summary_note)
+            denv_coverage = _format_nextclade_coverage_percent(coverage)
+            denv_rows = [list(row) for row in rows[:1] if isinstance(row, list)]
+            if "coverage" in columns:
+                coverage_index = columns.index("coverage")
+                for row in denv_rows:
+                    if coverage_index < len(row):
+                        row[coverage_index] = denv_coverage
+
             return {
                 "status": "ready",
                 "mode": "denv_nextclade",
@@ -494,7 +619,7 @@ def _build_serotype_section(report_dir: Path, sample_name: str, checkm_info: dic
                     {"label": "Nextclade Clade", "value": clade},
                     {"label": "Lineage / Genotype", "value": denv_lineage},
                     {"label": "QC 状态", "value": qc_status},
-                    {"label": "覆盖度", "value": coverage},
+                    {"label": "覆盖度", "value": denv_coverage},
                 ],
                 "quality_metrics": [
                     {"label": "QC 分数", "value": qc_score},
@@ -510,7 +635,7 @@ def _build_serotype_section(report_dir: Path, sample_name: str, checkm_info: dic
                 "igv": _discover_denv_igv_assets(report_dir),
                 "phylogeny_tree": _build_nextclade_phylogeny_tree(report_dir, seq_names or seq_name),
                 "columns": columns,
-                "rows": rows[:1],
+                "rows": denv_rows,
             }
         is_zikav_nextclade = (
             "zika virus" in virus_type.lower()
@@ -850,6 +975,7 @@ def _build_serotype_section(report_dir: Path, sample_name: str, checkm_info: dic
             "mode": "sars_cov_2_nextclade",
             "predicted_clade": clade,
             "pango_lineage": pango,
+            "qc_result": _read_nextclade_qc_result(report_dir, seq_name),
             "summary_cards": [
                 {"label": "Nextclade Clade", "value": clade},
                 {"label": "Pango 谱系", "value": pango},

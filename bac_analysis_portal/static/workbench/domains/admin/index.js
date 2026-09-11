@@ -86,6 +86,7 @@ function nextcladeDatasetStatusLabel(status) {
   return {
     latest: "最新",
     outdated: "可更新",
+    missing: "待下载",
     unmatched: "未匹配",
     invalid: "元数据异常",
     update_failed: "更新失败",
@@ -115,14 +116,14 @@ function renderNextcladeDatasetStatus(data, isError = false) {
   const updatableItems = items.filter((item) => item?.updatable);
   const hasFailures = Number(summary.failed_count || 0) > 0;
   nextcladeDatasetStatus = data;
-  target.className = `admin-update-result nextclade-dataset-result${hasFailures ? " error" : Number(summary.outdated_count || 0) ? "" : " success"}`;
+  target.className = `admin-update-result nextclade-dataset-result${hasFailures ? " error" : updatableItems.length ? "" : " success"}`;
   target.innerHTML = `
     <div class="nextclade-dataset-summary">
       <div>
-        <strong>${updatableItems.length ? `发现 ${updatableItems.length} 个可更新数据集` : "本地数据集已完成检测"}</strong>
+        <strong>${updatableItems.length ? `发现 ${updatableItems.length} 个待获取或更新的数据集` : "本地数据集已完成检测"}</strong>
         <p>${escapeHtml(data?.database_root || "-")} · ${escapeHtml(data?.nextclade_version || "Nextclade")}</p>
       </div>
-      <span>共 ${Number(summary.total_count || items.length)} · 最新 ${Number(summary.latest_count || 0)} · 未匹配 ${Number(summary.unmatched_count || 0)} · 异常 ${Number(summary.failed_count || 0)}</span>
+      <span>共 ${Number(summary.total_count || items.length)} · 最新 ${Number(summary.latest_count || 0)} · 待下载 ${Number(summary.missing_count || 0)} · 未匹配 ${Number(summary.unmatched_count || 0)} · 异常 ${Number(summary.failed_count || 0)}</span>
     </div>
     <div class="nextclade-dataset-table-shell">
       <table class="nextclade-dataset-table">
@@ -168,8 +169,8 @@ async function onUpdateNextcladeDatasets(event) {
   }
   const confirmed = await runtime.actions.confirmDangerAction({
     title: "更新 Nextclade 数据库",
-    message: `确认更新 ${updatableItems.length} 个过期数据集吗？`,
-    impact: "本地数据集将替换为最新兼容版本",
+    message: `确认获取或更新 ${updatableItems.length} 个 Nextclade 数据集吗？`,
+    impact: "缺失数据集将下载；已有数据集将替换为最新兼容版本",
     detail: updatableItems.map((item) => `${item.display_name || item.directory}：${item.local_tag || "-"} → ${item.latest_tag || "-"}`).join("；"),
     confirmLabel: "确认更新",
     tone: "warning",
