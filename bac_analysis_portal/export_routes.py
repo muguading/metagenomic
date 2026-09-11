@@ -21,8 +21,8 @@ from .export_utils import (
     _normalize_export_rows,
     _normalize_export_sheets,
     _sanitize_export_filename,
+    read_sample_meta_upload,
 )
-from .import_templates import _extract_batch_upload_headers, _parse_database_batch_upload
 from .task_manager import ValidationError
 
 
@@ -342,8 +342,7 @@ def register_export_routes(app) -> None:
         content = upload.read()
         if len(content) > 10 * 1024 * 1024:
             raise ValidationError("Meta 文件不能超过 10 MB")
-        headers = _extract_batch_upload_headers(filename, content)
-        rows = _parse_database_batch_upload(filename, content)
+        headers, rows = read_sample_meta_upload(filename, content)
         if not headers:
             raise ValidationError("Meta 文件缺少表头")
         if not rows:

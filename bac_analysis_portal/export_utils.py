@@ -5,7 +5,13 @@ import io
 import zipfile
 from xml.sax.saxutils import escape as xml_escape
 
+from .import_templates import _extract_batch_upload_headers, _parse_database_batch_upload
 from .task_manager import ValidationError
+
+def read_sample_meta_upload(filename: str, content: bytes) -> tuple[list[str], list[dict[str, str]]]:
+    """Read the headers and rows used to map exported analysis sample names."""
+    return _extract_batch_upload_headers(filename, content), _parse_database_batch_upload(filename, content)
+
 
 def _normalize_export_columns(columns: object) -> list[str]:
     if not isinstance(columns, list):
