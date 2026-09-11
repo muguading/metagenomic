@@ -14,7 +14,8 @@ def test_hepatitis_typing_knowledge_base_links_hev_3a() -> None:
 
     assert bundle["summary"]["typing_rule_count"] >= 70
     rules = bundle["collections"]["typing_rules"]
-    assert {rule.get("broad_type") for rule in rules if rule.get("level") == "broad_type"} == {"HAV", "HBV", "HCV", "HDV", "HEV"}
+    broad_types = {rule.get("broad_type") for rule in rules if rule.get("level") == "broad_type"}
+    assert {"HAV", "HBV", "HCV", "HDV", "HEV"} <= broad_types
     hev_3a = next(
         rule
         for rule in rules

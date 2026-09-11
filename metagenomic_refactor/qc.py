@@ -77,17 +77,50 @@ def _replace_with_symlink(source: str | os.PathLike[str], target: str | os.PathL
     target_path.symlink_to(source_path)
 
 
-def _use_rasusa_or_link(inputs: list[str], outputs: list[str], bases: str) -> None:
+def _linked_fastq_output_path(source: str, output: str) -> str:
+    """Return a link name that preserves whether a FASTQ is gzip-compressed."""
+    return f"{output}.gz" if Path(source).suffix == ".gz" else output
+
+
+def _existing_rasusa_or_link_output(source: str, output: str) -> str | None:
+    """Find a reusable rasusa/link output, ignoring legacy gzip links named .fastq."""
+    linked_output = _linked_fastq_output_path(source, output)
+    if _is_nonempty_file(output):
+        if not (
+            linked_output != output
+            and Path(output).is_symlink()
+            and Path(os.path.realpath(output)).suffix == ".gz"
+        ):
+            return output
+    if _is_nonempty_file(linked_output):
+        return linked_output
+    return None
+
+
+def _use_rasusa_or_link(inputs: list[str], outputs: list[str], bases: str) -> list[str]:
     base_limit = _parse_base_limit(bases)
     total_bases = sum(_fastq_base_count(path) for path in inputs)
     if total_bases <= base_limit:
-        for source, target in zip(inputs, outputs):
+        linked_outputs = [_linked_fastq_output_path(source, target) for source, target in zip(inputs, outputs)]
+        for source, target in zip(inputs, linked_outputs):
             _replace_with_symlink(source, target)
-        return
+        return linked_outputs
 
     output_args = " ".join(f"-o {shlex.quote(output)}" for output in outputs)
     input_args = " ".join(shlex.quote(path) for path in inputs)
     subprocess.run(f"rasusa reads --bases {bases} {output_args} {input_args}", shell=True)
+    return outputs
+
+
+def _virus_fastp_trim_options(*, paired_end: bool) -> str:
+    """Return fixed-end trimming options for virus analysis reads."""
+    runtime = get_runtime_context()
+    if runtime.analysis_target != "virus":
+        return ""
+    options = ["--trim_front1 20", "--trim_tail1 20"]
+    if paired_end:
+        options.extend(["--trim_front2 20", "--trim_tail2 20"])
+    return " ".join(options)
 
 
 def _log_qc_step(handle, message: str) -> None:
@@ -493,12 +526,16 @@ def ngs_qc(Pre):
 def QC_func(inf, fq1, fq2, minq, minl, Pre, rnalib, threads, method):
     runtime = get_runtime_context()
     if inf:
-        _use_rasusa_or_link([str(inf)], [f"{Pre}.sub.fastq"], "2gb" if method != "meta" else "20gb")
+        sub_fastq = _existing_rasusa_or_link_output(str(inf), f"{Pre}.sub.fastq")
+        if sub_fastq is None:
+            sub_fastq = _use_rasusa_or_link(
+                [str(inf)], [f"{Pre}.sub.fastq"], "2gb" if method != "meta" else "20gb"
+            )[0]
         subprocess.run(
-            f"""fastp --in1 {Pre}.sub.fastq \
+            f"""fastp --in1 {sub_fastq} \
                     --out1 {Pre}.clean.fastq \
                     --thread {threads} \
-                    --length_required=50 \
+                    --length_required=30 \
                     --n_base_limit=6 \
                     --compression=6 \
                     -Q \
@@ -525,7 +562,7 @@ def QC_func(inf, fq1, fq2, minq, minl, Pre, rnalib, threads, method):
             f"""fastp --in1  {Pre}.rmhost.fastq \
                     --out1 {Pre}.final.fastq \
                     --thread {threads} \
-                    --length_required=50 \
+                    --length_required=30 \
                     --qualified_quality_phred=10 \
                     --n_base_limit=6 \
                     --compression=6 \
@@ -586,24 +623,28 @@ def QC_func(inf, fq1, fq2, minq, minl, Pre, rnalib, threads, method):
                 subprocess.run(f"mv {Pre}_t.final.fastq {Pre}.final.fastq", shell=True)
 
     if fq1 and fq2:
-        if not os.path.isfile(f"{Pre}_sub.R1.fastq") or not os.path.isfile(f"{Pre}_sub.R2.fastq"):
-            _use_rasusa_or_link(
+        trim_options = _virus_fastp_trim_options(paired_end=True)
+        sub_r1 = _existing_rasusa_or_link_output(str(fq1), f"{Pre}_sub.R1.fastq")
+        sub_r2 = _existing_rasusa_or_link_output(str(fq2), f"{Pre}_sub.R2.fastq")
+        if sub_r1 is None or sub_r2 is None:
+            sub_r1, sub_r2 = _use_rasusa_or_link(
                 [str(fq1), str(fq2)],
                 [f"{Pre}_sub.R1.fastq", f"{Pre}_sub.R2.fastq"],
                 "10gb" if method != "meta" else "100gb",
             )
-        subprocess.run(f"seqkit stat -T {Pre}_sub.R1.fastq {Pre}_sub.R2.fastq > raw_summary.tsv", shell=True)
+        subprocess.run(f"seqkit stat -T {sub_r1} {sub_r2} > raw_summary.tsv", shell=True)
         if not os.path.isfile(f"{Pre}.fastp2.json"):
             subprocess.run(
-                f"""fastp --in1 {Pre}_sub.R1.fastq \
+                f"""fastp --in1 {sub_r1} \
         --out1 {Pre}_t.R1.fastq.gz \
-        --in2 {Pre}_sub.R2.fastq \
+        --in2 {sub_r2} \
         --out2 {Pre}_t.R2.fastq.gz \
         --thread {threads} \
-        --length_required=50 \
+        --length_required=30 \
         --n_base_limit=6 \
         --compression=6 \
         --detect_adapter_for_pe \
+        {trim_options} \
         --json {Pre}.fastp2.json \
         2> {Pre}.fastp2.log""",
                 shell=True,
@@ -614,8 +655,8 @@ def QC_func(inf, fq1, fq2, minq, minl, Pre, rnalib, threads, method):
         if not os.path.isdir("R2_qc"):
             os.makedirs("R2_qc")
         with open("qc.log", "a") as f:
-            subprocess.run(f"ln -s  {Pre}_sub.R1.fastq  raw.R1.fastq", shell=True)
-            subprocess.run(f"ln -s  {Pre}_sub.R2.fastq raw.R2.fastq", shell=True)
+            subprocess.run(f"ln -s  {sub_r1}  raw.R1.fastq", shell=True)
+            subprocess.run(f"ln -s  {sub_r2} raw.R2.fastq", shell=True)
             if not os.path.isfile(f"{Pre}.R1.fastq.gz"):
                 if runtime.rmhost == "norm":
                     subprocess.run(f"ln -s {Pre}_t.R1.fastq.gz  {Pre}.R1.fastq.gz;ln -s {Pre}_t.R2.fastq.gz  {Pre}.R2.fastq.gz", shell=True)
@@ -655,18 +696,21 @@ def QC_func(inf, fq1, fq2, minq, minl, Pre, rnalib, threads, method):
                 _log_qc_step(f, f"SKIP final fastp PE: {Pre}.final.json exists")
 
     elif not fq2 and fq1:
-        if not os.path.isfile(f"{Pre}_sub.R1.fastq"):
-            _use_rasusa_or_link([str(fq1)], [f"{Pre}_sub.R1.fastq"], "20gb")
-        subprocess.run(f"seqkit stat -T {Pre}_sub.R1.fastq > raw_summary.tsv", shell=True)
+        trim_options = _virus_fastp_trim_options(paired_end=False)
+        sub_r1 = _existing_rasusa_or_link_output(str(fq1), f"{Pre}_sub.R1.fastq")
+        if sub_r1 is None:
+            sub_r1 = _use_rasusa_or_link([str(fq1)], [f"{Pre}_sub.R1.fastq"], "20gb")[0]
+        subprocess.run(f"seqkit stat -T {sub_r1} > raw_summary.tsv", shell=True)
         if not os.path.isfile(f"{Pre}_t.R1.fastq.gz"):
             subprocess.run(
-                f"""fastp --in1  {Pre}_sub.R1.fastq \
+                f"""fastp --in1  {sub_r1} \
         --out1 {Pre}_t.R1.fastq.gz \
         --thread {threads} \
-        --length_required=50 \
+        --length_required=30 \
         --qualified_quality_phred=10 \
         --n_base_limit=6 \
         --compression=6 \
+        {trim_options} \
         --json {Pre}.fastp2.json \
         2> {Pre}.fastp2.log""",
                 shell=True,
@@ -675,7 +719,7 @@ def QC_func(inf, fq1, fq2, minq, minl, Pre, rnalib, threads, method):
         if not os.path.isdir("R1_qc"):
             os.makedirs("R1_qc")
         with open("qc.log", "a") as f:
-            subprocess.run(f"ln -s  {Pre}_sub.R1.fastq raw.R1.fastq", shell=True)
+            subprocess.run(f"ln -s  {sub_r1} raw.R1.fastq", shell=True)
             if runtime.rmhost == "norm":
                 subprocess.run(f"ln -s {Pre}_t.R1.fastq.gz {Pre}.R1.fastq.gz", shell=True)
             else:

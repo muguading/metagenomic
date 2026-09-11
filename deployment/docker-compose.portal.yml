@@ -1,0 +1,30 @@
+services:
+  portal:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.portal
+    image: pathogen-workbench-portal:local
+    env_file:
+      - ./portal.env
+    user: "${PORTAL_UID:-10001}:${PORTAL_GID:-10001}"
+    ports:
+      - "${APP_PORT:-5055}:${APP_PORT:-5055}"
+    volumes:
+      - ${PORTAL_STATE_DIR:-/data/pathogen-workbench/state}:/data/pathogen-workbench/state
+      - ${PORTAL_TASK_DIR:-/data/pathogen-workbench/tasks}:/data/pathogen-workbench/tasks
+      - ${PORTAL_OUTPUT_DIR:-/data/pathogen-workbench/outputs}:/data/pathogen-workbench/outputs
+      - ${META_DATABASE_ROOT:-/data/pathogen-db}:/data/pathogen-db:ro
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1770,uid=10001,gid=10001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python - <<'PY'\nimport urllib.request\nurllib.request.urlopen('http://127.0.0.1:${APP_PORT:-5055}/login', timeout=5)\nPY"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

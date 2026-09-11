@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>{{ task.name or task.id }} - 分析结果</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -23,7 +24,7 @@
   <body>
     <div class="report-shell" data-report-endpoint="{{ url_for('task_report_data', task_id=task.id) }}" data-export-endpoint="{{ url_for('export_table') }}" data-task-name="{{ task.name or task.id }}" data-selected-sample="{{ selected_sample or '' }}" data-expected-report-kind="{% if is_community_report %}community{% else %}default{% endif %}" data-report-ready="{% if is_community_report %}false{% else %}true{% endif %}">
       <header class="report-topbar">
-        <button class="report-back" type="button" onclick="window.location.href='/workstation?tab=queue'">返回任务列表</button>
+        <button class="report-back" type="button" data-back-label="{{ back_label or '返回任务列表' }}" onclick='window.location.href={{ (back_href or ('/workstation?tab=queue&task=' ~ task.id))|tojson }}'>{{ back_label or "返回任务列表" }}</button>
         <div class="report-title-block">
           <p class="report-kicker">Laboratory Report</p>
           <h1>病原微生物分析结果</h1>
@@ -62,6 +63,9 @@
           <nav class="report-nav" aria-label="分析结果目录">
             <div class="report-nav-group">
               <a class="report-nav-link" href="#section-overview">1. 数据概览</a>
+            </div>
+            <div class="report-nav-group">
+              <a class="report-nav-link" href="#section-modeling-risk">1.1 样本库建模解释</a>
             </div>
             <div id="nav-group-clinical-wrapper" class="report-nav-group hidden">
               <a class="report-nav-link" href="#section-clinical-report">临床辅助诊断</a>
@@ -193,6 +197,16 @@
             </div>
             <div id="multi-sample-overview" class="multi-sample-overview hidden"></div>
             <div id="overview-metrics" class="metric-grid"></div>
+            <div id="auto-pathosource-trigger-panel"></div>
+          </section>
+
+          <section id="section-modeling-risk" class="report-section compact-section">
+            <div class="section-heading">
+              <p class="report-kicker">Section 1.1</p>
+              <h2>样本库建模解释</h2>
+              <p>展示基于现有样本库基线模型回写的风险评分与主要解释因素。</p>
+            </div>
+            <div id="modeling-risk-panel" class="result-card"></div>
           </section>
 
           <section id="section-raw-qc" class="report-section">
@@ -736,6 +750,7 @@
       </main>
     </div>
 
+    <script src="{{ url_for('static', filename='csrf.js') }}"></script>
     <script src="{{ url_for('public_asset', filename='cgview/d3.min.js') }}"></script>
     <link rel="stylesheet" href="{{ url_for('public_asset', filename='cgview/cgview.css') }}">
     <script src="{{ url_for('public_asset', filename='cgview/cgparse.min.js') }}"></script>

@@ -3,12 +3,16 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>黄浦区公共卫生病原基因数据库和生物信息学分析系统</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor_leaflet.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260525-fastq-batch-link-02">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/domains/project.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/domains/admin.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/domains/audit.css') }}">
   </head>
   <body>
     <div class="app-backdrop">
@@ -20,7 +24,6 @@
             </div>
             <div class="app-titlebar-copy">
               <strong>黄浦区公共卫生病原基因数据库和生物信息学分析系统</strong>
-              <span>整合细菌、病毒、宏基因组与溯源分析的统一任务入口</span>
             </div>
           </div>
           <div class="titlebar-actions">
@@ -30,11 +33,6 @@
 
         <div class="app-body">
           <aside id="app-sidebar" class="app-sidebar">
-            <div class="app-brand">
-              <p class="eyebrow">PATHOGEN ANALYSIS WORKBENCH</p>
-              <p class="app-brand-copy">提交、调度、审查与结果查看统一在同一工作台内完成，覆盖细菌、病毒、宏基因组与分子溯源流程。</p>
-            </div>
-
             <div class="app-user-chip-wrap">
               <span id="current-user-chip">用户加载中</span>
             </div>
@@ -83,6 +81,13 @@
                   <small>导入最终 fasta 与关键结果</small>
                 </span>
               </button>
+              <button class="tab-button app-nav-button" type="button" data-tab-target="modeling-tab">
+                <span class="app-nav-icon">◎</span>
+                <span>
+                  <strong>模型构建与预测</strong>
+                  <small>特征、训练、模型库与样本预测</small>
+                </span>
+              </button>
               <button class="tab-button app-nav-button" type="button" data-tab-target="project-tab">
                 <span class="app-nav-icon">▦</span>
                 <span>
@@ -94,7 +99,7 @@
                 <span class="app-nav-icon">⋯</span>
                 <span>
                   <strong>更多视图</strong>
-                  <small>预警规则、建模参考与知识库</small>
+                  <small>预警规则、报告模板与知识库</small>
                 </span>
               </button>
               <button id="audit-tab-button" class="tab-button app-nav-button hidden" type="button" data-tab-target="audit-tab">
@@ -112,11 +117,6 @@
                 </span>
               </button>
             </nav>
-
-            <div class="app-sidebar-note">
-              <strong>工作站视图</strong>
-              <p>当前界面已按应用工作台方式组织，减少网页式跳读与过长页面感。</p>
-            </div>
           </aside>
 
           <main class="workspace">
@@ -1357,7 +1357,7 @@
                       <h3>Auspice 本地部署</h3>
                       <span class="surveillance-heading-aside">Phylogeny Workspace</span>
                     </div>
-                    <p class="field-note">这里改成统一的可视化任务台：样本数据库生成的 Nextstrain 构建任务会直接列在左侧，本地 `auspice JSON` 也可以上传后立即进入同一个列表。</p>
+                    <p class="field-note">管理 Nextstrain 构建任务与本地 auspice JSON。</p>
                   </div>
                   <div class="auspice-head-actions">
                     <input id="auspice-upload-input" class="hidden" type="file" accept=".json,application/json">
@@ -1382,7 +1382,7 @@
                       <div class="panel-head compact">
                         <div>
                           <h4>可视化任务列表</h4>
-                          <p class="field-note">左侧统一显示样本数据库构建任务和手工上传的本地 JSON。点击对应条目即可在右侧直接打开。</p>
+                          <p class="field-note">选择任务或本地 JSON 后在右侧查看。</p>
                         </div>
                       </div>
                       <div id="auspice-build-list" class="auspice-build-list"></div>
@@ -1415,11 +1415,10 @@
               <div>
                 <p class="section-kicker">Extended Views</p>
                 <h2>更多视图</h2>
-                <p class="field-note">集中查看预警规则、建模参考与知识库测试，不再和样本数据库日常使用视图混排。</p>
+                <p class="field-note">集中查看预警规则、报告模板与知识库测试，不再和样本数据库日常使用视图混排。</p>
               </div>
               <div class="database-extra-section-tabs" role="tablist" aria-label="更多视图分区">
                 <button class="database-section-tab active" type="button" data-database-extra-section="database-alert-rules-panel">预警规则</button>
-                <button class="database-section-tab" type="button" data-database-extra-section="database-modeling-panel">建模参考</button>
                 <button class="database-section-tab" type="button" data-database-extra-section="database-report-template-panel">报告模板</button>
                 {% if knowledge_base_enabled %}
                 <button class="database-section-tab" type="button" data-database-extra-section="database-knowledge-panel">知识库测试</button>
@@ -1439,21 +1438,6 @@
                 </div>
                 <div id="database-alert-rules-summary" class="database-extra-summary database-alert-rules-summary" aria-live="polite"></div>
                 <div id="database-alert-rules-content" class="database-extra-content database-alert-rules-content"></div>
-              </section>
-            </div>
-            <div id="database-modeling-panel" class="database-extra-section-panel">
-              <section class="database-extra-screen database-alert-rules-screen">
-                <div class="database-extra-head database-alert-rules-head">
-                  <div>
-                    <div class="surveillance-heading">
-                      <h3>建模参考</h3>
-                      <span class="surveillance-heading-aside">Modeling Reference</span>
-                    </div>
-                    <p class="field-note">整理已发表利用宏基因组数据进行预测的代表性模型，按预测目标、输入特征、模型类型、所需数据与适配模块做可落地对照。</p>
-                  </div>
-                </div>
-                <div id="database-modeling-summary" class="database-extra-summary database-alert-rules-summary" aria-live="polite"></div>
-                <div id="database-modeling-content" class="database-extra-content database-alert-rules-content"></div>
               </section>
             </div>
             <div id="database-report-template-panel" class="database-extra-section-panel">
@@ -1491,767 +1475,35 @@
           </section>
             </section>
 
-            <section id="project-tab" class="tab-panel">
-              <section class="panel database-panel project-management-panel">
+            {% include "workbench/tabs/project.html" %}
+
+            <section id="modeling-tab" class="tab-panel">
+              <section class="panel modeling-panel">
                 <div class="panel-head">
                   <div>
-                    <p class="section-kicker">Project Management</p>
-                    <h2>项目管理</h2>
-                    <p class="field-note">围绕客户项目批次集中展示样本入组、分析处理中、结果复核和报告交付进度，支持按项目视角统一查看甘特图。</p>
+                    <p class="section-kicker">Modeling Platform</p>
+                    <h2>微生物数据建模与预测平台</h2>
+                    <p class="field-note">基于现有样本数据库和分析结果构建模型；训练集保存样本 ID 快照，不复制原始数据，不要求重复上传。</p>
+                  </div>
+                  <div class="modal-head-actions">
+                    <button id="modeling-refresh-button" class="ghost-button" type="button">刷新</button>
                   </div>
                 </div>
-                <div class="project-management-screen">
-                  <div id="project-management-summary" class="project-management-summary"></div>
-                  <div id="project-management-content" class="project-management-content"></div>
+                <div class="modeling-tabs" role="tablist" aria-label="建模平台分区">
+                  <button class="modeling-tab-button active" type="button" data-modeling-section="modeling-samples-section">样本选择</button>
+                  <button class="modeling-tab-button" type="button" data-modeling-section="modeling-features-section">特征选择</button>
+                  <button class="modeling-tab-button" type="button" data-modeling-section="modeling-training-section">模型训练</button>
+                  <button class="modeling-tab-button" type="button" data-modeling-section="modeling-library-section">模型库</button>
+                  <button class="modeling-tab-button" type="button" data-modeling-section="modeling-prediction-section">样本预测</button>
                 </div>
+                <div id="modeling-notice" class="modeling-notice">模型预测结果仅供风险研判和预警参考，不作为最终诊断或监管结论。</div>
+                <div id="modeling-content" class="modeling-content" aria-live="polite"></div>
               </section>
             </section>
 
-            <section id="audit-tab" class="tab-panel">
-          <section id="audit-panel" class="panel detail-panel hidden">
-            <div class="panel-head">
-              <div>
-                <p class="section-kicker">Audit</p>
-                <h2>审计追踪</h2>
-                <p class="field-note">记录用户所有非查看行为，包括新增、修改、删除、任务控制、数据库导入与系统设置变更。</p>
-              </div>
-            </div>
-            <div class="detail-block audit-overview-block">
-              <div id="audit-summary" class="audit-summary-grid"></div>
-            </div>
-            <div class="detail-block audit-log-block">
-              <div class="panel-head compact">
-                <div>
-                  <h3>审计事件表</h3>
-                  <p class="field-note">支持按用户、模块、动作、结果和关键字筛选。</p>
-                </div>
-                <button id="refresh-audit-button" class="ghost-button" type="button">刷新</button>
-              </div>
-              <div class="audit-filter-row">
-                <input id="audit-search" type="text" placeholder="搜索路径、对象编号或请求摘要">
-                <select id="audit-user-filter">
-                  <option value="">全部用户</option>
-                </select>
-                <select id="audit-module-filter">
-                  <option value="">全部模块</option>
-                </select>
-                <select id="audit-action-filter">
-                  <option value="">全部动作</option>
-                </select>
-                <select id="audit-outcome-filter">
-                  <option value="">全部结果</option>
-                  <option value="success">成功</option>
-                  <option value="failed">失败</option>
-                </select>
-              </div>
-              <div id="audit-list" class="database-table-shell"></div>
-            </div>
-          </section>
-            </section>
+            {% include "workbench/tabs/audit.html" %}
 
-            <section id="admin-tab" class="tab-panel">
-          <section id="admin-panel" class="panel detail-panel hidden">
-            <div class="panel-head">
-              <div>
-                <p class="section-kicker">Admin</p>
-                <h2>后台管理</h2>
-                <p class="field-note">管理员可维护脚本路径，并管理门户用户。</p>
-              </div>
-              <div class="admin-section-tabs" role="tablist" aria-label="后台管理分区">
-                <button class="admin-section-tab active" type="button" data-admin-section="admin-settings-section">脚本设置</button>
-                <button class="admin-section-tab" type="button" data-admin-section="admin-monitor-section">实时监控</button>
-                <button class="admin-section-tab" type="button" data-admin-section="admin-pathosource-rules-section">溯源触发规则</button>
-                <button class="admin-section-tab" type="button" data-admin-section="admin-update-section">更新管理</button>
-                <button class="admin-section-tab" type="button" data-admin-section="admin-users-section">用户管理</button>
-              </div>
-            </div>
-
-            <div id="admin-settings-section" class="admin-section-panel active">
-            <div class="detail-block">
-              <h3>脚本路径设置</h3>
-              <form id="settings-form" class="admin-form">
-                <label class="wide">
-                  <span>部署基准目录</span>
-                  <div class="picker-field">
-                    <input id="admin_workspace_root" required readonly placeholder="选择部署基准目录">
-                    <button id="choose-workspace-root" class="ghost-button" type="button">选择目录</button>
-                  </div>
-                </label>
-                <label class="wide">
-                  <span>脚本相对路径（相对于部署基准目录）</span>
-                  <div class="picker-field">
-                    <input id="admin_pipeline_script" required readonly placeholder="选择脚本文件">
-                    <button id="choose-pipeline-script" class="ghost-button" type="button">选择脚本</button>
-                  </div>
-                </label>
-                <label class="wide">
-                  <span>Conda 安装路径</span>
-                  <div class="picker-field">
-                    <input id="admin_conda_root" readonly placeholder="选择 Miniconda / Anaconda 安装目录，例如 /opt/conda 或 ~/miniconda3">
-                    <button id="choose-conda-root" class="ghost-button" type="button">选择目录</button>
-                  </div>
-                </label>
-                <label class="wide">
-                  <span>运行环境 Conda 环境名</span>
-                  <div class="picker-field">
-                    <select id="admin_pipeline_python" required></select>
-                    <button id="choose-pipeline-python" class="ghost-button" type="button">刷新环境</button>
-                  </div>
-                </label>
-                <label class="wide">
-                  <span>数据库部署目录</span>
-                  <div class="picker-field">
-                    <input id="admin_database_root" required readonly placeholder="选择分析数据库的根目录">
-                    <button id="choose-database-root" class="ghost-button" type="button">选择目录</button>
-                  </div>
-                </label>
-                <label>
-                  <span>最大同时运行任务数量</span>
-                  <input id="admin_max_concurrent_tasks" type="number" min="1" value="2">
-                </label>
-                <p class="field-note">先选择 Conda 安装路径，系统会扫描该目录下的 base 与 envs 环境；运行时使用当前 Conda 安装路径下的 conda 执行 conda run -n 环境名 --no-capture-output python -u 主脚本。数据库部署目录用于参考数据库、病毒分型数据库等统一定位。</p>
-                <div class="admin-env-block">
-                  <div class="admin-env-head">
-                    <div>
-                      <strong>Conda 运行环境映射</strong>
-                      <p class="field-note">把代码里写死的 conda 环境统一暴露出来。客户只需要改环境名，不需要再去翻脚本。</p>
-                    </div>
-                  </div>
-                  <div class="admin-env-detected">
-                    <div>
-                      <strong>已识别环境</strong>
-                      <p class="field-note">下面每个环境映射项和主流程运行环境都会直接使用这里识别到的 conda 环境作为下拉选项；如果当前值不在识别列表中，也会保留为一个自定义选项。</p>
-                    </div>
-                  </div>
-                  <div class="admin-env-groups">
-                    <details class="admin-env-group" open>
-                      <summary>
-                        <span>主流程与病毒发现</span>
-                        <small>最常改的一组，建议默认先看这里</small>
-                      </summary>
-                      <div class="admin-env-grid">
-                        <label>
-                          <span>VFind</span>
-                          <select id="admin_env_vfind"></select>
-                          <small class="field-note">病毒组装筛选、CheckV 与 cgMLST panel 默认共用。</small>
-                        </label>
-                      </div>
-                    </details>
-                    <details class="admin-env-group" open>
-                      <summary>
-                        <span>去宿主与清洗</span>
-                        <small>二代和去宿主相关流程</small>
-                      </summary>
-                      <div class="admin-env-grid">
-                        <label>
-                          <span>hostile</span>
-                          <select id="admin_env_hostile"></select>
-                          <small class="field-note">hostile 去宿主流程。</small>
-                        </label>
-                        <label>
-                          <span>kneaddata</span>
-                          <select id="admin_env_kneaddata"></select>
-                          <small class="field-note">二代去宿主与去污染。</small>
-                        </label>
-                      </div>
-                    </details>
-                    <details class="admin-env-group">
-                      <summary>
-                        <span>耐药整合</span>
-                        <small>耐药、毒力与标准化输出</small>
-                      </summary>
-                      <div class="admin-env-grid">
-                        <label>
-                          <span>hamronization</span>
-                          <select id="admin_env_hamronization"></select>
-                          <small class="field-note">耐药整合与标准化输出。</small>
-                        </label>
-                        <label>
-                          <span>RGI</span>
-                          <select id="admin_env_rgi"></select>
-                          <small class="field-note">RGI 及部分分型补充工具。</small>
-                        </label>
-                        <label>
-                          <span>RGI_new</span>
-                          <select id="admin_env_rgi_new"></select>
-                          <small class="field-note">宏基因组 bin 的新版 RGI 运行环境。</small>
-                        </label>
-                      </div>
-                    </details>
-                    <details class="admin-env-group">
-                      <summary>
-                        <span>宏基因组</span>
-                        <small>组装、分箱、质量评估与定量</small>
-                      </summary>
-                      <div class="admin-env-grid">
-                        <label>
-                          <span>BASALT</span>
-                          <select id="admin_env_basalt"></select>
-                          <small class="field-note">宏基因组组装与分箱主链。</small>
-                        </label>
-                        <label>
-                          <span>coverm</span>
-                          <select id="admin_env_coverm"></select>
-                          <small class="field-note">宏基因组覆盖度与 TPM 定量。</small>
-                        </label>
-                        <label>
-                          <span>cm210</span>
-                          <select id="admin_env_cm210"></select>
-                          <small class="field-note">质量评估与补充分型。</small>
-                        </label>
-                        <label>
-                          <span>gtdbtk</span>
-                          <select id="admin_env_gtdbtk"></select>
-                          <small class="field-note">宏基因组 bin 分类。</small>
-                        </label>
-                      </div>
-                    </details>
-                    <details class="admin-env-group">
-                      <summary>
-                        <span>群落分析</span>
-                        <small>扩增子生态统计与可视化</small>
-                      </summary>
-                      <div class="admin-env-grid">
-                        <label>
-                          <span>qiime2</span>
-                          <select id="admin_env_qiime2"></select>
-                          <small class="field-note">Alpha / Beta 多样性、分类器与多样本统计。</small>
-                        </label>
-                        <label>
-                          <span>microeco</span>
-                          <select id="admin_env_microeco"></select>
-                          <small class="field-note">LEfSe、生态统计与可视化分析。</small>
-                        </label>
-                      </div>
-                    </details>
-                    <details class="admin-env-group">
-                      <summary>
-                        <span>图谱与注释</span>
-                        <small>注释统计、质粒与结果可视化</small>
-                      </summary>
-                      <div class="admin-env-grid">
-                        <label>
-                          <span>genovi</span>
-                          <select id="admin_env_genovi"></select>
-                          <small class="field-note">图谱生成与 COG 分类统计。</small>
-                        </label>
-                        <label>
-                          <span>plasflow</span>
-                          <select id="admin_env_plasflow"></select>
-                          <small class="field-note">质粒判定补充流程。</small>
-                        </label>
-                        <label>
-                          <span>report_env</span>
-                          <select id="admin_env_report_env"></select>
-                          <small class="field-note">Rscript 报告输出。</small>
-                        </label>
-                      </div>
-                    </details>
-                    <details class="admin-env-group">
-                      <summary>
-                        <span>三代纠错与变异</span>
-                        <small>ONT 抛光与变异检测</small>
-                      </summary>
-                      <div class="admin-env-grid">
-                        <label>
-                          <span>medaka</span>
-                          <select id="admin_env_medaka"></select>
-                          <small class="field-note">ONT 抛光。</small>
-                        </label>
-                        <label>
-                          <span>clair3</span>
-                          <select id="admin_env_clair3"></select>
-                          <small class="field-note">ONT 变异检测。</small>
-                        </label>
-                      </div>
-                    </details>
-                    <details class="admin-env-group">
-                      <summary>
-                        <span>分型补充</span>
-                        <small>cgMLST、血清型与专用工具</small>
-                      </summary>
-                      <div class="admin-env-grid">
-                        <label>
-                          <span>sistr_hicap</span>
-                          <select id="admin_env_sistr_hicap"></select>
-                          <small class="field-note">hicap / sistr 等补充分型。</small>
-                        </label>
-                        <label>
-                          <span>chewie</span>
-                          <select id="admin_env_chewie"></select>
-                          <small class="field-note">溯源分析与 cgMLST 兼容环境。</small>
-                        </label>
-                        <label>
-                          <span>choleraefinder</span>
-                          <select id="admin_env_choleraefinder"></select>
-                          <small class="field-note">霍乱弧菌专用工具。</small>
-                        </label>
-                      </div>
-                    </details>
-                    <details class="admin-env-group">
-                      <summary>
-                        <span>旧流程兼容</span>
-                        <small>仅在旧版病毒脚本仍使用时才需要</small>
-                      </summary>
-                      <div class="admin-env-grid">
-                        <label>
-                          <span>Vlib</span>
-                          <select id="admin_env_vlib"></select>
-                          <small class="field-note">旧版病毒分析兼容环境。</small>
-                        </label>
-                        <label>
-                          <span>tNGS</span>
-                          <select id="admin_env_tngs"></select>
-                          <small class="field-note">旧版病毒流程补充环境。</small>
-                        </label>
-                      </div>
-                    </details>
-                  </div>
-                  <p class="field-note">这里展示的是当前项目里真实出现过的 conda run -n 环境，执行时统一走上方 Conda 安装路径下的 conda。已经接入后台联动的有：主流程环境、VFind（VirSorter2 / CheckV）、以及 cgMLST panel 构建用的 chewBBACA。</p>
-                </div>
-                <button class="primary-button" type="submit">保存脚本路径</button>
-              </form>
-            </div>
-            </div>
-
-            <div id="admin-monitor-section" class="admin-section-panel">
-            <div class="detail-block admin-monitor-block">
-              <div class="admin-monitor-hero">
-                <div>
-                  <h3>实时监控</h3>
-                  <p class="field-note">识别测序仪下机目录，确认目录在一段时间内不再变化后，自动生成监听任务并进入标准分析队列。</p>
-                </div>
-                <div class="admin-monitor-hero-badge">
-                  <span>Run Watch</span>
-                  <strong>自动下机分析</strong>
-                </div>
-              </div>
-              <form id="admin-monitor-form" class="admin-monitor-form">
-                <div class="admin-monitor-grid">
-                  <label class="wide admin-monitor-field">
-                    <span>监控名称</span>
-                    <input id="admin-monitor-name" placeholder="例如：NovaSeq 夜间下机监听">
-                    <small class="field-note">用于生成任务名前缀，便于后续在队列中快速定位。</small>
-                  </label>
-                  <label class="wide admin-monitor-field">
-                    <span>默认测序下机目录</span>
-                    <div class="picker-field">
-                      <input id="admin-monitor-input-dir" readonly placeholder="选择默认测序仪输出目录">
-                      <button id="choose-admin-monitor-input-dir" class="ghost-button" type="button">选择目录</button>
-                    </div>
-                    <small class="field-note">作为所有模块的默认监听目录；如果某个模块单独指定了目录，会优先使用模块自己的目录。</small>
-                  </label>
-                  <label class="wide admin-monitor-field">
-                    <span>默认分析输出根目录</span>
-                    <div class="picker-field">
-                      <input id="admin-monitor-output-root" readonly placeholder="选择默认自动分析输出目录">
-                      <button id="choose-admin-monitor-output-root" class="ghost-button" type="button">选择目录</button>
-                    </div>
-                    <small class="field-note">作为所有模块的默认输出目录；如果模块内单独指定了输出目录，会优先使用模块自己的目录。</small>
-                  </label>
-                </div>
-                <div class="admin-monitor-grid admin-monitor-grid-compact">
-                  <label class="admin-monitor-field">
-                    <span>目录稳定时长</span>
-                    <input id="admin-monitor-stable-minutes" type="number" min="5" step="5" value="30">
-                    <small class="field-note">目录持续稳定多久后，判定为下机完成。</small>
-                  </label>
-                  <label class="admin-monitor-field">
-                    <span>轮询间隔</span>
-                    <input id="admin-monitor-poll-minutes" type="number" min="1" step="1" value="5">
-                    <small class="field-note">后台检查目录变化的时间间隔。</small>
-                  </label>
-                  <label class="admin-monitor-field">
-                    <span>自动运行样本上限</span>
-                    <input id="admin-monitor-max-samples" type="number" min="0" step="1" value="0">
-                    <small class="field-note"><code>0</code> 表示不限制；超出时会保留监听结果但不自动运行。</small>
-                  </label>
-                </div>
-                <div class="admin-monitor-module-head">
-                  <div>
-                    <strong>选择需要运行的模块</strong>
-                    <p class="field-note">可同时勾选多个模块；每个模块都可以单独绑定自己的监听目录和输出目录，系统会分别创建对应的监听任务。</p>
-                  </div>
-                </div>
-                <div class="admin-monitor-module-grid">
-                  <article class="admin-monitor-module-card" data-monitor-module-card="bacteria">
-                    <label class="admin-monitor-module-toggle">
-                      <input id="admin-monitor-module-bacteria" type="checkbox" data-monitor-module="bacteria" checked>
-                      <span>细菌分析</span>
-                    </label>
-                    <p>适合常规细菌样本的自动下机分析、注释与分型。</p>
-                    <label class="admin-monitor-field compact">
-                      <span>模块监控目录</span>
-                      <div class="picker-field">
-                        <input id="admin-monitor-input-dir-bacteria" readonly placeholder="可选：单独指定细菌分析监听目录">
-                        <button id="choose-admin-monitor-input-dir-bacteria" class="ghost-button" type="button">选择目录</button>
-                      </div>
-                    </label>
-                    <label class="admin-monitor-field compact">
-                      <span>模块输出目录</span>
-                      <div class="picker-field">
-                        <input id="admin-monitor-output-root-bacteria" readonly placeholder="可选：单独指定细菌分析输出目录">
-                        <button id="choose-admin-monitor-output-root-bacteria" class="ghost-button" type="button">选择目录</button>
-                      </div>
-                    </label>
-                    <label class="admin-monitor-field compact">
-                      <span>预设参数</span>
-                      <select id="admin-monitor-preset-bacteria" data-monitor-preset="bacteria">
-                        <option value="standard">常规细菌组装</option>
-                        <option value="fast-track">快速质控筛查</option>
-                      </select>
-                      <div class="admin-monitor-preset-editor" data-monitor-preset-editor="bacteria">
-                        <label class="admin-monitor-field compact">
-                          <span>组装模式</span>
-                          <select data-monitor-param="asm_type" data-monitor-module-key="bacteria">
-                            <option value="shortasm">短读长组装</option>
-                            <option value="shortref">短读长参考比对</option>
-                          </select>
-                        </label>
-                        <label class="admin-monitor-field compact">
-                          <span>组装软件</span>
-                          <select data-monitor-param="method" data-monitor-module-key="bacteria">
-                            <option value="spades">SPAdes</option>
-                            <option value="freebayes">FreeBayes</option>
-                          </select>
-                        </label>
-                        <label class="admin-monitor-field compact">
-                          <span>线程数</span>
-                          <input data-monitor-param="thread" data-monitor-module-key="bacteria" type="number" min="1" step="1" value="10">
-                        </label>
-                        <label class="admin-monitor-field compact admin-monitor-param-runflow">
-                          <span>执行流程</span>
-                          <input data-monitor-param="runflow" data-monitor-module-key="bacteria" placeholder="留空则使用该预设默认流程">
-                        </label>
-                      </div>
-                      <small class="field-note">切换预设后会自动带出默认参数，也可以继续按字段微调。</small>
-                    </label>
-                  </article>
-                  <article class="admin-monitor-module-card" data-monitor-module-card="virus">
-                    <label class="admin-monitor-module-toggle">
-                      <input id="admin-monitor-module-virus" type="checkbox" data-monitor-module="virus">
-                      <span>病毒分析</span>
-                    </label>
-                    <p>适合病毒样本的参考比对与病毒分型流程。</p>
-                    <label class="admin-monitor-field compact">
-                      <span>模块监控目录</span>
-                      <div class="picker-field">
-                        <input id="admin-monitor-input-dir-virus" readonly placeholder="可选：单独指定病毒分析监听目录">
-                        <button id="choose-admin-monitor-input-dir-virus" class="ghost-button" type="button">选择目录</button>
-                      </div>
-                    </label>
-                    <label class="admin-monitor-field compact">
-                      <span>模块输出目录</span>
-                      <div class="picker-field">
-                        <input id="admin-monitor-output-root-virus" readonly placeholder="可选：单独指定病毒分析输出目录">
-                        <button id="choose-admin-monitor-output-root-virus" class="ghost-button" type="button">选择目录</button>
-                      </div>
-                    </label>
-                    <label class="admin-monitor-field compact">
-                      <span>预设参数</span>
-                      <select id="admin-monitor-preset-virus" data-monitor-preset="virus">
-                        <option value="reference">病毒参考比对</option>
-                      </select>
-                      <div class="admin-monitor-preset-editor" data-monitor-preset-editor="virus">
-                        <label class="admin-monitor-field compact">
-                          <span>病毒分类</span>
-                          <select id="admin-monitor-virus-group-select">
-                            <option value="all">全部病毒</option>
-                            <option value="respiratory">呼吸道病毒</option>
-                            <option value="enteric">肠道病毒</option>
-                            <option value="vector">虫媒病毒</option>
-                            <option value="contact">接触传播病毒</option>
-                            <option value="hepatitis">肝炎病毒</option>
-                          </select>
-                          <small class="field-note">先缩小到病毒分类，再选择具体目标病毒。</small>
-                        </label>
-                        <label class="admin-monitor-field compact">
-                          <span>目标病毒</span>
-                          <select data-monitor-param="species" data-monitor-module-key="virus">
-                            <option value="">请选择病毒类型</option>
-                            <optgroup label="呼吸道病毒" data-monitor-virus-option-group="respiratory">
-                              <option value="Influenza virus">流感病毒</option>
-                              <option value="Respiratory syncytial virus">呼吸道合胞病毒</option>
-                              <option value="Human metapneumovirus">人偏肺病毒</option>
-                              <option value="Human parainfluenza virus">副流感病毒</option>
-                              <option value="Human rhinovirus">鼻病毒</option>
-                              <option value="Human coronavirus">人冠状病毒</option>
-                              <option value="SARS-CoV-2">新型冠状病毒</option>
-                              <option value="Adenovirus">腺病毒</option>
-                            </optgroup>
-                            <optgroup label="虫媒病毒" data-monitor-virus-option-group="vector">
-                              <option value="Dengue virus">登革热病毒</option>
-                              <option value="Zika virus">寨卡病毒</option>
-                              <option value="Chikungunya virus">基孔肯雅病毒</option>
-                              <option value="Bandavirus dabieense">班达病毒</option>
-                            </optgroup>
-                            <optgroup label="出血热病毒" data-monitor-virus-option-group="hemorrhagic">
-                              <option value="Ebola virus">埃博拉病毒</option>
-                              <option value="Orthoebolavirus">正埃博拉病毒属</option>
-                            </optgroup>
-                            <optgroup label="肠道病毒" data-monitor-virus-option-group="enteric">
-                              <option value="Norovirus">诺如病毒</option>
-                              <option value="Rotavirus A">A组轮状病毒</option>
-                              <option value="Sapovirus">札如病毒</option>
-                              <option value="Astrovirus">星状病毒</option>
-                              <option value="Human enterovirus">肠道病毒</option>
-                            </optgroup>
-                            <optgroup label="肝炎病毒" data-monitor-virus-option-group="hepatitis">
-                              <option value="Hepatovirus">肝炎病毒总入口</option>
-                              <option value="Hepatitis A virus">甲型肝炎病毒</option>
-                              <option value="Hepatitis B virus">乙型肝炎病毒</option>
-                              <option value="Hepatitis C virus">丙型肝炎病毒</option>
-                              <option value="Hepatitis D virus">丁型肝炎病毒</option>
-                              <option value="Hepatitis E virus">戊型肝炎病毒</option>
-                            </optgroup>
-                            <optgroup label="慢性病毒" data-monitor-virus-option-group="chronic">
-                              <option value="HIV-1">HIV-1</option>
-                            </optgroup>
-                            <optgroup label="接触传播病毒" data-monitor-virus-option-group="contact">
-                              <option value="Monkeypox virus">猴痘病毒</option>
-                            </optgroup>
-                          </select>
-                        </label>
-                        <label class="admin-monitor-field compact">
-                          <span>分析模式</span>
-                          <select data-monitor-param="asm_type" data-monitor-module-key="virus">
-                            <option value="shortref">短读长参考比对</option>
-                            <option value="shortasm">短读长组装</option>
-                          </select>
-                        </label>
-                        <label class="admin-monitor-field compact">
-                          <span>比对软件</span>
-                          <select data-monitor-param="method" data-monitor-module-key="virus">
-                            <option value="bwa">BWA</option>
-                            <option value="freebayes">FreeBayes</option>
-                          </select>
-                        </label>
-                        <label class="admin-monitor-field compact">
-                          <span>线程数</span>
-                          <input data-monitor-param="thread" data-monitor-module-key="virus" type="number" min="1" step="1" value="10">
-                        </label>
-                      </div>
-                      <small class="field-note">建议先按传播类型定位，再选择具体病毒；系统会按该病毒优先匹配参考库与后续分型流程。</small>
-                    </label>
-                  </article>
-                  <article class="admin-monitor-module-card" data-monitor-module-card="metagenome">
-                    <label class="admin-monitor-module-toggle">
-                      <input id="admin-monitor-module-metagenome" type="checkbox" data-monitor-module="metagenome">
-                      <span>宏基因组分析</span>
-                    </label>
-                    <p>适合混合样本的宏基因组组装、物种识别与结果汇总。</p>
-                    <label class="admin-monitor-field compact">
-                      <span>模块监控目录</span>
-                      <div class="picker-field">
-                        <input id="admin-monitor-input-dir-metagenome" readonly placeholder="可选：单独指定宏基因组监听目录">
-                        <button id="choose-admin-monitor-input-dir-metagenome" class="ghost-button" type="button">选择目录</button>
-                      </div>
-                    </label>
-                    <label class="admin-monitor-field compact">
-                      <span>模块输出目录</span>
-                      <div class="picker-field">
-                        <input id="admin-monitor-output-root-metagenome" readonly placeholder="可选：单独指定宏基因组输出目录">
-                        <button id="choose-admin-monitor-output-root-metagenome" class="ghost-button" type="button">选择目录</button>
-                      </div>
-                    </label>
-                    <label class="admin-monitor-field compact">
-                      <span>预设参数</span>
-                      <select id="admin-monitor-preset-metagenome" data-monitor-preset="metagenome">
-                        <option value="screening">宏基因组筛查</option>
-                        <option value="deep">宏基因组深度组装</option>
-                      </select>
-                      <div class="admin-monitor-preset-editor" data-monitor-preset-editor="metagenome">
-                        <label class="admin-monitor-field compact">
-                          <span>分析模式</span>
-                          <select data-monitor-param="asm_type" data-monitor-module-key="metagenome">
-                            <option value="shortasm">短读长组装</option>
-                          </select>
-                        </label>
-                        <label class="admin-monitor-field compact">
-                          <span>分析软件</span>
-                          <select data-monitor-param="method" data-monitor-module-key="metagenome">
-                            <option value="meta">Meta Pipeline</option>
-                          </select>
-                        </label>
-                        <label class="admin-monitor-field compact">
-                          <span>线程数</span>
-                          <input data-monitor-param="thread" data-monitor-module-key="metagenome" type="number" min="1" step="1" value="10">
-                        </label>
-                      </div>
-                      <small class="field-note">切换预设后会自动带出默认参数，也可以继续按字段微调。</small>
-                    </label>
-                  </article>
-                </div>
-                <div class="admin-monitor-actions">
-                  <button id="submit-admin-monitor" class="primary-button" type="submit">创建监控任务</button>
-                </div>
-              </form>
-              <div id="admin-monitor-result" class="admin-monitor-result empty-state">尚未创建实时监控任务。</div>
-            </div>
-            <div class="detail-block admin-monitor-block">
-              <div class="admin-monitor-list-head">
-                <div>
-                  <h3>当前监控任务</h3>
-                  <p class="field-note">这里聚合当前队列中启用了目录监听的任务，可快速查看监听状态、稳定时长和已识别样本数。</p>
-                </div>
-              </div>
-              <div id="admin-monitor-task-list" class="admin-monitor-task-list"></div>
-            </div>
-            </div>
-
-            <div id="admin-pathosource-rules-section" class="admin-section-panel">
-            <div class="detail-block admin-trigger-block">
-              <div class="admin-trigger-hero">
-                <div>
-                  <p class="section-kicker">PathoSource Trigger</p>
-                  <h3>宏基因组自动溯源触发规则</h3>
-                  <p class="field-note">先定义什么情况下要从宏基因组结果自动转入本地 ANI / SNP 溯源分析。规则保存后，后续自动子任务会直接读取这里的配置。</p>
-                </div>
-                <div id="admin-trigger-summary" class="admin-trigger-summary">
-                  <span>当前状态</span>
-                  <strong>规则加载中</strong>
-                  <p>正在读取服务端配置。</p>
-                </div>
-              </div>
-              <form id="admin-pathosource-trigger-form" class="admin-trigger-form">
-                <div class="admin-trigger-grid admin-trigger-grid-switches">
-                  <label class="admin-trigger-switch">
-                    <input id="admin-pathosource-trigger-enabled" type="checkbox">
-                    <div>
-                      <strong>启用自动触发</strong>
-                      <p>宏基因组任务完成后，按当前规则筛选是否进入溯源流程。</p>
-                    </div>
-                  </label>
-                  <label class="admin-trigger-switch">
-                    <input id="admin-pathosource-trigger-priority-only" type="checkbox">
-                    <div>
-                      <strong>仅重点病原触发</strong>
-                      <p>只对重点病原名单中的物种执行自动 ANI / SNP 关联。</p>
-                    </div>
-                  </label>
-                  <label class="admin-trigger-switch">
-                    <input id="admin-pathosource-trigger-auto-start" type="checkbox" checked>
-                    <div>
-                      <strong>自动启动子任务</strong>
-                      <p>命中后直接创建并启动 PathoSource 子任务，而不是仅生成建议。</p>
-                    </div>
-                  </label>
-                </div>
-                <div class="admin-trigger-grid admin-trigger-grid-metrics">
-                  <label class="admin-monitor-field">
-                    <span>最小相对丰度 (%)</span>
-                    <input id="admin-pathosource-trigger-min-abundance" type="number" min="0" max="100" step="0.1" value="15">
-                    <small class="field-note">用于过滤低丰度背景噪声，建议在 5-20% 之间。</small>
-                  </label>
-                  <label class="admin-monitor-field">
-                    <span>最小支持 reads</span>
-                    <input id="admin-pathosource-trigger-min-reads" type="number" min="0" step="50" value="800">
-                    <small class="field-note">至少达到该支持 reads 数，才认为有进一步溯源价值。</small>
-                  </label>
-                  <label class="admin-monitor-field">
-                    <span>最小参考覆盖度 (%)</span>
-                    <input id="admin-pathosource-trigger-min-coverage" type="number" min="0" max="100" step="0.1" value="20">
-                    <small class="field-note">覆盖度过低时不建议直接进入 SNP / ANI 计算。</small>
-                  </label>
-                  <label class="admin-monitor-field">
-                    <span>最大纳入历史株数</span>
-                    <input id="admin-pathosource-trigger-max-genomes" type="number" min="1" step="1" value="30">
-                    <small class="field-note">自动溯源时最多拉取多少条本地历史株或参考基因组。</small>
-                  </label>
-                </div>
-                <div class="admin-trigger-grid admin-trigger-grid-metrics">
-                  <label class="admin-monitor-field">
-                    <span>默认比对模式</span>
-                    <select id="admin-pathosource-trigger-msa-method">
-                      <option value="snippy">snippy</option>
-                      <option value="ska">ska</option>
-                    </select>
-                    <small class="field-note">后续自动子任务默认采用的 PathoSource 比对方式。</small>
-                  </label>
-                  <label class="admin-monitor-field">
-                    <span>默认建树方法</span>
-                    <select id="admin-pathosource-trigger-tree-method">
-                      <option value="ML">最大似然 (ML)</option>
-                      <option value="NJ">邻接法 (NJ)</option>
-                    </select>
-                    <small class="field-note">用于自动生成系统发育树的默认方法。</small>
-                  </label>
-                  <label class="wide admin-monitor-field">
-                    <span>限制样本来源</span>
-                    <textarea id="admin-pathosource-trigger-sample-sources" rows="3" placeholder="每行一个，例如：血液&#10;脑脊液&#10;环境样本"></textarea>
-                    <small class="field-note">留空表示不限制；填写后仅这些样本来源会进入自动溯源判定。</small>
-                  </label>
-                </div>
-                <div class="admin-trigger-grid">
-                  <label class="admin-monitor-field">
-                    <span>重点病原名单</span>
-                    <textarea id="admin-pathosource-trigger-priority-species" rows="6" placeholder="每行一个物种名，例如：&#10;Klebsiella pneumoniae&#10;Acinetobacter baumannii&#10;Candida auris"></textarea>
-                    <small class="field-note">勾选“仅重点病原触发”时，这里至少需要填写一个物种。</small>
-                  </label>
-                  <label class="admin-monitor-field">
-                    <span>排除物种名单</span>
-                    <textarea id="admin-pathosource-trigger-excluded-species" rows="6" placeholder="每行一个物种名，例如：&#10;Cutibacterium acnes&#10;Ralstonia pickettii"></textarea>
-                    <small class="field-note">用于屏蔽常见背景菌、污染物种或暂不参与自动溯源的目标。</small>
-                  </label>
-                </div>
-                <div class="admin-monitor-actions">
-                  <button id="save-admin-pathosource-trigger" class="primary-button" type="submit">保存触发规则</button>
-                </div>
-              </form>
-              <div id="admin-pathosource-trigger-result" class="admin-monitor-result empty-state">尚未修改自动溯源触发规则。</div>
-            </div>
-            </div>
-
-            <div id="admin-update-section" class="admin-section-panel">
-            <div class="detail-block">
-              <h3>更新管理</h3>
-              <div class="admin-update-panel">
-                <div class="admin-update-card">
-                  <div class="admin-update-head">
-                    <div>
-                      <strong>在线更新</strong>
-                      <p class="field-note">从 GitHub 更新部署代码，更新源固定为 <code>https://github.com/muguading/metagenomic.git</code>。</p>
-                    </div>
-                    <button id="run-online-update" class="primary-button" type="button">在线更新</button>
-                  </div>
-                </div>
-                <div class="admin-update-card">
-                  <div class="admin-update-head">
-                    <div>
-                      <strong>离线更新</strong>
-                      <p class="field-note">先手动选择优盘中的更新目录，只有在真正执行离线更新时才会校验目录结构并比较差异。</p>
-                    </div>
-                  </div>
-                  <label class="wide">
-                    <span>离线更新目录</span>
-                    <div class="picker-field">
-                      <input id="offline-update-source" readonly placeholder="点击右侧按钮选择优盘中的更新目录">
-                      <button id="choose-offline-update-source" class="ghost-button" type="button">选择目录</button>
-                    </div>
-                  </label>
-                  <div class="admin-update-actions">
-                    <button id="run-offline-update" class="ghost-button" type="button">离线更新</button>
-                  </div>
-                </div>
-                <div id="admin-update-result" class="admin-update-result empty-state">尚未执行更新。</div>
-              </div>
-            </div>
-            </div>
-
-            <div id="admin-users-section" class="admin-section-panel">
-            <div class="detail-block">
-              <div class="admin-users-head">
-                <div>
-                  <h3>用户信息管理</h3>
-                  <p class="field-note">用户新增收进独立弹窗，避免管理页被表单长期占据。</p>
-                </div>
-                <button id="open-create-user-modal" class="primary-button" type="button">添加用户</button>
-              </div>
-              <div id="user-list" class="user-list"></div>
-            </div>
-            </div>
-          </section>
-            </section>
+            {% include "workbench/tabs/admin.html" %}
           </main>
         </div>
       </div>
@@ -2292,9 +1544,11 @@
             <p id="merged-export-description" class="field-note">已从 0 个任务中汇总 0 个样本。可对样本进行筛选、勾选和排序，最终将当前选中的样本按当前排序顺序导出。</p>
           </div>
           <div class="modal-head-actions">
+            <input id="merged-export-meta-file" type="file" accept=".csv,.tsv,.xlsx" hidden>
             <select id="merged-export-format" class="merged-export-format" aria-label="导出格式">
               <option value="xlsx">Excel xlsx</option>
               <option value="csv">CSV</option>
+              <option value="analysis_results">分析结果</option>
             </select>
             <button id="merged-export-filtered" class="primary-button" type="button">导出当前筛选结果</button>
             <button id="merged-export-selected" class="ghost-button" type="button">导出已勾选样本</button>
@@ -2302,6 +1556,27 @@
           </div>
         </div>
         <div id="merged-export-body" class="merged-export-body"></div>
+      </section>
+    </div>
+
+    <div id="analysis-export-modal" class="browser-modal hidden" aria-hidden="true">
+      <div id="analysis-export-backdrop" class="browser-backdrop"></div>
+      <section class="browser-panel detail-modal-panel analysis-export-panel" role="dialog" aria-modal="true" aria-labelledby="analysis-export-title">
+        <div class="panel-head">
+          <div>
+            <p class="section-kicker">Analysis Package</p>
+            <h2 id="analysis-export-title">选择分析数据</h2>
+            <p id="analysis-export-description" class="field-note">将当前范围内的样本分析产物打包为 zip 文件。</p>
+          </div>
+          <button id="close-analysis-export-modal" class="ghost-button" type="button">关闭</button>
+        </div>
+        <div class="analysis-export-body">
+          <div id="analysis-export-options" class="analysis-export-options"></div>
+          <div class="modal-head-actions analysis-export-actions">
+            <button id="confirm-analysis-export" class="primary-button" type="button">下载压缩包</button>
+            <button id="cancel-analysis-export" class="ghost-button" type="button">取消</button>
+          </div>
+        </div>
       </section>
     </div>
 
@@ -2375,522 +1650,7 @@
       </section>
     </div>
 
-    <div id="create-user-modal" class="browser-modal hidden" aria-hidden="true">
-      <div id="create-user-backdrop" class="browser-backdrop"></div>
-      <section class="browser-panel create-user-panel" role="dialog" aria-modal="true" aria-labelledby="create-user-title">
-        <div class="panel-head">
-          <div>
-            <p class="section-kicker">User</p>
-            <h2 id="create-user-title">添加用户</h2>
-            <p class="field-note">在这里创建新的门户账户，并指定角色与用户组。</p>
-          </div>
-          <button id="close-create-user-modal" class="ghost-button" type="button">关闭</button>
-        </div>
-        <form id="user-form" class="admin-form">
-          <section class="admin-form-cluster wide">
-            <div class="admin-form-cluster-head">
-              <div>
-                <strong>账户身份</strong>
-                <p class="field-note">先定义这个账号是谁，再决定他可以操作什么。</p>
-              </div>
-              <span class="admin-form-cluster-kicker">Identity</span>
-            </div>
-            <div class="admin-form-grid">
-              <label>
-                <span>用户名</span>
-                <input id="new_username" required>
-              </label>
-              <label>
-                <span>显示名</span>
-                <input id="new_display_name">
-              </label>
-              <label>
-                <span>用户组</span>
-                <input id="new_group_name" placeholder="例如：microbiology_lab">
-              </label>
-              <label>
-                <span>密码</span>
-                <input id="new_password" type="password" required>
-              </label>
-              <label>
-                <span>有效截止时间</span>
-                <input id="new_account_expires_at" type="datetime-local">
-              </label>
-              <label class="wide">
-                <span>角色</span>
-                <select id="new_role">
-                  <option value="user">普通用户</option>
-                  <option value="group_admin">group 管理</option>
-                  <option value="admin">管理员</option>
-                </select>
-              </label>
-            </div>
-          </section>
-          <section class="admin-form-cluster wide">
-            <div class="admin-form-cluster-head">
-              <div>
-                <strong>分析模块授权</strong>
-                <p class="field-note">权限不是备注，它决定用户登录后能进入哪些工作流。</p>
-              </div>
-              <span class="admin-form-cluster-kicker">Access</span>
-            </div>
-            <div id="new-permission-summary" class="permission-summary" aria-live="polite">
-              <strong>已开通 1 个模块</strong>
-              <span>普通用户至少需要一个可用分析模块。</span>
-            </div>
-            <div class="permission-card-grid" data-permission-scope="create">
-              <div class="permission-card" data-module-card="bacteria">
-                <input id="new_allowed_module_bacteria" type="checkbox" checked data-module-checkbox="bacteria" data-permission-scope="create">
-                <span class="permission-card-surface">
-                  <strong>细菌分析</strong>
-                  <small>组装、物种鉴定、耐药毒力、MLST 与血清型等常规流程。</small>
-                  <em>适合日常单菌样本主线分析</em>
-                  <span class="permission-expiry-field">
-                    <span class="permission-expiry-control">
-                      <span>模块截止时间</span>
-                      <input id="new_module_expiry_bacteria" type="datetime-local" data-module-expiry="bacteria" data-permission-scope="create">
-                    </span>
-                  </span>
-                </span>
-              </div>
-              <div class="permission-card" data-module-card="virus">
-                <input id="new_allowed_module_virus" type="checkbox" data-module-checkbox="virus" data-permission-scope="create">
-                <span class="permission-card-surface">
-                  <strong>病毒分析</strong>
-                  <small>参考驱动分析、病毒鉴定与病毒分型工作流。</small>
-                  <em>适合病毒目标分析与定向判读</em>
-                  <span class="permission-expiry-field">
-                    <span class="permission-expiry-control">
-                      <span>模块截止时间</span>
-                      <input id="new_module_expiry_virus" type="datetime-local" data-module-expiry="virus" data-permission-scope="create">
-                    </span>
-                  </span>
-                  <span class="permission-expiry-field">
-                    <span class="permission-expiry-control">
-                      <span>可用病毒</span>
-                      <span class="virus-access-panel" data-virus-permission-scope="create">
-                        <span class="virus-access-head">
-                          <span class="virus-access-copy">
-                            <strong>按分组批量授权</strong>
-                            <small>先选场景，再微调单病毒，减少重复点选。</small>
-                          </span>
-                          <span class="virus-access-actions">
-                            <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="__all__" data-virus-permission-scope="create">全部选择</button>
-                            <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="__all__" data-virus-permission-scope="create">全部清空</button>
-                          </span>
-                        </span>
-                        <span class="virus-access-groups">
-                          <span class="virus-access-group" data-virus-group-panel="respiratory" data-virus-permission-scope="create">
-                            <span class="virus-access-group-head">
-                              <span>
-                                <strong>呼吸道病毒</strong>
-                                <small>面向呼吸道监测和常规呼吸病原判读。</small>
-                              </span>
-                              <span class="virus-access-group-tools">
-                                <strong data-virus-group-count>0 / 8</strong>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="respiratory" data-virus-permission-scope="create">整组选择</button>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="respiratory" data-virus-permission-scope="create">整组清空</button>
-                              </span>
-                            </span>
-                            <span class="virus-access-chip-grid">
-                              <label class="virus-access-chip"><input id="new_allowed_virus_ncov" type="checkbox" data-virus-checkbox="ncov" data-virus-group="respiratory" data-virus-permission-scope="create"><span>新冠</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_flu" type="checkbox" data-virus-checkbox="flu" data-virus-group="respiratory" data-virus-permission-scope="create"><span>流感</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_rsv" type="checkbox" data-virus-checkbox="rsv" data-virus-group="respiratory" data-virus-permission-scope="create"><span>合胞病毒</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_hmpv" type="checkbox" data-virus-checkbox="hmpv" data-virus-group="respiratory" data-virus-permission-scope="create"><span>偏肺病毒</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_hpiv" type="checkbox" data-virus-checkbox="hpiv" data-virus-group="respiratory" data-virus-permission-scope="create"><span>副流感病毒</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_hadv" type="checkbox" data-virus-checkbox="hadv" data-virus-group="respiratory" data-virus-permission-scope="create"><span>腺病毒</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_rhinovirus" type="checkbox" data-virus-checkbox="rhinovirus" data-virus-group="respiratory" data-virus-permission-scope="create"><span>鼻病毒</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_seasonal_hcov" type="checkbox" data-virus-checkbox="seasonal_hcov" data-virus-group="respiratory" data-virus-permission-scope="create"><span>季节性冠状病毒</span></label>
-                            </span>
-                          </span>
-                          <span class="virus-access-group" data-virus-group-panel="enteric" data-virus-permission-scope="create">
-                            <span class="virus-access-group-head">
-                              <span>
-                                <strong>肠道病毒</strong>
-                                <small>适合腹泻、肠道感染和粪便病原场景。</small>
-                              </span>
-                              <span class="virus-access-group-tools">
-                                <strong data-virus-group-count>0 / 6</strong>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="enteric" data-virus-permission-scope="create">整组选择</button>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="enteric" data-virus-permission-scope="create">整组清空</button>
-                              </span>
-                            </span>
-                            <span class="virus-access-chip-grid">
-                              <label class="virus-access-chip"><input id="new_allowed_virus_norovirus" type="checkbox" data-virus-checkbox="norovirus" data-virus-group="enteric" data-virus-permission-scope="create"><span>诺如病毒</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_rotavirus" type="checkbox" data-virus-checkbox="rotavirus" data-virus-group="enteric" data-virus-permission-scope="create"><span>轮状病毒</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_astroviridae" type="checkbox" data-virus-checkbox="astroviridae" data-virus-group="enteric" data-virus-permission-scope="create"><span>星状病毒</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_enterovirus" type="checkbox" data-virus-checkbox="enterovirus" data-virus-group="enteric" data-virus-permission-scope="create"><span>肠道病毒</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_hepatovirus" type="checkbox" data-virus-checkbox="hepatovirus" data-virus-group="enteric" data-virus-permission-scope="create"><span>肝炎病毒</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_sapovirus" type="checkbox" data-virus-checkbox="sapovirus" data-virus-group="enteric" data-virus-permission-scope="create"><span>札如病毒</span></label>
-                            </span>
-                          </span>
-                          <span class="virus-access-group" data-virus-group-panel="vector" data-virus-permission-scope="create">
-                            <span class="virus-access-group-head">
-                              <span>
-                                <strong>虫媒与发热相关</strong>
-                                <small>用于登革热、寨卡及发热伴血小板减少综合征场景。</small>
-                              </span>
-                              <span class="virus-access-group-tools">
-                                <strong data-virus-group-count>0 / 3</strong>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="vector" data-virus-permission-scope="create">整组选择</button>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="vector" data-virus-permission-scope="create">整组清空</button>
-                              </span>
-                            </span>
-                            <span class="virus-access-chip-grid">
-                              <label class="virus-access-chip"><input id="new_allowed_virus_denv" type="checkbox" data-virus-checkbox="denv" data-virus-group="vector" data-virus-permission-scope="create"><span>登革热病毒</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_zikav" type="checkbox" data-virus-checkbox="zikav" data-virus-group="vector" data-virus-permission-scope="create"><span>寨卡病毒</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_chikv" type="checkbox" data-virus-checkbox="chikv" data-virus-group="vector" data-virus-permission-scope="create"><span>基孔肯雅病毒</span></label>
-                              <label class="virus-access-chip"><input id="new_allowed_virus_bandavirus" type="checkbox" data-virus-checkbox="bandavirus" data-virus-group="vector" data-virus-permission-scope="create"><span>班达病毒</span></label>
-                            </span>
-                          </span>
-                          <span class="virus-access-group" data-virus-group-panel="contact" data-virus-permission-scope="create">
-                            <span class="virus-access-group-head">
-                              <span>
-                                <strong>接触传播与其他</strong>
-                                <small>保留较少见但需要单独授权的病毒类型。</small>
-                              </span>
-                              <span class="virus-access-group-tools">
-                                <strong data-virus-group-count>0 / 1</strong>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="contact" data-virus-permission-scope="create">整组选择</button>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="contact" data-virus-permission-scope="create">整组清空</button>
-                              </span>
-                            </span>
-                            <span class="virus-access-chip-grid">
-                              <label class="virus-access-chip"><input id="new_allowed_virus_mpox" type="checkbox" data-virus-checkbox="mpox" data-virus-group="contact" data-virus-permission-scope="create"><span>猴痘病毒</span></label>
-                            </span>
-                          </span>
-                          <span class="virus-access-group" data-virus-group-panel="chronic" data-virus-permission-scope="create">
-                            <span class="virus-access-group-head">
-                              <span>
-                                <strong>慢性病毒</strong>
-                                <small>用于 HIV 等需要耐药解释和长期随访的场景。</small>
-                              </span>
-                              <span class="virus-access-group-tools">
-                                <strong data-virus-group-count>0 / 1</strong>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="chronic" data-virus-permission-scope="create">整组选择</button>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="chronic" data-virus-permission-scope="create">整组清空</button>
-                              </span>
-                            </span>
-                            <span class="virus-access-chip-grid">
-                              <label class="virus-access-chip"><input id="new_allowed_virus_hiv" type="checkbox" data-virus-checkbox="hiv" data-virus-group="chronic" data-virus-permission-scope="create"><span>HIV-1</span></label>
-                            </span>
-                          </span>
-                        </span>
-                      </span>
-                    </span>
-                  </span>
-                </span>
-              </div>
-              <div class="permission-card" data-module-card="metagenome">
-                <input id="new_allowed_module_metagenome" type="checkbox" data-module-checkbox="metagenome" data-permission-scope="create">
-                <span class="permission-card-surface">
-                  <strong>宏基因组分析</strong>
-                  <small>宏基因组组装、物种识别与复杂样本结果汇总。</small>
-                  <em>适合混合样本与复杂背景分析</em>
-                  <span class="permission-expiry-field">
-                    <span class="permission-expiry-control">
-                      <span>模块截止时间</span>
-                      <input id="new_module_expiry_metagenome" type="datetime-local" data-module-expiry="metagenome" data-permission-scope="create">
-                    </span>
-                  </span>
-                </span>
-              </div>
-              <div class="permission-card" data-module-card="community">
-                <input id="new_allowed_module_community" type="checkbox" data-module-checkbox="community" data-permission-scope="create">
-                <span class="permission-card-surface">
-                  <strong>群落分析</strong>
-                  <small>多样本群落后分析，覆盖 alpha / beta 多样性、Biomarker（LEfSe / RF）与 microeco Network。</small>
-                  <em>适合队列比较、分组解读与群落可视化</em>
-                  <span class="permission-expiry-field">
-                    <span class="permission-expiry-control">
-                      <span>模块截止时间</span>
-                      <input id="new_module_expiry_community" type="datetime-local" data-module-expiry="community" data-permission-scope="create">
-                    </span>
-                  </span>
-                </span>
-              </div>
-              <div class="permission-card" data-module-card="pathosource">
-                <input id="new_allowed_module_pathosource" type="checkbox" data-module-checkbox="pathosource" data-permission-scope="create">
-                <span class="permission-card-surface">
-                  <strong>溯源分析</strong>
-                  <small>系统发育、聚类距离、MLST/cgMLST 与分子溯源判读。</small>
-                  <em>适合暴发调查与菌株关联分析</em>
-                  <span class="permission-expiry-field">
-                    <span class="permission-expiry-control">
-                      <span>模块截止时间</span>
-                      <input id="new_module_expiry_pathosource" type="datetime-local" data-module-expiry="pathosource" data-permission-scope="create">
-                    </span>
-                  </span>
-                </span>
-              </div>
-            </div>
-          </section>
-          <div class="modal-form-actions">
-            <button class="ghost-button" id="cancel-create-user" type="button">取消</button>
-            <button class="primary-button" type="submit">创建用户</button>
-          </div>
-        </form>
-      </section>
-    </div>
-
-    <div id="edit-user-modal" class="browser-modal hidden" aria-hidden="true">
-      <div id="edit-user-backdrop" class="browser-backdrop"></div>
-      <section class="browser-panel create-user-panel" role="dialog" aria-modal="true" aria-labelledby="edit-user-title">
-        <div class="panel-head">
-          <div>
-            <p class="section-kicker">User</p>
-            <h2 id="edit-user-title">编辑用户</h2>
-            <p class="field-note">统一调整账号身份、角色和模块授权，不再使用临时输入框修改权限。</p>
-          </div>
-          <button id="close-edit-user-modal" class="ghost-button" type="button">关闭</button>
-        </div>
-        <form id="edit-user-form" class="admin-form">
-          <input id="edit_original_username" type="hidden">
-          <section class="admin-form-cluster wide">
-            <div class="admin-form-cluster-head">
-              <div>
-                <strong>账户身份</strong>
-                <p class="field-note">修改展示信息、用户组和角色；用户名变更会同步更新账号标识。</p>
-              </div>
-              <span class="admin-form-cluster-kicker">Identity</span>
-            </div>
-            <div class="admin-form-grid">
-              <label>
-                <span>用户名</span>
-                <input id="edit_username" required>
-              </label>
-              <label>
-                <span>显示名</span>
-                <input id="edit_display_name">
-              </label>
-              <label>
-                <span>用户组</span>
-                <input id="edit_group_name" placeholder="例如：microbiology_lab">
-              </label>
-              <label>
-                <span>重置密码</span>
-                <input id="edit_password" type="password" placeholder="留空表示不修改">
-              </label>
-              <label>
-                <span>有效截止时间</span>
-                <input id="edit_account_expires_at" type="datetime-local">
-              </label>
-              <label class="wide">
-                <span>角色</span>
-                <select id="edit_role">
-                  <option value="user">普通用户</option>
-                  <option value="group_admin">group 管理</option>
-                  <option value="admin">管理员</option>
-                </select>
-              </label>
-            </div>
-          </section>
-          <section class="admin-form-cluster wide">
-            <div class="admin-form-cluster-head">
-              <div>
-                <strong>分析模块授权</strong>
-                <p class="field-note">这里决定用户工作台首页能进入哪些分析模块。</p>
-              </div>
-              <span class="admin-form-cluster-kicker">Access</span>
-            </div>
-            <div id="edit-permission-summary" class="permission-summary" aria-live="polite">
-              <strong>已开通 1 个模块</strong>
-              <span>普通用户至少需要一个可用分析模块。</span>
-            </div>
-            <div class="permission-card-grid" data-permission-scope="edit">
-              <div class="permission-card" data-module-card="bacteria">
-                <input id="edit_allowed_module_bacteria" type="checkbox" data-module-checkbox="bacteria" data-permission-scope="edit">
-                <span class="permission-card-surface">
-                  <strong>细菌分析</strong>
-                  <small>组装、物种鉴定、耐药毒力、MLST 与血清型等常规流程。</small>
-                  <em>适合日常单菌样本主线分析</em>
-                  <span class="permission-expiry-field">
-                    <span class="permission-expiry-control">
-                      <span>模块截止时间</span>
-                      <input id="edit_module_expiry_bacteria" type="datetime-local" data-module-expiry="bacteria" data-permission-scope="edit">
-                    </span>
-                  </span>
-                </span>
-              </div>
-              <div class="permission-card" data-module-card="virus">
-                <input id="edit_allowed_module_virus" type="checkbox" data-module-checkbox="virus" data-permission-scope="edit">
-                <span class="permission-card-surface">
-                  <strong>病毒分析</strong>
-                  <small>参考驱动分析、病毒鉴定与病毒分型工作流。</small>
-                  <em>适合病毒目标分析与定向判读</em>
-                  <span class="permission-expiry-field">
-                    <span class="permission-expiry-control">
-                      <span>模块截止时间</span>
-                      <input id="edit_module_expiry_virus" type="datetime-local" data-module-expiry="virus" data-permission-scope="edit">
-                    </span>
-                  </span>
-                  <span class="permission-expiry-field">
-                    <span class="permission-expiry-control">
-                      <span>可用病毒</span>
-                      <span class="virus-access-panel" data-virus-permission-scope="edit">
-                        <span class="virus-access-head">
-                          <span class="virus-access-copy">
-                            <strong>按分组批量授权</strong>
-                            <small>先选场景，再微调单病毒，减少重复点选。</small>
-                          </span>
-                          <span class="virus-access-actions">
-                            <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="__all__" data-virus-permission-scope="edit">全部选择</button>
-                            <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="__all__" data-virus-permission-scope="edit">全部清空</button>
-                          </span>
-                        </span>
-                        <span class="virus-access-groups">
-                          <span class="virus-access-group" data-virus-group-panel="respiratory" data-virus-permission-scope="edit">
-                            <span class="virus-access-group-head">
-                              <span>
-                                <strong>呼吸道病毒</strong>
-                                <small>面向呼吸道监测和常规呼吸病原判读。</small>
-                              </span>
-                              <span class="virus-access-group-tools">
-                                <strong data-virus-group-count>0 / 8</strong>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="respiratory" data-virus-permission-scope="edit">整组选择</button>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="respiratory" data-virus-permission-scope="edit">整组清空</button>
-                              </span>
-                            </span>
-                            <span class="virus-access-chip-grid">
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_ncov" type="checkbox" data-virus-checkbox="ncov" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>新冠</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_flu" type="checkbox" data-virus-checkbox="flu" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>流感</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_rsv" type="checkbox" data-virus-checkbox="rsv" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>合胞病毒</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_hmpv" type="checkbox" data-virus-checkbox="hmpv" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>偏肺病毒</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_hpiv" type="checkbox" data-virus-checkbox="hpiv" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>副流感病毒</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_hadv" type="checkbox" data-virus-checkbox="hadv" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>腺病毒</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_rhinovirus" type="checkbox" data-virus-checkbox="rhinovirus" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>鼻病毒</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_seasonal_hcov" type="checkbox" data-virus-checkbox="seasonal_hcov" data-virus-group="respiratory" data-virus-permission-scope="edit"><span>季节性冠状病毒</span></label>
-                            </span>
-                          </span>
-                          <span class="virus-access-group" data-virus-group-panel="enteric" data-virus-permission-scope="edit">
-                            <span class="virus-access-group-head">
-                              <span>
-                                <strong>肠道病毒</strong>
-                                <small>适合腹泻、肠道感染和粪便病原场景。</small>
-                              </span>
-                              <span class="virus-access-group-tools">
-                                <strong data-virus-group-count>0 / 6</strong>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="enteric" data-virus-permission-scope="edit">整组选择</button>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="enteric" data-virus-permission-scope="edit">整组清空</button>
-                              </span>
-                            </span>
-                            <span class="virus-access-chip-grid">
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_norovirus" type="checkbox" data-virus-checkbox="norovirus" data-virus-group="enteric" data-virus-permission-scope="edit"><span>诺如病毒</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_rotavirus" type="checkbox" data-virus-checkbox="rotavirus" data-virus-group="enteric" data-virus-permission-scope="edit"><span>轮状病毒</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_astroviridae" type="checkbox" data-virus-checkbox="astroviridae" data-virus-group="enteric" data-virus-permission-scope="edit"><span>星状病毒</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_enterovirus" type="checkbox" data-virus-checkbox="enterovirus" data-virus-group="enteric" data-virus-permission-scope="edit"><span>肠道病毒</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_hepatovirus" type="checkbox" data-virus-checkbox="hepatovirus" data-virus-group="enteric" data-virus-permission-scope="edit"><span>肝炎病毒</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_sapovirus" type="checkbox" data-virus-checkbox="sapovirus" data-virus-group="enteric" data-virus-permission-scope="edit"><span>札如病毒</span></label>
-                            </span>
-                          </span>
-                          <span class="virus-access-group" data-virus-group-panel="vector" data-virus-permission-scope="edit">
-                            <span class="virus-access-group-head">
-                              <span>
-                                <strong>虫媒与发热相关</strong>
-                                <small>用于登革热、寨卡及发热伴血小板减少综合征场景。</small>
-                              </span>
-                              <span class="virus-access-group-tools">
-                                <strong data-virus-group-count>0 / 3</strong>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="vector" data-virus-permission-scope="edit">整组选择</button>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="vector" data-virus-permission-scope="edit">整组清空</button>
-                              </span>
-                            </span>
-                            <span class="virus-access-chip-grid">
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_denv" type="checkbox" data-virus-checkbox="denv" data-virus-group="vector" data-virus-permission-scope="edit"><span>登革热病毒</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_zikav" type="checkbox" data-virus-checkbox="zikav" data-virus-group="vector" data-virus-permission-scope="edit"><span>寨卡病毒</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_chikv" type="checkbox" data-virus-checkbox="chikv" data-virus-group="vector" data-virus-permission-scope="edit"><span>基孔肯雅病毒</span></label>
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_bandavirus" type="checkbox" data-virus-checkbox="bandavirus" data-virus-group="vector" data-virus-permission-scope="edit"><span>班达病毒</span></label>
-                            </span>
-                          </span>
-                          <span class="virus-access-group" data-virus-group-panel="contact" data-virus-permission-scope="edit">
-                            <span class="virus-access-group-head">
-                              <span>
-                                <strong>接触传播与其他</strong>
-                                <small>保留较少见但需要单独授权的病毒类型。</small>
-                              </span>
-                              <span class="virus-access-group-tools">
-                                <strong data-virus-group-count>0 / 1</strong>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="contact" data-virus-permission-scope="edit">整组选择</button>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="contact" data-virus-permission-scope="edit">整组清空</button>
-                              </span>
-                            </span>
-                            <span class="virus-access-chip-grid">
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_mpox" type="checkbox" data-virus-checkbox="mpox" data-virus-group="contact" data-virus-permission-scope="edit"><span>猴痘病毒</span></label>
-                            </span>
-                          </span>
-                          <span class="virus-access-group" data-virus-group-panel="chronic" data-virus-permission-scope="edit">
-                            <span class="virus-access-group-head">
-                              <span>
-                                <strong>慢性病毒</strong>
-                                <small>用于 HIV 等需要耐药解释和长期随访的场景。</small>
-                              </span>
-                              <span class="virus-access-group-tools">
-                                <strong data-virus-group-count>0 / 1</strong>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="select" data-virus-group="chronic" data-virus-permission-scope="edit">整组选择</button>
-                                <button class="ghost-button mini" type="button" data-virus-group-action="clear" data-virus-group="chronic" data-virus-permission-scope="edit">整组清空</button>
-                              </span>
-                            </span>
-                            <span class="virus-access-chip-grid">
-                              <label class="virus-access-chip"><input id="edit_allowed_virus_hiv" type="checkbox" data-virus-checkbox="hiv" data-virus-group="chronic" data-virus-permission-scope="edit"><span>HIV-1</span></label>
-                            </span>
-                          </span>
-                        </span>
-                      </span>
-                    </span>
-                  </span>
-                </span>
-              </div>
-              <div class="permission-card" data-module-card="metagenome">
-                <input id="edit_allowed_module_metagenome" type="checkbox" data-module-checkbox="metagenome" data-permission-scope="edit">
-                <span class="permission-card-surface">
-                  <strong>宏基因组分析</strong>
-                  <small>宏基因组组装、物种识别与复杂样本结果汇总。</small>
-                  <em>适合混合样本与复杂背景分析</em>
-                  <span class="permission-expiry-field">
-                    <span class="permission-expiry-control">
-                      <span>模块截止时间</span>
-                      <input id="edit_module_expiry_metagenome" type="datetime-local" data-module-expiry="metagenome" data-permission-scope="edit">
-                    </span>
-                  </span>
-                </span>
-              </div>
-              <div class="permission-card" data-module-card="community">
-                <input id="edit_allowed_module_community" type="checkbox" data-module-checkbox="community" data-permission-scope="edit">
-                <span class="permission-card-surface">
-                  <strong>群落分析</strong>
-                  <small>多样本群落后分析，覆盖 alpha / beta 多样性、Biomarker（LEfSe / RF）与 microeco Network。</small>
-                  <em>适合队列比较、分组解读与群落可视化</em>
-                  <span class="permission-expiry-field">
-                    <span class="permission-expiry-control">
-                      <span>模块截止时间</span>
-                      <input id="edit_module_expiry_community" type="datetime-local" data-module-expiry="community" data-permission-scope="edit">
-                    </span>
-                  </span>
-                </span>
-              </div>
-              <div class="permission-card" data-module-card="pathosource">
-                <input id="edit_allowed_module_pathosource" type="checkbox" data-module-checkbox="pathosource" data-permission-scope="edit">
-                <span class="permission-card-surface">
-                  <strong>溯源分析</strong>
-                  <small>系统发育、聚类距离、MLST/cgMLST 与分子溯源判读。</small>
-                  <em>适合暴发调查与菌株关联分析</em>
-                  <span class="permission-expiry-field">
-                    <span class="permission-expiry-control">
-                      <span>模块截止时间</span>
-                      <input id="edit_module_expiry_pathosource" type="datetime-local" data-module-expiry="pathosource" data-permission-scope="edit">
-                    </span>
-                  </span>
-                </span>
-              </div>
-            </div>
-          </section>
-          <div class="modal-form-actions">
-            <button class="ghost-button" id="cancel-edit-user" type="button">取消</button>
-            <button class="primary-button" type="submit">保存修改</button>
-          </div>
-        </form>
-      </section>
-    </div>
+    {% include "workbench/modals/admin-users.html" %}
 
     <div id="database-sample-modal" class="browser-modal hidden" aria-hidden="true">
       <div id="database-sample-backdrop" class="browser-backdrop"></div>
@@ -3399,198 +2159,7 @@
       </section>
     </div>
 
-    <div id="project-milestone-modal" class="browser-modal hidden" aria-hidden="true">
-      <div id="project-milestone-backdrop" class="browser-backdrop"></div>
-      <section class="browser-panel detail-modal-panel database-alert-rule-modal-panel project-milestone-modal-panel" role="dialog" aria-modal="true" aria-labelledby="project-milestone-title">
-        <div class="panel-head">
-          <div>
-            <p class="section-kicker">Project Milestone</p>
-            <h2 id="project-milestone-title">修改交付节点</h2>
-            <p class="field-note">每个节点可维护备注、节点权重和当前完成百分比，保存后会同步影响项目进度与甘特图。</p>
-          </div>
-          <button id="close-project-milestone-modal" class="ghost-button" type="button">关闭</button>
-        </div>
-        <form id="project-milestone-form" class="admin-form database-release-form project-milestone-form">
-          <section class="form-section wide database-form-card">
-            <div class="form-section-head compact">
-              <div>
-                <h3>节点信息</h3>
-                <p id="project-milestone-project-name" class="field-note">当前项目</p>
-              </div>
-            </div>
-            <div class="form-row">
-              <label>
-                <span>节点名称</span>
-                <input id="project-milestone-name" placeholder="例如：结果复核">
-              </label>
-              <label>
-                <span>节点负责人</span>
-                <input id="project-milestone-owner" placeholder="例如：张老师">
-              </label>
-              <label>
-                <span>开始日期</span>
-                <input id="project-milestone-start-date" type="date">
-              </label>
-              <label>
-                <span>结束日期</span>
-                <input id="project-milestone-end-date" type="date">
-              </label>
-              <label>
-                <span>节点权重（%）</span>
-                <input id="project-milestone-weight" type="number" min="1" max="100" step="1" placeholder="20">
-              </label>
-              <label>
-                <span>当前完成（%）</span>
-                <input id="project-milestone-completion" type="number" min="0" max="100" step="1" placeholder="50">
-              </label>
-            </div>
-            <div class="form-row">
-              <label class="wide">
-                <span>备注</span>
-                <textarea id="project-milestone-note" rows="4" placeholder="补充当前节点的风险、阻塞点、交付备注或客户反馈"></textarea>
-              </label>
-            </div>
-            <div class="form-section-head compact">
-              <div>
-                <h3>子节点步骤</h3>
-                <p class="field-note">适合把一个大节点继续拆成执行步骤，例如中试验证下的样本准备、上机、复核和归档。</p>
-              </div>
-              <div class="database-alert-topic-actions">
-                <button id="add-project-milestone-child" class="database-alert-rule-button is-secondary" type="button">新增子节点</button>
-              </div>
-            </div>
-            <div id="project-milestone-children" class="project-milestone-children"></div>
-          </section>
-          <div class="modal-form-actions">
-            <button class="ghost-button" id="cancel-project-milestone" type="button">取消</button>
-            <button class="ghost-button danger" id="delete-project-milestone" type="button">删除节点</button>
-            <button id="submit-project-milestone" class="primary-button" type="submit">保存节点</button>
-          </div>
-        </form>
-      </section>
-    </div>
-
-    <div id="project-owner-modal" class="browser-modal hidden" aria-hidden="true">
-      <div id="project-owner-backdrop" class="browser-backdrop"></div>
-      <section class="browser-panel detail-modal-panel database-alert-rule-modal-panel project-milestone-modal-panel" role="dialog" aria-modal="true" aria-labelledby="project-owner-title">
-        <div class="panel-head">
-          <div>
-            <p class="section-kicker">Project Owner</p>
-            <h2 id="project-owner-title">修改项目总负责人</h2>
-            <p class="field-note">项目总负责人用于项目协同详情、甘特图焦点卡和节点默认负责人展示。</p>
-          </div>
-          <button id="close-project-owner-modal" class="ghost-button" type="button">关闭</button>
-        </div>
-        <form id="project-owner-form" class="admin-form database-release-form project-milestone-form">
-          <section class="form-section wide database-form-card">
-            <div class="form-section-head compact">
-              <div>
-                <h3>负责人信息</h3>
-                <p id="project-owner-project-name" class="field-note">当前项目</p>
-              </div>
-            </div>
-            <div class="form-row">
-              <label class="wide">
-                <span>项目总负责人</span>
-                <input id="project-owner-name" placeholder="例如：张老师">
-              </label>
-            </div>
-          </section>
-          <div class="modal-form-actions">
-            <button class="ghost-button" id="cancel-project-owner" type="button">取消</button>
-            <button id="submit-project-owner" class="primary-button" type="submit">保存负责人</button>
-          </div>
-        </form>
-      </section>
-    </div>
-
-    <div id="project-delete-modal" class="browser-modal hidden" aria-hidden="true">
-      <div id="project-delete-backdrop" class="browser-backdrop"></div>
-      <section class="browser-panel detail-modal-panel database-alert-rule-modal-panel project-milestone-modal-panel" role="dialog" aria-modal="true" aria-labelledby="project-delete-title">
-        <div class="panel-head">
-          <div>
-            <p class="section-kicker">Project Delete</p>
-            <h2 id="project-delete-title">删除项目</h2>
-            <p id="project-delete-summary" class="field-note">确认后将移除当前项目定义或将该自动聚合项目从项目管理中隐藏。</p>
-          </div>
-          <button id="close-project-delete-modal" class="ghost-button" type="button">关闭</button>
-        </div>
-        <form id="project-delete-form" class="admin-form database-release-form project-milestone-form">
-          <section class="form-section wide database-form-card">
-            <div class="form-section-head compact">
-              <div>
-                <h3>确认删除信息</h3>
-                <p id="project-delete-project-name" class="field-note">当前项目</p>
-              </div>
-            </div>
-            <div class="project-create-summary-shell">
-              <div class="project-create-summary-copy">
-                <span id="project-delete-kicker" class="project-create-summary-kicker">删除操作</span>
-                <strong id="project-delete-action-label">删除项目</strong>
-                <p id="project-delete-note" class="field-note">删除后不可自动恢复，请确认当前项目已不再需要保留在项目管理中。</p>
-              </div>
-            </div>
-          </section>
-          <div class="modal-form-actions">
-            <button class="ghost-button" id="cancel-project-delete" type="button">取消</button>
-            <button id="submit-project-delete" class="ghost-button danger" type="submit">确认删除</button>
-          </div>
-        </form>
-      </section>
-    </div>
-
-    <div id="project-create-modal" class="browser-modal hidden" aria-hidden="true">
-      <div id="project-create-backdrop" class="browser-backdrop"></div>
-      <section id="project-create-panel" class="browser-panel detail-modal-panel database-alert-rule-modal-panel project-milestone-modal-panel project-create-modal-panel" role="dialog" aria-modal="true" aria-labelledby="project-create-title">
-        <div class="panel-head">
-          <div>
-            <p class="section-kicker">Project Builder</p>
-            <h2 id="project-create-title">新建项目</h2>
-            <p class="field-note">基于当前已选样本快速建档。</p>
-          </div>
-          <button id="close-project-create-modal" class="ghost-button" type="button">关闭</button>
-        </div>
-        <form id="project-create-form" class="admin-form database-release-form project-milestone-form project-create-form">
-          <section class="form-section wide database-form-card project-create-form-card project-create-form-card-summary">
-            <div class="project-create-summary-head">
-              <div>
-                <span class="project-create-summary-kicker">当前选样</span>
-                <strong>所选样本将归入同一个客户项目</strong>
-              </div>
-              <span id="project-create-sample-count" class="project-create-count-chip">0 份样本</span>
-            </div>
-            <div class="project-create-summary-shell">
-              <div class="project-create-summary-copy">
-                <div id="project-create-sample-metrics" class="project-create-summary-metrics"></div>
-                <p id="project-create-sample-summary" class="field-note">当前尚未选择样本。</p>
-                <div id="project-create-sample-preview" class="project-create-sample-preview"></div>
-              </div>
-            </div>
-          </section>
-          <section class="form-section wide database-form-card project-create-form-card">
-            <div class="form-section-head compact">
-              <div>
-                <h3>项目基础信息</h3>
-              </div>
-            </div>
-            <div class="form-row">
-              <label>
-                <span>项目名称</span>
-                <input id="project-create-name" placeholder="例如：黄浦院感 2026年4月项目">
-              </label>
-              <label>
-                <span>项目总负责人</span>
-                <input id="project-create-owner" placeholder="例如：张老师">
-              </label>
-            </div>
-          </section>
-          <div class="modal-form-actions">
-            <button class="ghost-button" id="cancel-project-create" type="button">取消</button>
-            <button id="submit-project-create" class="primary-button" type="submit">创建项目并进入管理</button>
-          </div>
-        </form>
-      </section>
-    </div>
+    {% include "workbench/modals/project.html" %}
 
     <div id="meta-database-import-modal" class="browser-modal hidden" aria-hidden="true">
       <div id="meta-database-import-backdrop" class="browser-backdrop"></div>
@@ -4463,33 +3032,9 @@
       </section>
     </div>
 
-    <div id="confirm-action-modal" class="browser-modal hidden" aria-hidden="true">
-      <div id="confirm-action-backdrop" class="browser-backdrop"></div>
-      <section class="browser-panel detail-modal-panel confirm-action-panel" role="dialog" aria-modal="true" aria-labelledby="confirm-action-title">
-        <div class="panel-head">
-          <div>
-            <p id="confirm-action-kicker" class="section-kicker">Confirm</p>
-            <h2 id="confirm-action-title">确认操作</h2>
-            <p id="confirm-action-message" class="field-note">请确认是否继续。</p>
-          </div>
-          <button id="confirm-action-close" class="ghost-button" type="button">关闭</button>
-        </div>
-        <div class="project-create-summary-shell confirm-action-summary-shell">
-          <div class="project-create-summary-copy">
-            <span id="confirm-action-level" class="project-create-summary-kicker">需要确认</span>
-            <strong id="confirm-action-impact">继续后将执行当前操作</strong>
-            <p id="confirm-action-detail" class="field-note">该操作可能影响当前数据，请确认后再继续。</p>
-          </div>
-        </div>
-        <div class="modal-form-actions">
-          <button id="confirm-action-cancel" class="ghost-button" type="button">取消</button>
-          <button id="confirm-action-confirm" class="ghost-button danger" type="button">确认继续</button>
-        </div>
-      </section>
-    </div>
-
     <div id="toast" class="toast hidden"></div>
+    <script src="{{ url_for('static', filename='csrf.js') }}"></script>
     <script src="{{ url_for('static', filename='vendor_leaflet.js') }}" defer></script>
-    <script src="{{ url_for('static', filename='app.js') }}?v=20260525-fastq-batch-link-02" defer></script>
+    <script type="module" src="{{ url_for('static', filename='app.js') }}?v=20260612-workbench-modules-03"></script>
   </body>
 </html>

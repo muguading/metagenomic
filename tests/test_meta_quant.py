@@ -204,9 +204,10 @@ def test_server_has_gpu_returns_false_when_nvidia_smi_missing(monkeypatch: pytes
     assert _server_has_gpu() is False
 
 
-def test_ribodetector_prefix_uses_requested_conda_path() -> None:
+def test_ribodetector_prefix_uses_requested_conda_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("META_CONDA_EXE", "/opt/test/conda")
     assert _ribodetector_prefix() == [
-        "/home/dell/miniconda3/condabin/conda",
+        "/opt/test/conda",
         "run",
         "--no-capture-output",
         "-n",
@@ -214,13 +215,14 @@ def test_ribodetector_prefix_uses_requested_conda_path() -> None:
     ]
 
 
-def test_coverm_prefix_uses_fixed_coverm_env() -> None:
+def test_coverm_prefix_uses_fixed_coverm_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("META_CONDA_EXE", "/opt/test/conda")
     assert _coverm_prefix() == [
-        "/home/dell/miniconda3/condabin/conda",
+        "/opt/test/conda",
         "run",
         "--no-capture-output",
         "-n",
-        "coverm",
+        "mag_aux",
     ]
 
 

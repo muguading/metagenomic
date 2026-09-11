@@ -6,10 +6,15 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
+pytest.importorskip("genome_db.database", reason="optional genome_db source package is not installed")
+
 from genome_db.database import session_scope
 from genome_db.genome_manager import DuplicateGenomeError, GenomeManager
 from genome_db.models import AuditLog, Genome
 from genome_db.validators import ValidationError
+
+
+pytestmark = pytest.mark.optional_integration
 
 
 @pytest.fixture

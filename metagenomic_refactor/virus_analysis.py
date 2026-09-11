@@ -1165,6 +1165,17 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _database_root() -> Path:
+    configured = str(os.environ.get("META_DATABASE_ROOT") or "").strip()
+    if configured:
+        configured_path = Path(configured).expanduser()
+        nested_database = configured_path / "database"
+        if configured_path.name != "database" and nested_database.is_dir():
+            return nested_database
+        return configured_path
+    return _project_root() / "database"
+
+
 def _build_vadr_env(project_root: Path, model_dir: Path) -> dict[str, str] | None:
     vadr_root = (project_root / "soft").resolve()
     vadr_scripts_dir = (vadr_root / "vadr").resolve()
@@ -1359,7 +1370,7 @@ def _choose_best_snpeff_ann(ann_value: str | None) -> dict[str, str]:
 
 
 def _classify_variant_quality(qual: float, dp: int, maf: float) -> str:
-    return "高质量突变" if qual > 10 and dp > 10 and maf > 0.1 else "低质量突变"
+    return "高质量突变" if qual > 10 and dp > 10 and maf > 0.5 else "低质量突变"
 
 
 def _infer_influenza_resistance_gene(row: dict[str, object]) -> str:
@@ -1776,7 +1787,7 @@ def _run_vadr_flu_annotation(pre: str, final_fasta: Path, blast_dir: Path, threa
         ]
     )
     try:
-        run_command(cmd, logf=logf, env=norovirus_env)
+        run_command(cmd, logf=logf, env=env)
     except Exception as exc:
         return {
             "status": "failed",
@@ -2180,6 +2191,130 @@ def _determine_influenza_type_from_segments(rows: list[dict]) -> str:
     return "Other"
 
 
+def _select_influenza_subtype_reference(rows: list[dict], influenza_type: str, segment_group: str) -> dict | None:
+    """Choose an HA/NA subtype from all screening hits, then choose its best reference.
+
+    Screening maps reads against many references for each subtype.  Selecting the
+    single highest-coverage reference can therefore favour an isolated hit even
+    when the aggregate read evidence supports another subtype.  Compare the best
+    coverage per subtype first, then use aggregate mapped reads only when coverage
+    is comparable.  The returned row is still the highest-quality reference inside
+    the winning subtype, so downstream assembly receives one concrete HA or NA
+    reference sequence.
+    """
+    candidates = [
+        row
+        for row in rows
+        if row.get("influenza_type") == influenza_type
+        and row.get("segment_group") == segment_group
+        and str(row.get("subtype") or "").strip() not in {"", "-"}
+    ]
+    if not candidates:
+        return None
+
+    by_subtype: dict[str, list[dict]] = defaultdict(list)
+    for row in candidates:
+        by_subtype[str(row["subtype"]).strip()].append(row)
+
+    ranked_subtypes = []
+    for subtype, subtype_rows in by_subtype.items():
+        mapped_reads = sum(int(row.get("mapped_reads") or 0) for row in subtype_rows)
+        peak_coverage = max(float(row.get("coverage_pct") or 0) for row in subtype_rows)
+        peak_depth = max(float(row.get("mean_depth") or 0) for row in subtype_rows)
+        ranked_subtypes.append({
+            "subtype": subtype,
+            "rows": subtype_rows,
+            "mapped_reads": mapped_reads,
+            "peak_coverage": peak_coverage,
+            "peak_depth": peak_depth,
+        })
+
+    # Reference databases contain uneven numbers of records per subtype, so summed
+    # covered bases are not comparable.  Use each subtype's best coverage first;
+    # only subtypes within a small coverage margin compete by aggregate read count.
+    max_coverage = max(item["peak_coverage"] for item in ranked_subtypes)
+    coverage_margin = max(3.0, max_coverage * 0.15)
+    coverage_competitors = [
+        item for item in ranked_subtypes
+        if item["peak_coverage"] >= max_coverage - coverage_margin
+    ]
+    winner = max(
+        coverage_competitors,
+        key=lambda item: (item["mapped_reads"], item["peak_depth"], item["peak_coverage"]),
+    )
+    winning_rows = winner["rows"]
+    return max(
+        winning_rows,
+        key=lambda row: (
+            float(row.get("coverage_pct") or 0),
+            float(row.get("mean_depth") or 0),
+            int(row.get("mapped_reads") or 0),
+        ),
+    )
+
+
+def _select_influenza_pairwise_candidates(rows: list[dict], influenza_type: str, segment_group: str) -> list[dict]:
+    """Pick one representative reference for each of the two leading subtypes.
+
+    These candidates are subsequently remapped together.  Their direct coverage
+    and mapped reads are therefore comparable even when the original subtype
+    database has very different numbers of references per subtype.
+    """
+    per_subtype: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        if (
+            row.get("influenza_type") == influenza_type
+            and row.get("segment_group") == segment_group
+            and str(row.get("subtype") or "").strip() not in {"", "-"}
+        ):
+            per_subtype[str(row["subtype"]).strip()].append(row)
+    representatives = [
+        max(
+            subtype_rows,
+            key=lambda row: (
+                float(row.get("coverage_pct") or 0),
+                int(row.get("mapped_reads") or 0),
+                float(row.get("mean_depth") or 0),
+            ),
+        )
+        for subtype_rows in per_subtype.values()
+    ]
+    return sorted(
+        representatives,
+        key=lambda row: (
+            float(row.get("coverage_pct") or 0),
+            int(row.get("mapped_reads") or 0),
+            float(row.get("mean_depth") or 0),
+        ),
+        reverse=True,
+    )[:2]
+
+
+def _build_influenza_pairwise_subtype_reference_set(
+    work_dir: Path,
+    records_by_id: dict,
+    metadata: dict,
+    candidates: list[dict],
+) -> tuple[Path, dict]:
+    """Write the selected HA and NA subtype candidates for direct remapping."""
+    work_dir.mkdir(parents=True, exist_ok=True)
+    fasta_path = work_dir / "pairwise_subtype_candidates.fa"
+    selected_metadata: dict[str, dict] = {}
+    selected_records = []
+    for row in candidates:
+        reference_id = str(row.get("reference_id") or "").strip()
+        record = records_by_id.get(reference_id)
+        if record is None or reference_id not in metadata:
+            continue
+        selected_records.append(record)
+        selected_metadata[reference_id] = metadata[reference_id]
+    if not selected_records:
+        raise RuntimeError("流感 HA/NA 候选参考为空，无法进行成对复核。")
+    with fasta_path.open("w", encoding="utf-8") as handle:
+        SeqIO.write(selected_records, handle, "fasta")
+    return fasta_path, selected_metadata
+
+
 def _write_final_influenza_reference_set(output_dir: Path, rows: list[dict], metadata: dict, reference_fastas, influenza_type: str, sample_name: str) -> dict:
     fasta_list = reference_fastas if isinstance(reference_fastas, (list, tuple)) else [reference_fastas]
     records = {}
@@ -2192,9 +2327,8 @@ def _write_final_influenza_reference_set(output_dir: Path, rows: list[dict], met
     selected_records = []
     manifest_rows = []
     if influenza_type == "Influenza A virus":
-        a_support = _summarize_type_support(rows, influenza_type)["best_by_group"]
-        chosen_ha = a_support.get("HA")
-        chosen_na = a_support.get("NA")
+        chosen_ha = _select_influenza_subtype_reference(rows, influenza_type, "HA")
+        chosen_na = _select_influenza_subtype_reference(rows, influenza_type, "NA")
         if chosen_ha is None or chosen_na is None:
             raise RuntimeError("甲流样本未能稳定选出 HA/NA 最优参考。")
         ordered_ids = [
@@ -2376,8 +2510,39 @@ def prepare_influenza_reference_set(
                 logf=virus_logf,
             )
         subtype_rows = _write_influenza_segment_stats(screening_dir / "subtype", subtype_metadata, subtype_idxstats_path, subtype_depth_path)
-        combined_rows = type_rows + subtype_rows
-        combined_metadata = {**type_metadata, **subtype_metadata}
+        subtype_records = {
+            str(record.id): record
+            for record in _read_fasta_records(subtype_reference_fasta)
+        }
+        pairwise_candidates = (
+            _select_influenza_pairwise_candidates(subtype_rows, influenza_type, "HA")
+            + _select_influenza_pairwise_candidates(subtype_rows, influenza_type, "NA")
+        )
+        pairwise_fasta, pairwise_metadata = _build_influenza_pairwise_subtype_reference_set(
+            reference_dir,
+            subtype_records,
+            subtype_metadata,
+            pairwise_candidates,
+        )
+        with virus_log_path.open("a", encoding="utf-8") as virus_logf:
+            _, pairwise_idxstats_path, pairwise_depth_path = _run_influenza_screening_alignment(
+                pairwise_fasta,
+                screening_dir / "subtype_pairwise",
+                single_fastq=single_fastq,
+                fq1=fq1,
+                fq2=fq2,
+                long_type=long_type,
+                threads=threads,
+                logf=virus_logf,
+            )
+        pairwise_rows = _write_influenza_segment_stats(
+            screening_dir / "subtype_pairwise",
+            pairwise_metadata,
+            pairwise_idxstats_path,
+            pairwise_depth_path,
+        )
+        combined_rows = type_rows + pairwise_rows
+        combined_metadata = {**type_metadata, **pairwise_metadata}
         final_info = _write_final_influenza_reference_set(reference_dir, combined_rows, combined_metadata, [type_reference_fasta, subtype_reference_fasta], influenza_type, pre)
     else:
         final_info = _write_final_influenza_reference_set(reference_dir, type_rows, type_metadata, [type_reference_fasta], influenza_type, pre)
@@ -2459,7 +2624,7 @@ def detect_influenza_type(pre: str, species: str = "") -> str:
     return "-"
 
 
-def _resolve_db_path(env_name: str, default_path: str) -> Path:
+def _resolve_db_path(env_name: str, default_path: str | Path) -> Path:
     project_root = _project_root()
     database_root = str(os.environ.get("META_DATABASE_ROOT") or "").strip()
     raw = str(os.environ.get(env_name) or "").strip()
@@ -2522,17 +2687,85 @@ def _resolve_nextclade_dataset(flu_type: str) -> Path:
     database_root = str(os.environ.get("META_DATABASE_ROOT") or "").strip()
     if database_root:
         return (Path(database_root) / "virus" / "nextclade" / f"influenza_{normalized.lower()}").expanduser().resolve()
-    return Path(f"/data/deploy/meta_genome/database/virus/nextclade/influenza_{normalized.lower()}").expanduser().resolve()
+    return (_database_root() / "virus" / "nextclade" / f"influenza_{normalized.lower()}").expanduser().resolve()
+
+
+INFLUENZA_SUBTYPE_NEXTCLADE_KEYS = {
+    "H1N1": ("h1n1", "h1n1pdm"),
+    "H2N2": ("h2n2",),
+    "H3N2": ("h3n2",),
+    "B": ("b", "vic", "yam"),
+}
+
+
+def _resolve_influenza_segment_nextclade_datasets(subtype_call: str, segment: str) -> list[Path]:
+    """Map the wf_flu HA/NA call to downloaded Nextclade segment datasets."""
+    normalized = re.sub(r"[^A-Za-z0-9]+", "", str(subtype_call or "").upper())
+    if normalized.startswith("B"):
+        keys = INFLUENZA_SUBTYPE_NEXTCLADE_KEYS["B"]
+    else:
+        keys = INFLUENZA_SUBTYPE_NEXTCLADE_KEYS.get(normalized, ())
+    segment_key = str(segment or "").strip().lower()
+    roots = [_database_root() / "nextclade_db", _database_root() / "virus" / "nextclade_db"]
+    found: list[Path] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for key in keys:
+            found.extend(sorted(root.glob(f"nextstrain_flu_{key}_{segment_key}*")))
+    return [path.resolve() for path in dict.fromkeys(found) if (path / "pathogen.json").is_file()]
+
+
+def run_influenza_segment_nextclade(pre: str, consensus_fasta: Path, logf=None) -> dict[str, object]:
+    """Run matching HA/NA Nextclade datasets after wf_flu has selected a subtype."""
+    typing_path = Path("wf_flu") / "typing_summary.tsv"
+    out_dir = Path("wf_flu") / "nextclade"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = out_dir / "segment_analysis.tsv"
+    row = next(csv.DictReader(typing_path.open(encoding="utf-8"), delimiter="\t"), {}) if typing_path.is_file() else {}
+    subtype_call = str(row.get("subtype_call") or "").strip()
+    records = list(SeqIO.parse(str(consensus_fasta), "fasta")) if consensus_fasta.is_file() else []
+    results: list[list[str]] = []
+    for segment in ("HA", "NA"):
+        datasets = _resolve_influenza_segment_nextclade_datasets(subtype_call, segment)
+        segment_records = [record for record in records if re.search(rf"(^|[_|.-]){segment}($|[_|.-])", str(record.id), re.IGNORECASE)]
+        if not datasets:
+            results.append([segment, subtype_call or "-", "-", "-", "skipped", "未安装对应 Nextclade 数据集", "-"])
+            continue
+        if not segment_records:
+            results.append([segment, subtype_call or "-", "-", "-", "skipped", "共识序列未找到对应节段", "-"])
+            continue
+        segment_fasta = out_dir / f"{pre}.{segment.lower()}.fasta"
+        SeqIO.write(segment_records, str(segment_fasta), "fasta")
+        for dataset in datasets:
+            tsv_path = out_dir / f"{pre}.{dataset.name}.tsv"
+            json_path = out_dir / f"{pre}.{dataset.name}.json"
+            try:
+                run_command(" ".join([shlex.quote(_resolve_nextclade_binary()), "run", "--input-dataset", shlex.quote(str(dataset)), "--output-tsv", shlex.quote(str(tsv_path)), "--output-json", shlex.quote(str(json_path)), shlex.quote(str(segment_fasta))]), logf=logf)
+                result = _parse_nextclade_result(tsv_path)
+                results.append([segment, subtype_call or "-", dataset.name, str(result.get("clade") or "-"), "ready", str(result.get("qc.overallStatus") or "-"), json_path.name])
+            except Exception as exc:
+                results.append([segment, subtype_call or "-", dataset.name, "-", "failed", str(exc), "-"])
+    with summary_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerow(["segment", "subtype_call", "dataset", "clade", "status", "detail", "qc_json"])
+        writer.writerows(results)
+    return {"subtype_call": subtype_call, "summary_path": str(summary_path.resolve()), "results": results}
 
 
 def _resolve_sars_cov_2_nextclade_dataset() -> Path:
     raw = str(os.environ.get("META_NEXTCLADE_SC2_DATASET") or "").strip()
     if raw:
         return Path(raw).expanduser().resolve()
-    database_root = str(os.environ.get("META_DATABASE_ROOT") or "").strip()
-    if database_root:
-        return (Path(database_root) / "virus" / "nextclade" / "sars-cov-2").expanduser().resolve()
-    return Path("/data/deploy/meta_genome/database/virus/nextclade/sars-cov-2").expanduser().resolve()
+    database_root = _database_root()
+    project_root = _project_root()
+    candidates = [
+        database_root / "virus" / "nextclade" / "sars-cov-2",
+        database_root / "nextclade_db" / "sars-cov-2",
+        project_root / "database" / "virus" / "nextclade" / "sars-cov-2",
+        project_root / "database" / "nextclade_db" / "sars-cov-2",
+    ]
+    return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
 
 
 def _resolve_monkeypox_nextclade_dataset() -> Path:
@@ -2550,7 +2783,7 @@ def _resolve_monkeypox_nextclade_dataset() -> Path:
     candidates.extend([
         project_root / "database" / "virus" / "nextclade" / "hMPXV",
         project_root / "database" / "nextclade_db" / "hMPXV",
-        Path("/data/deploy/meta_genome/database/virus/nextclade/hMPXV"),
+        _database_root() / "virus" / "nextclade" / "hMPXV",
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -2573,8 +2806,8 @@ def _resolve_hmpv_nextclade_dataset() -> Path:
     candidates.extend([
         project_root / "database" / "virus" / "nextclade" / "hmpv",
         project_root / "database" / "nextclade_db" / "hmpv",
-        Path("/data/deploy/meta_genome/database/nextclade_db/hmpv"),
-        Path("/data/deploy/meta_genome/database/virus/nextclade/hmpv"),
+        _database_root() / "nextclade_db" / "hmpv",
+        _database_root() / "virus" / "nextclade" / "hmpv",
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -2600,8 +2833,8 @@ def _resolve_denv_nextclade_dataset(denv_type: str) -> Path:
     candidates.extend([
         project_root / "database" / "virus" / "nextclade" / suffix,
         project_root / "database" / "nextclade_db" / suffix,
-        Path(f"/data/deploy/meta_genome/database/nextclade_db/{suffix}"),
-        Path(f"/data/deploy/meta_genome/database/virus/nextclade/{suffix}"),
+        _database_root() / "nextclade_db" / suffix,
+        _database_root() / "virus" / "nextclade" / suffix,
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -2624,8 +2857,8 @@ def _resolve_zika_nextclade_dataset() -> Path:
     candidates.extend([
         project_root / "database" / "virus" / "nextclade" / "zikav",
         project_root / "database" / "nextclade_db" / "zikav",
-        Path("/data/deploy/meta_genome/database/nextclade_db/zikav"),
-        Path("/data/deploy/meta_genome/database/virus/nextclade/zikav"),
+        _database_root() / "nextclade_db" / "zikav",
+        _database_root() / "virus" / "nextclade" / "zikav",
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -2648,8 +2881,8 @@ def _resolve_chikv_nextclade_dataset() -> Path:
     candidates.extend([
         project_root / "database" / "virus" / "nextclade" / "chikv",
         project_root / "database" / "nextclade_db" / "chikv",
-        Path("/data/deploy/meta_genome/database/nextclade_db/chikv"),
-        Path("/data/deploy/meta_genome/database/virus/nextclade/chikv"),
+        _database_root() / "nextclade_db" / "chikv",
+        _database_root() / "virus" / "nextclade" / "chikv",
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -2672,8 +2905,8 @@ def _resolve_ebola_nextclade_dataset() -> Path:
     candidates.extend([
         project_root / "database" / "virus" / "nextclade" / "ebola",
         project_root / "database" / "nextclade_db" / "ebola",
-        Path("/data/deploy/meta_genome/database/nextclade_db/ebola"),
-        Path("/data/deploy/meta_genome/database/virus/nextclade/ebola"),
+        _database_root() / "nextclade_db" / "ebola",
+        _database_root() / "virus" / "nextclade" / "ebola",
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -2699,8 +2932,8 @@ def _resolve_rsv_nextclade_dataset(rsv_type: str) -> Path:
     candidates.extend([
         project_root / "database" / "virus" / "nextclade" / suffix,
         project_root / "database" / "nextclade_db" / suffix,
-        Path(f"/data/deploy/meta_genome/database/nextclade_db/{suffix}"),
-        Path(f"/data/deploy/meta_genome/database/virus/nextclade/{suffix}"),
+        _database_root() / "nextclade_db" / suffix,
+        _database_root() / "virus" / "nextclade" / suffix,
     ])
     for candidate in candidates:
         if candidate.exists():
@@ -2737,8 +2970,8 @@ def _resolve_denv_reference_assets(denv_type: str) -> dict[str, Path]:
         candidates.extend([
             project_root / "database" / "virus" / "nextclade" / suffix,
             project_root / "database" / "nextclade_db" / suffix,
-            Path(f"/data/deploy/meta_genome/database/nextclade_db/{suffix}"),
-            Path(f"/data/deploy/meta_genome/database/virus/nextclade/{suffix}"),
+            _database_root() / "nextclade_db" / suffix,
+            _database_root() / "virus" / "nextclade" / suffix,
         ])
         ref_dir = next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
     return {
@@ -2761,7 +2994,7 @@ def _resolve_hpiv_db_dir() -> Path:
         candidates.append((Path(database_root) / "virus" / "hpiv").expanduser())
     candidates.extend([
         project_root / "database" / "virus" / "hpiv",
-        Path("/data/deploy/meta_genome/database/virus/hpiv"),
+        _database_root() / "virus" / "hpiv",
     ])
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
 
@@ -2809,7 +3042,7 @@ def _resolve_hadv_db_dir() -> Path:
         candidates.append((Path(database_root) / "virus" / "hadv").expanduser())
     candidates.extend([
         project_root / "database" / "virus" / "hadv",
-        Path("/data/deploy/meta_genome/database/virus/hadv"),
+        _database_root() / "virus" / "hadv",
     ])
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
 
@@ -2847,7 +3080,7 @@ def _resolve_rhinovirus_db_dir() -> Path:
         candidates.append((Path(database_root) / "virus" / "rhinovirus").expanduser())
     candidates.extend([
         project_root / "database" / "virus" / "rhinovirus",
-        Path("/data/deploy/meta_genome/database/virus/rhinovirus"),
+        _database_root() / "virus" / "rhinovirus",
     ])
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
 
@@ -3732,7 +3965,7 @@ def _resolve_enterovirus_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "enterovirus",
-            Path("/data/deploy/meta_genome/database/virus/enterovirus"),
+            _database_root() / "virus" / "enterovirus",
         ]
     )
     for candidate in candidates:
@@ -4740,7 +4973,7 @@ def _resolve_bandavirus_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "bandavirus",
-            Path("/data/deploy/meta_genome/database/virus/bandavirus"),
+            _database_root() / "virus" / "bandavirus",
         ]
     )
     for candidate in candidates:
@@ -4761,7 +4994,7 @@ def _resolve_orthohantavirus_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "orthohantavirus",
-            Path("/data/deploy/meta_genome/database/virus/orthohantavirus"),
+            _database_root() / "virus" / "orthohantavirus",
         ]
     )
     for candidate in candidates:
@@ -4786,7 +5019,7 @@ def _resolve_orthoebolavirus_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "Orthoebolavirus",
-            Path("/data/deploy/meta_genome/database/virus/Orthoebolavirus"),
+            _database_root() / "virus" / "Orthoebolavirus",
         ]
     )
     for candidate in candidates:
@@ -6404,7 +6637,7 @@ def _resolve_astroviridae_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "astroviridae",
-            Path("/data/deploy/meta_genome/database/virus/astroviridae"),
+            _database_root() / "virus" / "astroviridae",
         ]
     )
     for candidate in candidates:
@@ -7479,7 +7712,7 @@ def _resolve_rotavirus_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "Rotavirus",
-            Path("/data/deploy/meta_genome/database/virus/Rotavirus"),
+            _database_root() / "virus" / "Rotavirus",
         ]
     )
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
@@ -8496,7 +8729,7 @@ def _resolve_seasonal_hcov_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "seasonal_coronavirus",
-            Path("/data/deploy/meta_genome/database/virus/seasonal_coronavirus"),
+            _database_root() / "virus" / "seasonal_coronavirus",
         ]
     )
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
@@ -9250,7 +9483,7 @@ def _resolve_norovirus_db_dir() -> Path:
         candidates.append((Path(database_root) / "virus" / "norovirus").expanduser())
     candidates.extend([
         project_root / "database" / "virus" / "norovirus",
-        Path("/data/deploy/meta_genome/database/virus/norovirus"),
+        _database_root() / "virus" / "norovirus",
     ])
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
 
@@ -10677,7 +10910,7 @@ def _resolve_hepatovirus_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "Hepatovirus",
-            Path("/data/deploy/meta_genome/database/virus/Hepatovirus"),
+            _database_root() / "virus" / "Hepatovirus",
         ]
     )
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
@@ -12960,6 +13193,8 @@ def _run_generic_nextclade_typing(
     input_fasta: Path,
     clade_keys: list[str],
     lineage_keys: list[str],
+    *,
+    write_json: bool = False,
 ) -> bool:
     columns = ["样本名称", "病毒类型", "Nextclade分型", "Pango谱系", "Nextclade数据集", "QC状态", "QC分数", "说明"]
     if not dataset_dir.exists():
@@ -12972,20 +13207,25 @@ def _run_generic_nextclade_typing(
     compat_out_dir.mkdir(exist_ok=True)
     tsv_path = out_dir / "nextclade.tsv"
     compat_tsv_path = compat_out_dir / "nextclade.tsv"
+    json_path = out_dir / "nextclade.json"
     log_path = out_dir / "nextclade.log"
     nextclade_bin = _resolve_nextclade_binary()
     with log_path.open("a", encoding="utf-8") as logf:
-        cmd = " ".join(
-            [
-                shlex.quote(nextclade_bin),
-                "run",
-                "--input-dataset",
-                shlex.quote(str(dataset_dir)),
-                "--output-tsv",
-                shlex.quote(str(tsv_path)),
-                shlex.quote(str(input_fasta)),
-            ]
-        )
+        command_parts = [
+            shlex.quote(nextclade_bin),
+            "run",
+            "--input-dataset",
+            shlex.quote(str(dataset_dir)),
+            "--output-tsv",
+            shlex.quote(str(tsv_path)),
+        ]
+        if write_json:
+            command_parts.extend([
+                "--output-json",
+                shlex.quote(str(json_path)),
+            ])
+        command_parts.append(shlex.quote(str(input_fasta)))
+        cmd = " ".join(command_parts)
         try:
             run_command(cmd, logf=logf)
         except Exception as exc:
@@ -13033,6 +13273,7 @@ def _run_sars_cov_2_nextclade_typing(pre: str, species: str, final_fasta: Path) 
         input_fasta,
         ["clade", "Nextclade_clade"],
         ["pangoLineage", "Nextclade_pango"],
+        write_json=True,
     )
 
 
@@ -13718,7 +13959,7 @@ def _resolve_hiv_db_dir() -> Path:
     candidates.extend(
         [
             project_root / "database" / "virus" / "HIV",
-            Path("/data/deploy/meta_genome/database/virus/HIV"),
+            _database_root() / "virus" / "HIV",
         ]
     )
     return next((candidate.resolve() for candidate in candidates if candidate.exists()), candidates[0].resolve())
@@ -14333,9 +14574,9 @@ def virus_typing(pre: str, species: str) -> None:
         _write_placeholder(pre, columns, [pre, species or "-", "-", "-", "-", "-", "-", "当前仅内置流感病毒分型流程"])
         return
 
-    type_source = _resolve_db_path("META_FLU_TYPE_DB", "/data/deploy/meta_genome/database/virus/influenza/type_refs.fa")
-    ha_source = _resolve_db_path("META_FLUA_HA_DB", "/data/deploy/meta_genome/database/virus/influenza_a/ha_subtypes.fa")
-    na_source = _resolve_db_path("META_FLUA_NA_DB", "/data/deploy/meta_genome/database/virus/influenza_a/na_subtypes.fa")
+    type_source = _resolve_db_path("META_FLU_TYPE_DB", _database_root() / "virus" / "influenza" / "type_refs.fa")
+    ha_source = _resolve_db_path("META_FLUA_HA_DB", _database_root() / "virus" / "influenza_a" / "ha_subtypes.fa")
+    na_source = _resolve_db_path("META_FLUA_NA_DB", _database_root() / "virus" / "influenza_a" / "na_subtypes.fa")
     if not type_source.is_file():
         _write_placeholder(pre, columns, [pre, species or "-", "-", "-", "-", "-", "-", "未找到流感 A/B 判型参考数据库"])
         return

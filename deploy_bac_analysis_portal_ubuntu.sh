@@ -2,19 +2,78 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${ENV_FILE:-${PROJECT_DIR}/deployment/portal.env}"
+ENV_EXAMPLE="${PROJECT_DIR}/deployment/portal.env.example"
+
+if [[ ! -f "${ENV_FILE}" ]]; then
+  if [[ -f "${ENV_EXAMPLE}" ]]; then
+    mkdir -p "$(dirname "${ENV_FILE}")"
+    cp "${ENV_EXAMPLE}" "${ENV_FILE}"
+    cat >&2 <<WARNEOF
+Created ${ENV_FILE} from portal.env.example.
+Edit PORTAL_SECRET_KEY and PORTAL_INITIAL_ADMIN_PASSWORD before starting production.
+WARNEOF
+  else
+    echo "ERROR: env file not found and template is missing: ${ENV_EXAMPLE}" >&2
+    exit 2
+  fi
+fi
+
+set -a
+# shellcheck disable=SC1090
+source "${ENV_FILE}"
+set +a
+
 VENV_DIR="${PROJECT_DIR}/.venv_web"
 SERVICE_NAME="${SERVICE_NAME:-bac-analysis-portal}"
-APP_USER="${APP_USER:-$(id -un)}"
-APP_GROUP="${APP_GROUP:-$(id -gn)}"
+APP_USER="${APP_USER:-pathogen-workbench}"
+APP_GROUP="${APP_GROUP:-pathogen-workbench}"
+CREATE_SERVICE_USER="${CREATE_SERVICE_USER:-1}"
 APP_HOST="${APP_HOST:-127.0.0.1}"
 APP_PORT="${APP_PORT:-5055}"
 GUNICORN_WORKERS="${GUNICORN_WORKERS:-2}"
 SERVER_NAME="${SERVER_NAME:-_}"
 INSTALL_SYSTEM_PACKAGES="${INSTALL_SYSTEM_PACKAGES:-1}"
+PORTAL_STATE_DIR="${PORTAL_STATE_DIR:-/var/lib/pathogen-workbench/state}"
+PORTAL_DB_PATH="${PORTAL_DB_PATH:-${PORTAL_STATE_DIR}/bac_analysis_portal.sqlite3}"
+BAC_ANALYSIS_TASK_ROOT="${BAC_ANALYSIS_TASK_ROOT:-/var/lib/pathogen-workbench/tasks}"
+BAC_ANALYSIS_OUTPUT_ROOT="${BAC_ANALYSIS_OUTPUT_ROOT:-/var/lib/pathogen-workbench/outputs}"
+META_DATABASE_ROOT="${META_DATABASE_ROOT:-/data/pathogen-db}"
 
 echo "Project dir: ${PROJECT_DIR}"
+echo "Env file: ${ENV_FILE}"
 echo "App user: ${APP_USER}:${APP_GROUP}"
 echo "Bind: ${APP_HOST}:${APP_PORT}"
+echo "Portal DB: ${PORTAL_DB_PATH}"
+echo "Task root: ${BAC_ANALYSIS_TASK_ROOT}"
+
+if ! getent group "${APP_GROUP}" >/dev/null; then
+  if [[ "${CREATE_SERVICE_USER}" != "1" ]]; then
+    echo "ERROR: service group does not exist: ${APP_GROUP}" >&2
+    exit 2
+  fi
+  sudo groupadd --system "${APP_GROUP}"
+fi
+if ! id "${APP_USER}" >/dev/null 2>&1; then
+  if [[ "${CREATE_SERVICE_USER}" != "1" ]]; then
+    echo "ERROR: service user does not exist: ${APP_USER}" >&2
+    exit 2
+  fi
+  sudo useradd --system --gid "${APP_GROUP}" --home-dir /nonexistent --shell /usr/sbin/nologin "${APP_USER}"
+fi
+
+if [[ "${PORTAL_MODE:-}" == "production" ]]; then
+  if [[ -z "${PORTAL_SECRET_KEY:-}" || "${PORTAL_SECRET_KEY}" == replace-with-* ]]; then
+    echo "ERROR: PORTAL_SECRET_KEY must be set in ${ENV_FILE} for production." >&2
+    exit 2
+  fi
+  if [[ -z "${PORTAL_INITIAL_ADMIN_PASSWORD:-}" || "${PORTAL_INITIAL_ADMIN_PASSWORD}" == replace-with-* || "${PORTAL_INITIAL_ADMIN_PASSWORD}" == "admin123" ]]; then
+    echo "ERROR: PORTAL_INITIAL_ADMIN_PASSWORD must be a real strong password in ${ENV_FILE}." >&2
+    exit 2
+  fi
+fi
+
+sudo install -d -o "${APP_USER}" -g "${APP_GROUP}" -m 0750 "$(dirname "${PORTAL_DB_PATH}")" "${BAC_ANALYSIS_TASK_ROOT}" "${BAC_ANALYSIS_OUTPUT_ROOT}"
 
 if [[ "${INSTALL_SYSTEM_PACKAGES}" == "1" ]]; then
   echo "Installing Ubuntu system packages..."
@@ -27,13 +86,16 @@ python3 -m venv "${VENV_DIR}"
 
 echo "Installing Python dependencies..."
 "${VENV_DIR}/bin/pip" install --upgrade pip
-"${VENV_DIR}/bin/pip" install -r "${PROJECT_DIR}/requirements-web.txt" gunicorn
+"${VENV_DIR}/bin/pip" install -r "${PROJECT_DIR}/requirements-release.lock"
 
 echo "Writing Linux run script..."
 cat > "${PROJECT_DIR}/run_analysis_portal_linux.sh" <<RUNEOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd "${PROJECT_DIR}"
+set -a
+source "${ENV_FILE}"
+set +a
 exec "${VENV_DIR}/bin/python" -m bac_analysis_portal.app
 RUNEOF
 chmod +x "${PROJECT_DIR}/run_analysis_portal_linux.sh"
@@ -52,6 +114,15 @@ ExecStart=${VENV_DIR}/bin/gunicorn -w ${GUNICORN_WORKERS} -b ${APP_HOST}:${APP_P
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=${ENV_FILE}
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadOnlyPaths=${PROJECT_DIR} ${META_DATABASE_ROOT}
+ReadWritePaths=$(dirname "${PORTAL_DB_PATH}") ${BAC_ANALYSIS_TASK_ROOT} ${BAC_ANALYSIS_OUTPUT_ROOT}
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target
@@ -83,6 +154,9 @@ Files created:
   ${PROJECT_DIR}/run_analysis_portal_linux.sh
   ${PROJECT_DIR}/${SERVICE_NAME}.service
   ${PROJECT_DIR}/${SERVICE_NAME}.nginx.conf
+
+Deployment check:
+  "${VENV_DIR}/bin/python" "${PROJECT_DIR}/scripts/check_deployment.py" --env-file "${ENV_FILE}"
 
 Quick test:
   cd "${PROJECT_DIR}"

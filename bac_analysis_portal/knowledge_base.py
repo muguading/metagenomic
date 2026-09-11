@@ -162,6 +162,7 @@ def load_knowledge_base_bundle(project_root_text: str) -> dict:
     pathogens = _merge_pathogen_taxonomy(pathogens, ncbi_taxonomy_links)
     gene_rules = _read_collection_entries(root / "genes")
     typing_rules = _read_collection_entries(root / "typing")
+    pathonet_rules = _read_collection_entries(root / "pathonet")
     vfdb_links = _read_vfdb_gene_links(root)
     card_links = _read_card_gene_links(root)
     gene_rules = _merge_gene_rule_links(gene_rules, vfdb_links, card_links)
@@ -180,6 +181,10 @@ def load_knowledge_base_bundle(project_root_text: str) -> dict:
         "typing_rules": _summarize_missing_keys(
             typing_rules,
             ["id", "level", "broad_type", "serotype", "interpretation"],
+        ),
+        "pathonet_rules": _summarize_missing_keys(
+            pathonet_rules,
+            ["species", "serotype", "vfgene"],
         ),
         "event_rules": _summarize_missing_keys(
             event_rules,
@@ -201,6 +206,7 @@ def load_knowledge_base_bundle(project_root_text: str) -> dict:
             "pathogens": pathogens,
             "gene_rules": gene_rules,
             "typing_rules": typing_rules,
+            "pathonet_rules": pathonet_rules,
             "event_rules": event_rules,
             "downgrade_rules": downgrade_rules,
         },
@@ -208,6 +214,7 @@ def load_knowledge_base_bundle(project_root_text: str) -> dict:
             "pathogen_count": len(pathogens),
             "gene_rule_count": len(gene_rules),
             "typing_rule_count": len(typing_rules),
+            "pathonet_rule_count": len(pathonet_rules),
             "event_rule_count": len(event_rules),
             "downgrade_rule_count": len(downgrade_rules),
             "taxonomy_linked_pathogen_count": sum(1 for item in pathogens if str(item.get("taxid") or "").strip()),

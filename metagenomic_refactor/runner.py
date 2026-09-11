@@ -446,10 +446,11 @@ def _run_list_mode(cfg: RunnerConfig, main_process) -> None:
             os.chdir(sample_dir)
             _set_wkdir(os.getcwd())
             subprocess.run(f"touch {pre}.raw.fastq", shell=True)
-            #try:
-            _run_sample(main_process, cfg, 0, fastq1, fastq2, pre, anum, snum, llid)
-            #except Exception:
-            #    _print_failure(pre, snum, anum)
+            try:
+                _run_sample(main_process, cfg, 0, fastq1, fastq2, pre, anum, snum, llid)
+            except Exception as exc:
+                print(f"{pre}分析失败: {exc}")
+                _print_failure(pre, snum, anum)
             snum += 1
             os.chdir(cfg.ofn)
             _set_wkdir(cfg.ofn)

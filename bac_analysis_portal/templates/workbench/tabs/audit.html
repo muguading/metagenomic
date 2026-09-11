@@ -1,0 +1,41 @@
+            <section id="audit-tab" class="tab-panel">
+          <section id="audit-panel" class="panel detail-panel hidden">
+            <div class="panel-head">
+              <div>
+                <p class="section-kicker">Audit</p>
+                <h2>审计追踪</h2>
+                <p class="field-note">记录用户所有非查看行为，包括新增、修改、删除、任务控制、数据库导入与系统设置变更。</p>
+              </div>
+            </div>
+            <div class="detail-block audit-overview-block">
+              <div id="audit-summary" class="audit-summary-grid"></div>
+            </div>
+            <div class="detail-block audit-log-block">
+              <div class="panel-head compact">
+                <div>
+                  <h3>审计事件表</h3>
+                  <p class="field-note">支持按用户、模块、动作、结果和关键字筛选。</p>
+                </div>
+                <button id="refresh-audit-button" class="ghost-button" type="button">刷新</button>
+              </div>
+              <div class="audit-filter-row">
+                <input id="audit-search" type="text" placeholder="搜索路径、对象编号或请求摘要">
+                <select id="audit-user-filter">
+                  <option value="">全部用户</option>
+                </select>
+                <select id="audit-module-filter">
+                  <option value="">全部模块</option>
+                </select>
+                <select id="audit-action-filter">
+                  <option value="">全部动作</option>
+                </select>
+                <select id="audit-outcome-filter">
+                  <option value="">全部结果</option>
+                  <option value="success">成功</option>
+                  <option value="failed">失败</option>
+                </select>
+              </div>
+              <div id="audit-list" class="database-table-shell"></div>
+            </div>
+          </section>
+            </section>

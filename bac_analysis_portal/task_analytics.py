@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Any
 
 
+ANALYTICS_SNAPSHOT_VERSION = 2
+
+
 def analytics_snapshot_path(task_dir: Path) -> Path:
     return task_dir / "task_analytics.json"
 
@@ -17,12 +20,18 @@ def read_task_analytics_snapshot(task_dir: Path) -> dict[str, Any] | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    if int(payload.get("snapshot_version") or 0) != ANALYTICS_SNAPSHOT_VERSION:
+        return None
+    return payload
 
 
 def write_task_analytics_snapshot(task_dir: Path, snapshot: dict[str, Any]) -> None:
     path = analytics_snapshot_path(task_dir)
     tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+    snapshot = dict(snapshot)
+    snapshot["snapshot_version"] = ANALYTICS_SNAPSHOT_VERSION
     tmp_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp_path.replace(path)
 

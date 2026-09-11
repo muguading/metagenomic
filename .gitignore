@@ -41,6 +41,7 @@ bac_analysis_portal/*.db
 *.sqlite3-*
 *.db
 *.db-*
+bac_analysis_portal.sqlite3*.bak
 
 # Heavy reference databases and downloaded tool bundles
 demo_data/
@@ -66,6 +67,11 @@ testoutput/
 _Inline/
 *.zip
 ~$*
+test_data/codex_mag_binning/
+
+# Local agent/editor workspace state
+.codex/skills/
+.serena/
 
 # Local legal/package collateral, kept outside source control
 软著材料/

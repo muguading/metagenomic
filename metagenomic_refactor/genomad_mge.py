@@ -44,9 +44,10 @@ class IntervalFeature:
     metadata: str = ""
 
 
-GENOMAD_DB_DEFAULT = "/data/deploy/meta_genome/database/genomad/genomad_db/"
-MOBILEOG_DB_DEFAULT = "/data1/shanghai_pip/meta_genome/database/beatrix/mobileOG-db"
-MOBILEOG_META_DEFAULT = "/data1/shanghai_pip/meta_genome/database/beatrix/mobileOG-db-beatrix-1.6-All.csv"
+DEPLOY_ROOT_DEFAULT = Path(os.environ.get("META_DEPLOY_ROOT", Path(__file__).resolve().parents[1]))
+GENOMAD_DB_DEFAULT = str(DEPLOY_ROOT_DEFAULT / "database/genomad_db")
+MOBILEOG_DB_DEFAULT = str(DEPLOY_ROOT_DEFAULT / "database/beatrix/mobileOG-db.dmnd")
+MOBILEOG_META_DEFAULT = str(DEPLOY_ROOT_DEFAULT / "database/beatrix/mobileOG-db-beatrix-1.6-All.csv")
 
 MGE_BOUNDARY_KEYWORDS = ("plasmid", "provirus", "phage", "virus")
 CORE_IE_KEYWORDS = (

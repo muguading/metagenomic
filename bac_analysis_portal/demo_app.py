@@ -4,7 +4,7 @@ from pathlib import Path
 
 from flask import Response, abort, current_app, jsonify, redirect, request, send_from_directory, url_for
 
-from .app import create_app
+from .application import create_app
 
 
 HTML_INJECTION = """
@@ -75,7 +75,7 @@ def _is_blocked_request() -> bool:
 
 
 def create_demo_app():
-    app = create_app()
+    app = create_app({"PORTAL_MODE": "demo"})
     app.config["ENABLE_KNOWLEDGE_BASE_TEST_PANEL"] = False
 
     @app.before_request

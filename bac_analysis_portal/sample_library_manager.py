@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from .sample_closure_trace import build_sample_closure_trace
+from .task_closure_status import build_task_closure_status
 from .store import PortalStore
 
 
@@ -546,6 +548,7 @@ class SampleLibraryManager:
     build_report_payload: ReportPayloadBuilder
     resolve_report_sample_name: SampleNameResolver
     human_bp: HumanBpFormatter
+    task_manager: Any | None = None
 
     def list_visible(self, *, scope: str, role: str, username: str, group_name: str) -> list[dict[str, Any]]:
         rows = self.store.list_sample_library_by_scope(scope)
@@ -1328,6 +1331,8 @@ class SampleLibraryManager:
         can_submit_to_main = scope == "personal" and (owner == username or role == "admin")
         pending_submission = self.store.find_pending_submission_for_sample(record["sample_key"]) if can_submit_to_main else None
         metadata_completion = self._build_metadata_completion(record.get("custom_metadata_json"))
+        version_events = self.store.list_sample_library_version_logs_for_sample(str(record.get("sample_key") or ""), limit=5)
+        task_closure_status = self._build_source_task_closure_status(record)
         return {
             **record,
             "can_edit": self._can_edit_record(record, role=role, username=username),
@@ -1335,8 +1340,31 @@ class SampleLibraryManager:
             "can_submit_to_main": can_submit_to_main,
             "pending_submission_status": pending_submission.get("status") if pending_submission else "",
             "pending_submission_id": pending_submission.get("request_id") if pending_submission else "",
+            "closure_trace": build_sample_closure_trace(record, version_events=version_events, task_closure_status=task_closure_status),
             **metadata_completion,
         }
+
+    def _build_source_task_closure_status(self, record: dict[str, Any]) -> dict[str, Any]:
+        task_id = str(record.get("task_id") or "").strip()
+        if not task_id or self.task_manager is None:
+            return {}
+        try:
+            task = self.task_manager.get_task(task_id, log_lines=0, owner=None)
+        except Exception:
+            return {}
+        events = self.store.list_audit_logs_for_target("task", task_id, limit=50)
+        imported_count = self.store.count_sample_library_records_by_task_id(task_id)
+        try:
+            report_source = self.resolve_report_source(task, str(record.get("sample_name") or "").strip())
+        except Exception:
+            report_source = {}
+        return build_task_closure_status(
+            task,
+            result_exists=bool(report_source.get("available")),
+            imported_sample_count=imported_count,
+            audit_events=events,
+            eligible_reviewers=None,
+        )
 
     def _build_metadata_completion(self, raw_metadata_json: object) -> dict[str, Any]:
         template_map = {

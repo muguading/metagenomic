@@ -1,0 +1,191 @@
+    <div id="project-milestone-modal" class="browser-modal hidden" aria-hidden="true">
+      <div id="project-milestone-backdrop" class="browser-backdrop"></div>
+      <section class="browser-panel detail-modal-panel database-alert-rule-modal-panel project-milestone-modal-panel" role="dialog" aria-modal="true" aria-labelledby="project-milestone-title">
+        <div class="panel-head">
+          <div>
+            <p class="section-kicker">Project Milestone</p>
+            <h2 id="project-milestone-title">修改交付节点</h2>
+            <p class="field-note">每个节点可维护备注、节点权重和当前完成百分比，保存后会同步影响项目进度与甘特图。</p>
+          </div>
+          <button id="close-project-milestone-modal" class="ghost-button" type="button">关闭</button>
+        </div>
+        <form id="project-milestone-form" class="admin-form database-release-form project-milestone-form">
+          <section class="form-section wide database-form-card">
+            <div class="form-section-head compact">
+              <div>
+                <h3>节点信息</h3>
+                <p id="project-milestone-project-name" class="field-note">当前项目</p>
+              </div>
+            </div>
+            <div class="form-row">
+              <label>
+                <span>节点名称</span>
+                <input id="project-milestone-name" placeholder="例如：结果复核">
+              </label>
+              <label>
+                <span>节点负责人</span>
+                <input id="project-milestone-owner" placeholder="例如：张老师">
+              </label>
+              <label>
+                <span>开始日期</span>
+                <input id="project-milestone-start-date" type="date">
+              </label>
+              <label>
+                <span>结束日期</span>
+                <input id="project-milestone-end-date" type="date">
+              </label>
+              <label>
+                <span>节点权重（%）</span>
+                <input id="project-milestone-weight" type="number" min="1" max="100" step="1" placeholder="20">
+              </label>
+              <label>
+                <span>当前完成（%）</span>
+                <input id="project-milestone-completion" type="number" min="0" max="100" step="1" placeholder="50">
+              </label>
+            </div>
+            <div class="form-row">
+              <label class="wide">
+                <span>备注</span>
+                <textarea id="project-milestone-note" rows="4" placeholder="补充当前节点的风险、阻塞点、交付备注或客户反馈"></textarea>
+              </label>
+            </div>
+            <div class="form-section-head compact">
+              <div>
+                <h3>子节点步骤</h3>
+                <p class="field-note">适合把一个大节点继续拆成执行步骤，例如中试验证下的样本准备、上机、复核和归档。</p>
+              </div>
+              <div class="database-alert-topic-actions">
+                <button id="add-project-milestone-child" class="database-alert-rule-button is-secondary" type="button">新增子节点</button>
+              </div>
+            </div>
+            <div id="project-milestone-children" class="project-milestone-children"></div>
+          </section>
+          <div class="modal-form-actions">
+            <button class="ghost-button" id="cancel-project-milestone" type="button">取消</button>
+            <button class="ghost-button danger" id="delete-project-milestone" type="button">删除节点</button>
+            <button id="submit-project-milestone" class="primary-button" type="submit">保存节点</button>
+          </div>
+        </form>
+      </section>
+    </div>
+    <div id="project-owner-modal" class="browser-modal hidden" aria-hidden="true">
+      <div id="project-owner-backdrop" class="browser-backdrop"></div>
+      <section class="browser-panel detail-modal-panel database-alert-rule-modal-panel project-milestone-modal-panel" role="dialog" aria-modal="true" aria-labelledby="project-owner-title">
+        <div class="panel-head">
+          <div>
+            <p class="section-kicker">Project Owner</p>
+            <h2 id="project-owner-title">修改项目总负责人</h2>
+            <p class="field-note">项目总负责人用于项目协同详情、甘特图焦点卡和节点默认负责人展示。</p>
+          </div>
+          <button id="close-project-owner-modal" class="ghost-button" type="button">关闭</button>
+        </div>
+        <form id="project-owner-form" class="admin-form database-release-form project-milestone-form">
+          <section class="form-section wide database-form-card">
+            <div class="form-section-head compact">
+              <div>
+                <h3>负责人信息</h3>
+                <p id="project-owner-project-name" class="field-note">当前项目</p>
+              </div>
+            </div>
+            <div class="form-row">
+              <label class="wide">
+                <span>项目总负责人</span>
+                <input id="project-owner-name" placeholder="例如：张老师">
+              </label>
+            </div>
+          </section>
+          <div class="modal-form-actions">
+            <button class="ghost-button" id="cancel-project-owner" type="button">取消</button>
+            <button id="submit-project-owner" class="primary-button" type="submit">保存负责人</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div id="project-delete-modal" class="browser-modal hidden" aria-hidden="true">
+      <div id="project-delete-backdrop" class="browser-backdrop"></div>
+      <section class="browser-panel detail-modal-panel database-alert-rule-modal-panel project-milestone-modal-panel" role="dialog" aria-modal="true" aria-labelledby="project-delete-title">
+        <div class="panel-head">
+          <div>
+            <p class="section-kicker">Project Delete</p>
+            <h2 id="project-delete-title">删除项目</h2>
+            <p id="project-delete-summary" class="field-note">确认后将移除当前项目定义或将该自动聚合项目从项目管理中隐藏。</p>
+          </div>
+          <button id="close-project-delete-modal" class="ghost-button" type="button">关闭</button>
+        </div>
+        <form id="project-delete-form" class="admin-form database-release-form project-milestone-form">
+          <section class="form-section wide database-form-card">
+            <div class="form-section-head compact">
+              <div>
+                <h3>确认删除信息</h3>
+                <p id="project-delete-project-name" class="field-note">当前项目</p>
+              </div>
+            </div>
+            <div class="project-create-summary-shell">
+              <div class="project-create-summary-copy">
+                <span id="project-delete-kicker" class="project-create-summary-kicker">删除操作</span>
+                <strong id="project-delete-action-label">删除项目</strong>
+                <p id="project-delete-note" class="field-note">删除后不可自动恢复，请确认当前项目已不再需要保留在项目管理中。</p>
+              </div>
+            </div>
+          </section>
+          <div class="modal-form-actions">
+            <button class="ghost-button" id="cancel-project-delete" type="button">取消</button>
+            <button id="submit-project-delete" class="ghost-button danger" type="submit">确认删除</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div id="project-create-modal" class="browser-modal hidden" aria-hidden="true">
+      <div id="project-create-backdrop" class="browser-backdrop"></div>
+      <section id="project-create-panel" class="browser-panel detail-modal-panel database-alert-rule-modal-panel project-milestone-modal-panel project-create-modal-panel" role="dialog" aria-modal="true" aria-labelledby="project-create-title">
+        <div class="panel-head">
+          <div>
+            <p class="section-kicker">Project Builder</p>
+            <h2 id="project-create-title">新建项目</h2>
+            <p class="field-note">基于当前已选样本快速建档。</p>
+          </div>
+          <button id="close-project-create-modal" class="ghost-button" type="button">关闭</button>
+        </div>
+        <form id="project-create-form" class="admin-form database-release-form project-milestone-form project-create-form">
+          <section class="form-section wide database-form-card project-create-form-card project-create-form-card-summary">
+            <div class="project-create-summary-head">
+              <div>
+                <span class="project-create-summary-kicker">当前选样</span>
+                <strong>所选样本将归入同一个客户项目</strong>
+              </div>
+              <span id="project-create-sample-count" class="project-create-count-chip">0 份样本</span>
+            </div>
+            <div class="project-create-summary-shell">
+              <div class="project-create-summary-copy">
+                <div id="project-create-sample-metrics" class="project-create-summary-metrics"></div>
+                <p id="project-create-sample-summary" class="field-note">当前尚未选择样本。</p>
+                <div id="project-create-sample-preview" class="project-create-sample-preview"></div>
+              </div>
+            </div>
+          </section>
+          <section class="form-section wide database-form-card project-create-form-card">
+            <div class="form-section-head compact">
+              <div>
+                <h3>项目基础信息</h3>
+              </div>
+            </div>
+            <div class="form-row">
+              <label>
+                <span>项目名称</span>
+                <input id="project-create-name" placeholder="例如：黄浦院感 2026年4月项目">
+              </label>
+              <label>
+                <span>项目总负责人</span>
+                <input id="project-create-owner" placeholder="例如：张老师">
+              </label>
+            </div>
+          </section>
+          <div class="modal-form-actions">
+            <button class="ghost-button" id="cancel-project-create" type="button">取消</button>
+            <button id="submit-project-create" class="primary-button" type="submit">创建项目并进入管理</button>
+          </div>
+        </form>
+      </section>
+    </div>
