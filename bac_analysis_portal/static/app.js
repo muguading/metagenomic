@@ -1,3 +1,4 @@
+import { renderSubmissionModuleGuide } from "./workbench/domains/submission/home.js";
 import { configureApi, requestJson } from "./workbench/core/api.js";
 import { escapeHtml } from "./workbench/core/ui.js";
 import { createNavigation } from "./workbench/core/navigation.js";
@@ -4603,6 +4604,8 @@ function syncSubmissionStepState() {
   elements.submissionBandSteps.forEach((item) => {
     const step = Number(item.dataset.submissionBandStep || "1");
     item.classList.toggle("is-active", step === currentStep);
+    if (step === currentStep) item.setAttribute("aria-current", "step");
+    else item.removeAttribute("aria-current");
     item.classList.toggle("is-complete", (step === 1 && step1Complete) || (step === 2 && step2Complete) || (step === 3 && step3Complete));
     item.classList.toggle("is-invalid", invalidSteps.has(step));
     if (invalidSteps.has(step)) {
@@ -4684,6 +4687,12 @@ function buildSubmissionContextChips() {
 }
 
 function syncSubmissionContextSummary() {
+  const currentStep = state.submissionWizardStep || 1;
+  document.getElementById("submission-panel")?.setAttribute("data-submission-step", String(currentStep));
+  elements.submissionContextBar?.classList.toggle("hidden", currentStep === 1);
+  const guide = renderSubmissionModuleGuide(document.getElementById("submission-module-guide"), getWorkstationKey());
+  const selectedModuleLabel = document.getElementById("submission-selected-module");
+  if (selectedModuleLabel) selectedModuleLabel.textContent = guide?.label || "未选择";
   const workstation = WORKSTATION_LABELS[getWorkstationKey()] || "分析任务";
   const taskName = String(elements.taskNameInput?.value || "").trim();
   const sourceLabel = buildSubmissionSourceLabel();
@@ -13901,6 +13910,8 @@ function syncSidebarState(collapsed) {
       icon.textContent = collapsed ? "⇥" : "⇤";
     }
     elements.toggleSidebarButton.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    elements.toggleSidebarButton.setAttribute("aria-label", collapsed ? "展开导航" : "收回导航");
+    elements.toggleSidebarButton.title = collapsed ? "展开导航" : "收回导航";
   }
 }
 

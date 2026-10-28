@@ -13,8 +13,9 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/domains/project.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/domains/admin.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/domains/audit.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/domains/submission-home.css') }}?v=20261028-home-01">
   </head>
-  <body>
+  <body class="workstation-ui">
     <div class="app-backdrop">
       <div class="page-shell app-window">
         <header class="app-titlebar">
@@ -27,96 +28,72 @@
             </div>
           </div>
           <div class="titlebar-actions">
+            <span id="current-user-chip" class="titlebar-user">用户加载中</span>
             <button id="logout-button" class="ghost-button titlebar-button" type="button">退出登录</button>
           </div>
         </header>
 
         <div class="app-body">
           <aside id="app-sidebar" class="app-sidebar">
-            <div class="app-user-chip-wrap">
-              <span id="current-user-chip">用户加载中</span>
+            <div class="sidebar-heading">
+              <strong>分析工作台</strong>
+              <button id="toggle-sidebar-button" class="sidebar-toggle-button" type="button" aria-expanded="true" aria-label="收回导航" title="收回导航">
+                <span class="sidebar-toggle-icon" aria-hidden="true">⇤</span>
+                <span class="sidebar-toggle-copy"><strong>收回导航</strong></span>
+              </button>
             </div>
-
-            <button id="toggle-sidebar-button" class="sidebar-toggle-button" type="button" aria-expanded="true">
-              <span class="sidebar-toggle-icon">⇤</span>
-              <span class="sidebar-toggle-copy">
-                <strong>收回导航</strong>
-                <small>切换侧边工作台</small>
-              </span>
-            </button>
-
             <nav class="tab-bar app-nav" aria-label="主导航">
-              <button class="tab-button active app-nav-button" type="button" data-tab-target="submission-tab">
-                <span class="app-nav-icon">◫</span>
-                <span>
-                  <strong>提交任务</strong>
-                  <small>录入样本与参数</small>
-                </span>
-              </button>
-              <button class="tab-button app-nav-button" type="button" data-tab-target="queue-tab">
-                <span class="app-nav-icon">≣</span>
-                <span>
-                  <strong>任务队列</strong>
-                  <small>中控台与运行检查</small>
-                </span>
-              </button>
-              <button class="tab-button app-nav-button" type="button" data-tab-target="server-tab">
-                <span class="app-nav-icon">◌</span>
-                <span>
-                  <strong>服务器检测</strong>
-                  <small>硬件与资源占用</small>
-                </span>
-              </button>
-              <button class="tab-button app-nav-button" type="button" data-tab-target="host-tab">
-                <span class="app-nav-icon">⛁</span>
-                <span>
-                  <strong>参考基因组数据库</strong>
-                  <small>宿主与病原参考管理</small>
-                </span>
-              </button>
-              <button class="tab-button app-nav-button" type="button" data-tab-target="database-tab">
-                <span class="app-nav-icon">⌘</span>
-                <span>
-                  <strong>样本数据库</strong>
-                  <small>导入最终 fasta 与关键结果</small>
-                </span>
-              </button>
-              <button class="tab-button app-nav-button" type="button" data-tab-target="modeling-tab">
-                <span class="app-nav-icon">◎</span>
-                <span>
-                  <strong>模型构建与预测</strong>
-                  <small>特征、训练、模型库与样本预测</small>
-                </span>
-              </button>
-              <button class="tab-button app-nav-button" type="button" data-tab-target="project-tab">
-                <span class="app-nav-icon">▦</span>
-                <span>
-                  <strong>项目管理</strong>
-                  <small>路线图、里程碑与甘特图</small>
-                </span>
-              </button>
-              <button id="database-extra-tab-button" class="tab-button app-nav-button hidden" type="button" data-tab-target="database-extra-tab">
-                <span class="app-nav-icon">⋯</span>
-                <span>
-                  <strong>更多视图</strong>
-                  <small>预警规则、报告模板与知识库</small>
-                </span>
-              </button>
-              <button id="audit-tab-button" class="tab-button app-nav-button hidden" type="button" data-tab-target="audit-tab">
-                <span class="app-nav-icon">◪</span>
-                <span>
-                  <strong>审计追踪</strong>
-                  <small>非查看行为留痕与复核</small>
-                </span>
-              </button>
-              <button id="admin-tab-button" class="tab-button app-nav-button hidden" type="button" data-tab-target="admin-tab">
-                <span class="app-nav-icon">⚙</span>
-                <span>
-                  <strong>后台管理</strong>
-                  <small>脚本、环境与用户</small>
-                </span>
-              </button>
+              <div class="app-nav-group" role="group" aria-label="任务">
+                <p class="app-nav-group-title">任务</p>
+                <button class="tab-button app-nav-button active" type="button" data-tab-target="submission-tab" title="提交任务" aria-label="提交任务">
+                  <span class="app-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z M14 3v5h5 M9 12h6 M9 16h6"/></svg></span>
+                  <span><strong>提交任务</strong></span>
+                </button>
+                <button class="tab-button app-nav-button" type="button" data-tab-target="queue-tab" title="任务队列" aria-label="任务队列">
+                  <span class="app-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h12 M8 12h12 M8 18h12 M3 6h.01 M3 12h.01 M3 18h.01"/></svg></span>
+                  <span><strong>任务队列</strong></span>
+                </button>
+              </div>
+              <div class="app-nav-group" role="group" aria-label="数据与分析">
+                <p class="app-nav-group-title">数据与分析</p>
+                <button class="tab-button app-nav-button" type="button" data-tab-target="host-tab" title="参考基因组数据库" aria-label="参考基因组数据库">
+                  <span class="app-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6c0 2-16 2-16 0s16-2 16 0z M4 6v12c0 3 16 3 16 0V6 M4 12c0 3 16 3 16 0"/></svg></span>
+                  <span><strong>参考基因组数据库</strong></span>
+                </button>
+                <button class="tab-button app-nav-button" type="button" data-tab-target="database-tab" title="样本数据库" aria-label="样本数据库">
+                  <span class="app-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h6v6H4z M14 4h6v6h-6z M4 14h6v6H4z M14 14h6v6h-6z"/></svg></span>
+                  <span><strong>样本数据库</strong></span>
+                </button>
+                <button class="tab-button app-nav-button" type="button" data-tab-target="modeling-tab" title="模型构建与预测" aria-label="模型构建与预测">
+                  <span class="app-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18l5-6 4 3 7-10 M15 5h5v5"/></svg></span>
+                  <span><strong>模型构建与预测</strong></span>
+                </button>
+                <button class="tab-button app-nav-button" type="button" data-tab-target="project-tab" title="项目管理" aria-label="项目管理">
+                  <span class="app-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h7l2-3h8v16H3z"/></svg></span>
+                  <span><strong>项目管理</strong></span>
+                </button>
+              </div>
+              <div class="app-nav-group" role="group" aria-label="系统">
+                <p class="app-nav-group-title">系统</p>
+                <button class="tab-button app-nav-button" type="button" data-tab-target="server-tab" title="服务器检测" aria-label="服务器检测">
+                  <span class="app-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h18v13H3z M8 21h8 M12 17v4"/></svg></span>
+                  <span><strong>服务器检测</strong></span>
+                </button>
+                <button id="audit-tab-button" class="tab-button app-nav-button hidden" type="button" data-tab-target="audit-tab" title="审计追踪" aria-label="审计追踪">
+                  <span class="app-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z M14 3v5h5 M8 12h8 M8 16h5"/></svg></span>
+                  <span><strong>审计追踪</strong></span>
+                </button>
+                <button id="admin-tab-button" class="tab-button app-nav-button hidden" type="button" data-tab-target="admin-tab" title="后台管理" aria-label="后台管理">
+                  <span class="app-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M10 3h4l1 3 3 1 3 3v4l-3 1-1 3-3 3h-4l-1-3-3-1-3-3v-4l3-1 1-3z"/></svg></span>
+                  <span><strong>后台管理</strong></span>
+                </button>
+                <button id="database-extra-tab-button" class="tab-button app-nav-button hidden" type="button" data-tab-target="database-extra-tab" title="更多视图" aria-label="更多视图">
+                  <span class="app-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h.01 M12 12h.01 M19 12h.01"/></svg></span>
+                  <span><strong>更多视图</strong></span>
+                </button>
+              </div>
             </nav>
+            <span class="sidebar-footnote">病原分析工作台</span>
           </aside>
 
           <main class="workspace">
@@ -124,12 +101,12 @@
         <section id="submission-panel" class="panel submission-panel">
           <div class="panel-head">
             <div>
-              <p class="section-kicker">Task Intake</p>
-              <h2>快速提交分析任务</h2>
+              <p class="submission-breadcrumb">工作台 / 提交任务</p>
+              <h2>新建分析任务</h2>
             </div>
             <div class="submission-actions">
               <details class="action-dropdown">
-                <summary id="demo-button" class="ghost-button" role="button">Demo任务</summary>
+                <summary id="demo-button" class="ui-button ui-button--link" role="button">使用示例任务</summary>
                 <div class="action-dropdown-menu demo-dropdown-menu" role="menu" aria-label="Demo任务选项">
                   <div class="demo-dropdown-head">
                     <div>
@@ -225,38 +202,29 @@
             </div>
           </div>
 
-          <section class="submission-band" aria-label="快速说明">
-            <article id="submission-band-step-1" data-submission-band-step="1">
-              <div class="submission-band-head">
-                <strong>第一步：分析模块</strong>
-                <span class="help-tip" tabindex="0" data-tooltip="先确定本次任务进入哪个分析模块，再继续填写输入、参数与运行节点。">i</span>
-              </div>
+          <section class="submission-band" aria-label="任务提交步骤">
+            <article id="submission-band-step-1" data-submission-band-step="1" aria-label="第1步：分析模块">
+              <span class="submission-step-number" aria-hidden="true">1</span>
+              <strong>分析模块</strong>
             </article>
-            <article id="submission-band-step-2" data-submission-band-step="2">
-              <div class="submission-band-head">
-                <strong>第二步：输入与输出</strong>
-                <span class="help-tip" tabindex="0" data-tooltip="先填写任务名称，并确认输入路径与结果输出目录。">i</span>
-              </div>
+            <article id="submission-band-step-2" data-submission-band-step="2" aria-label="第2步：输入与输出">
+              <span class="submission-step-number" aria-hidden="true">2</span>
+              <strong>输入与输出</strong>
             </article>
-            <article id="submission-band-step-3" data-submission-band-step="3">
-              <div class="submission-band-head">
-                <strong>第三步：核心分析参数</strong>
-                <span class="help-tip" tabindex="0" data-tooltip="确认输入类型、组装方式、物种信息、参考基因组与运行节点。">i</span>
-              </div>
+            <article id="submission-band-step-3" data-submission-band-step="3" aria-label="第3步：核心分析参数">
+              <span class="submission-step-number" aria-hidden="true">3</span>
+              <strong>核心分析参数</strong>
             </article>
-            <article id="submission-band-step-4" data-submission-band-step="4">
-              <div class="submission-band-head">
-                <strong>第四步：高级参数</strong>
-                <span class="help-tip" tabindex="0" data-tooltip="按需调整过滤、抛光、去宿主和 RNA 建库等附加参数。">i</span>
-              </div>
+            <article id="submission-band-step-4" data-submission-band-step="4" aria-label="第4步：高级参数（可选）">
+              <span class="submission-step-number" aria-hidden="true">4</span>
+              <strong>高级参数（可选）</strong>
             </article>
           </section>
 
           <section id="submission-context-bar" class="submission-context-bar is-collapsed" aria-label="当前任务摘要">
             <div class="submission-context-toolbar">
               <div>
-                <p class="section-kicker">Submission Summary</p>
-                <strong>任务摘要与输出预判</strong>
+                <strong>当前任务</strong>
               </div>
             </div>
             <article class="submission-context-card">
@@ -292,95 +260,67 @@
             <input id="pipeline_script_override" type="hidden" value="{{ script_path or '' }}">
             <input id="workstation_key" type="hidden" value="{{ workstation_key or 'bacteria' }}">
             <section id="submission-step-1" class="form-section wide submission-step-panel">
-              <div class="form-section-head">
-                <div>
-                  <p class="section-kicker">Step 1</p>
-                  <div class="info-inline">
-                    <h3>分析模块选择</h3>
-                    <span class="help-tip" tabindex="0" data-tooltip="先确定本次任务走单菌宏基因组分析流程，还是分子溯源流程。">?</span>
-                  </div>
-                </div>
-              </div>
-              <div class="module-choice-shell">
-                <div class="module-choice-lead">
-                  <div>
-                    <div class="submission-band-head">
-                      <strong>选择这次任务真正要进入的分析工作台</strong>
-                      <span class="help-tip" tabindex="0" data-tooltip="这里以后可以继续扩展更多模块，所以每个模块都需要像一个独立工作台，而不是一排临时选项。">i</span>
+              <div class="submission-module-layout">
+                <div class="module-choice-shell">
+                  <div class="module-choice-lead">
+                    <div>
+                      <h3 id="submission-module-heading">选择分析模块</h3>
+                      <p>根据样本类型选择分析流程。</p>
                     </div>
+                    <span class="module-choice-count">模块目录</span>
                   </div>
-                  <span class="module-choice-count">模块目录</span>
+                  <div class="module-choice-grid" role="radiogroup" aria-labelledby="submission-module-heading">
+                    <label class="module-choice-card" id="module-choice-bacteria" data-module-key="bacteria">
+                      <input type="radio" name="analysis_module" value="bacteria" aria-describedby="module-description-bacteria">
+                      <span class="module-choice-content">
+                        <strong>细菌分析</strong>
+                        <span id="module-description-bacteria" class="module-choice-copy">纯培养与目标单菌的组装、鉴定及分型</span>
+                      </span>
+                    </label>
+                    <label class="module-choice-card" id="module-choice-virus" data-module-key="virus">
+                      <input type="radio" name="analysis_module" value="virus" aria-describedby="module-description-virus">
+                      <span class="module-choice-content">
+                        <strong>病毒分析</strong>
+                        <span id="module-description-virus" class="module-choice-copy">参考驱动组装、病毒鉴定与分型</span>
+                      </span>
+                    </label>
+                    <label class="module-choice-card" id="module-choice-metagenome" data-module-key="metagenome">
+                      <input type="radio" name="analysis_module" value="metagenome" aria-describedby="module-description-metagenome">
+                      <span class="module-choice-content">
+                        <strong>宏基因组分析</strong>
+                        <span id="module-description-metagenome" class="module-choice-copy">混合样本的物种识别与宏基因组组装</span>
+                      </span>
+                    </label>
+                    <label class="module-choice-card" id="module-choice-community" data-module-key="community">
+                      <input type="radio" name="analysis_module" value="community" aria-describedby="module-description-community">
+                      <span class="module-choice-content">
+                        <strong>群落分析</strong>
+                        <span id="module-description-community" class="module-choice-copy">多样性、差异分析与共现网络</span>
+                      </span>
+                    </label>
+                    <label class="module-choice-card" id="module-choice-pathosource" data-module-key="pathosource">
+                      <input type="radio" name="analysis_module" value="pathosource" aria-describedby="module-description-pathosource">
+                      <span class="module-choice-content">
+                        <strong>溯源分析</strong>
+                        <span id="module-description-pathosource" class="module-choice-copy">系统发育、距离聚类与菌株关联分析</span>
+                      </span>
+                    </label>
+                  </div>
                 </div>
-                <div class="module-choice-grid">
-                  <label class="module-choice-card" id="module-choice-bacteria" data-module-key="bacteria">
-                    <input type="radio" name="analysis_module" value="bacteria">
-                    <span class="module-choice-topline">
-                      <span class="module-choice-badge">Routine</span>
-                      <span class="module-choice-arrow">进入模块</span>
-                    </span>
-                    <span class="module-choice-titleline">
-                      <strong>细菌分析</strong>
-                      <span class="help-tip" tabindex="0" data-tooltip="适用于纯培养或目标单菌样本，包括组装、物种鉴定、耐药毒力、MLST 与血清型等流程。">i</span>
-                    </span>
-                    <p class="module-choice-copy">纯培养与目标单菌主线分析</p>
-                    <span class="module-choice-foot">适合日常单菌样本主线分析</span>
-                  </label>
-                  <label class="module-choice-card" id="module-choice-virus" data-module-key="virus">
-                    <input type="radio" name="analysis_module" value="virus">
-                    <span class="module-choice-topline">
-                      <span class="module-choice-badge">Virus</span>
-                      <span class="module-choice-arrow">进入模块</span>
-                    </span>
-                    <span class="module-choice-titleline">
-                      <strong>病毒分析</strong>
-                      <span class="help-tip" tabindex="0" data-tooltip="适用于病毒目标分析，强调参考驱动鉴定、病毒分型与更贴合病毒样本的数据解释。">i</span>
-                    </span>
-                    <p class="module-choice-copy">参考驱动鉴定与病毒分型</p>
-                    <span class="module-choice-foot">适合呼吸道、肠道及其他病毒样本分析</span>
-                  </label>
-                  <label class="module-choice-card" id="module-choice-metagenome" data-module-key="metagenome">
-                    <input type="radio" name="analysis_module" value="metagenome">
-                    <span class="module-choice-topline">
-                      <span class="module-choice-badge">Meta</span>
-                      <span class="module-choice-arrow">进入模块</span>
-                    </span>
-                    <span class="module-choice-titleline">
-                      <strong>宏基因组分析</strong>
-                      <span class="help-tip" tabindex="0" data-tooltip="面向混合样本与复杂背景数据，固定走宏基因组识别与组装主线，不再混在单菌流程里。">i</span>
-                    </span>
-                    <p class="module-choice-copy">混合样本与复杂背景识别组装</p>
-                    <span class="module-choice-foot">适合环境样本、混合感染与复杂微生物群分析</span>
-                  </label>
-                  <label class="module-choice-card" id="module-choice-community" data-module-key="community">
-                    <input type="radio" name="analysis_module" value="community">
-                    <span class="module-choice-topline">
-                      <span class="module-choice-badge">Eco</span>
-                      <span class="module-choice-arrow">进入模块</span>
-                    </span>
-                    <span class="module-choice-titleline">
-                      <strong>群落分析</strong>
-                      <span class="help-tip" tabindex="0" data-tooltip="面向多样本群落项目的后续分析，组织 alpha / beta 多样性、Biomarker 以及基于 microeco 的共现网络流程，覆盖 LEfSe、RF 与 Network 判读。">i</span>
-                    </span>
-                    <p class="module-choice-copy">多样性、Biomarker 与共现网络</p>
-                    <span class="module-choice-foot">适合队列、分组比较与多样本群落结构解读</span>
-                  </label>
-                  <label class="module-choice-card" id="module-choice-pathosource" data-module-key="pathosource">
-                    <input type="radio" name="analysis_module" value="pathosource">
-                    <span class="module-choice-topline">
-                      <span class="module-choice-badge">Trace</span>
-                      <span class="module-choice-arrow">进入模块</span>
-                    </span>
-                    <span class="module-choice-titleline">
-                      <strong>溯源分析</strong>
-                      <span class="help-tip" tabindex="0" data-tooltip="接入 PathoSource 流程，适用于系统发育、聚类距离、MLST/cgMLST 和分子溯源判读。">i</span>
-                    </span>
-                    <p class="module-choice-copy">系统发育、距离聚类与暴发关联</p>
-                    <span class="module-choice-foot">适合暴发调查与菌株关联分析</span>
-                  </label>
-                </div>
+                <aside id="submission-module-guide" class="submission-module-guide" aria-label="所选模块流程说明" aria-live="polite" aria-atomic="true">
+                  <h3 data-guide-title>流程说明</h3>
+                  <p data-guide-description></p>
+                  <ol class="submission-guide-steps" data-guide-steps></ol>
+                  <div class="submission-guide-results">
+                    <h4>主要结果</h4>
+                    <ul data-guide-outputs></ul>
+                  </div>
+                  <p class="submission-guide-note">实际步骤以所选运行方案为准。输入文件与参数将在后续步骤设置。</p>
+                </aside>
               </div>
-              <div class="submission-step-actions">
-                <button id="submission-step-1-next" class="primary-button" type="button">继续到第二步</button>
+              <div class="submission-step-actions submission-module-footer">
+                <span>已选择：<strong id="submission-selected-module">未选择</strong></span>
+                <button id="submission-step-1-next" class="ui-button ui-button--primary" type="button">下一步：输入与输出 <span aria-hidden="true">→</span></button>
               </div>
             </section>
 
@@ -3035,6 +2975,6 @@
     <div id="toast" class="toast hidden"></div>
     <script src="{{ url_for('static', filename='csrf.js') }}"></script>
     <script src="{{ url_for('static', filename='vendor_leaflet.js') }}" defer></script>
-    <script type="module" src="{{ url_for('static', filename='app.js') }}?v=20260612-workbench-modules-03"></script>
+    <script type="module" src="{{ url_for('static', filename='app.js') }}?v=20261028-home-01"></script>
   </body>
 </html>

@@ -21,7 +21,7 @@ def test_release_workstation_pages_for_all_modules_are_accessible(release_app_cl
     for module_key in ("bacteria", "virus", "metagenome", "community", "pathosource"):
         response = client.get(f"/workstation?module={module_key}", headers=headers)
         assert response.status_code == 200
-        assert "快速提交分析任务" in response.get_data(as_text=True)
+        assert "新建分析任务" in response.get_data(as_text=True)
 
 
 def test_release_task_submission_accepts_each_analysis_module(release_app_client, release_data) -> None:
